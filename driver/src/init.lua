@@ -12,7 +12,7 @@ local log = require "log"
 local cosock = require "cosock"
 local api = require "bridge_api"
 
-local BUILD = "2026-10-30d"
+local BUILD = "2026-10-30e"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -236,19 +236,28 @@ end
 
 local rescan -- forward declaration
 
+local function maybe_rescan(driver, parent)
+  local st = state[parent.id]
+  if st and not st.scanning and os.time() - (st.last_scan or 0) > 120 then
+    st.scanning, st.last_scan = true, os.time()
+    cosock.spawn(function() rescan(driver); st.scanning = false end, "stbridge-rescan")
+  end
+end
+
 local function poll(driver, parent)
   local ip, port = bridge_addr(parent)
   if not ip then
-    local st = state[parent.id]
-    if st and not st.scanning and os.time() - (st.last_scan or 0) > 120 then
-      st.scanning, st.last_scan = true, os.time()
-      cosock.spawn(function() rescan(driver); st.scanning = false end, "stbridge-rescan")
-    end
+    maybe_rescan(driver, parent)
     return
   end
   local devices, err = api.devices(ip, port)
+  local st = state[parent.id]
+  if st then st.fails = devices and 0 or (st.fails or 0) + 1 end
   if not devices then
     log.warn(string.format("[stbridge] %s: poll failed: %s", parent.label, tostring(err)))
+    -- bridge moved to another pc or got a new IP: look for it again (same bridge id), unless the IP is fixed
+    local fixed = (parent.preferences or {}).ipAddress
+    if (fixed == nil or fixed == "" or fixed == "auto") and st and st.fails >= 2 then maybe_rescan(driver, parent) end
     parent:offline()
     for _, child in pairs(children_by_key(driver, parent)) do child:offline() end
     return

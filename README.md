@@ -31,6 +31,14 @@ Set the Windows network to **Private** and give the pc a fixed IP (DHCP reservat
 
 **Update:** copy the new files over the old ones and run `install.bat` again; `config.json` stays.
 
+**Install or move to another Windows pc over the LAN:**
+
+1. On the target pc, once: right click `prep-remote.bat` > Run as administrator (network to Private, PowerShell remoting on).
+2. On the pc where the bridge runs now: `install-remote.bat`. It asks for the target IP and an administrator login of the target (not stored), installs Python, the bridge and the packages in `C:\StoeckieBridge`, copies `config.json`, opens port 8787, registers a task that starts the bridge at boot as SYSTEM (no logon needed), checks the target over the LAN and then switches the bridge off here. On any error the bridge here starts again.
+3. SmartThings needs nothing: the bridge id moves with `config.json`, so the driver finds the same bridge on the new IP by itself within a few minutes (or Add device > Scan nearby). Give the target a DHCP reservation.
+
+Never run two bridges with the same `config.json`: Electrolux refresh tokens rotate and Škoda allows 20 requests per hour.
+
 ## 1b. Bridge in Docker (Linux, NAS, Raspberry Pi)
 
 ```
