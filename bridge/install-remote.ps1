@@ -37,6 +37,7 @@ function Ask-Yes([string]$q, [bool]$default = $true) {
 }
 
 $winrmWasStopped = $false
+$winrmStartType = $null
 $oldTrusted = $null
 $session = $null
 $localStopped = $false
@@ -58,8 +59,17 @@ try {
     if (-not $cred) { throw "Geen inloggegevens opgegeven." }
 
     # ---- WinRM client on this pc (temporarily trust the target IP)
+    # (the WinRM service is often disabled on laptops: enable it for this run, restore it afterwards)
     $svc = Get-Service WinRM
-    if ($svc.Status -ne "Running") { $winrmWasStopped = $true; Start-Service WinRM }
+    if ($svc.Status -ne "Running") {
+        $winrmWasStopped = $true
+        $winrmStartType = $svc.StartType
+        if ($svc.StartType -eq "Disabled") { Set-Service WinRM -StartupType Manual }
+        try { Start-Service WinRM } catch {
+            $d = Get-CimInstance Win32_Service -Filter "Name='WinRM'"
+            throw "WinRM start niet op deze pc (opstarttype $($d.StartMode), status $($d.State)): $($_.Exception.Message)"
+        }
+    }
     $oldTrusted = (Get-Item WSMan:\localhost\Client\TrustedHosts).Value
     if ($oldTrusted -ne "*" -and (($oldTrusted -split ",") -notcontains $Target)) {
         $new = if ($oldTrusted) { "$oldTrusted,$Target" } else { $Target }
@@ -214,7 +224,10 @@ try {
 } finally {
     if ($session) { Remove-PSSession $session }
     if ($null -ne $oldTrusted) { Set-Item WSMan:\localhost\Client\TrustedHosts -Value $oldTrusted -Force }
-    if ($winrmWasStopped) { Stop-Service WinRM -ErrorAction SilentlyContinue }
+    if ($winrmWasStopped) {
+        Stop-Service WinRM -ErrorAction SilentlyContinue
+        if ($winrmStartType -eq "Disabled") { Set-Service WinRM -StartupType Disabled -ErrorAction SilentlyContinue }
+    }
     Stop-Transcript | Out-Null
     Read-Host "Druk op Enter om te sluiten"
 }
