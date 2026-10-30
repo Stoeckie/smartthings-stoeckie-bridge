@@ -1,0 +1,34 @@
+name: stoeckie-bridge
+components:
+  - id: main
+    capabilities:
+      - id: refresh
+        version: 1
+    categories:
+      - name: Bridges
+preferences:
+  - name: ipAddress
+    title: Bridge IP address
+    description: Leave on "auto" (found by scanning). Fill in the pc's IP only if the scan does not find it.
+    required: false
+    preferenceType: string
+    definition:
+      stringType: text
+      default: "auto"
+  - name: port
+    title: Bridge port
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 1
+      maximum: 65535
+      default: 8787
+  - name: pollInterval
+    title: Poll interval (seconds)
+    description: How often device states are read from the bridge
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 3
+      maximum: 600
+      default: 10

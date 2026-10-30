@@ -1,0 +1,14 @@
+.DS_Store
+__pycache__/
+.pytest_cache/
+*.zip
+st-out/
+out/
+bridge/config.json
+bridge/*.log
+bridge/*.log.*
+bridge/devices.json
+bridge/install-log.txt
+bridge/restart-log.txt
+bridge/check.txt
+bridge/venv/

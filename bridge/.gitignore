@@ -1,0 +1,7 @@
+config.json
+*.log
+*.log.*
+devices.json
+install-log.txt
+venv/
+__pycache__/

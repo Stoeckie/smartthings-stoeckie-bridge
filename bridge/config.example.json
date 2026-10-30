@@ -1,0 +1,15 @@
+{
+  "port": 8787,
+  "electrolux": {
+    "api_key": "PLAK_HIER_JE_API_KEY",
+    "access_token": "PLAK_HIER_JE_ACCESS_TOKEN",
+    "refresh_token": "PLAK_HIER_JE_REFRESH_TOKEN",
+    "poll_seconds": 300
+  },
+  "fglair": {
+    "username": "",
+    "password": "PLAK_HIER_JE_FGLAIR_WACHTWOORD",
+    "region": "eu",
+    "poll_seconds": 60
+  }
+}

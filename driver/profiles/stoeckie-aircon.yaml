@@ -1,0 +1,24 @@
+name: stoeckie-aircon
+components:
+  - id: main
+    capabilities:
+      - id: switch
+        version: 1
+      - id: airConditionerMode
+        version: 1
+      - id: thermostatCoolingSetpoint
+        version: 1
+      - id: temperatureMeasurement
+        version: 1
+      - id: airConditionerFanMode
+        version: 1
+      - id: fanOscillationMode
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: AirConditioner
+  - id: outdoor
+    capabilities:
+      - id: temperatureMeasurement
+        version: 1

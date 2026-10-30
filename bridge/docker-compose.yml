@@ -1,0 +1,24 @@
+# Stoeckie Bridge (AEG / Electrolux, Fujitsu FGLair) in Docker.
+# Host networking: the hub reaches the bridge on the host IP, port 8787, and the setup page works on
+# http://localhost:8787/setup on the host. Without host networking (Docker Desktop, some NAS), use the
+# ports mapping and STBRIDGE_SETUP_ALLOW below instead.
+services:
+  stoeckie-bridge:
+    build: .
+    container_name: stoeckie-bridge
+    restart: unless-stopped
+    network_mode: host
+    # ports: ["8787:8787"]
+    volumes:
+      - ./data:/data
+    environment:
+      TZ: Europe/Amsterdam
+      # Allow the setup page from your LAN (needed without host networking), e.g.:
+      # STBRIDGE_SETUP_ALLOW: "192.168.2.0/24"
+      # Optional instead of the setup page, only read on the first start:
+      # ELECTROLUX_API_KEY: ""
+      # ELECTROLUX_ACCESS_TOKEN: ""
+      # ELECTROLUX_REFRESH_TOKEN: ""
+      # FGLAIR_USERNAME: ""
+      # FGLAIR_PASSWORD: ""
+      # FGLAIR_REGION: "eu"

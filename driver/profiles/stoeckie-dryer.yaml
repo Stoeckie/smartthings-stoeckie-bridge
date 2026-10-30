@@ -1,0 +1,14 @@
+name: stoeckie-dryer
+components:
+  - id: main
+    capabilities:
+      - id: dryerOperatingState
+        version: 1
+      - id: remoteControlStatus
+        version: 1
+      - id: contactSensor
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: Dryer
