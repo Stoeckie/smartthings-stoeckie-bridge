@@ -67,6 +67,7 @@ function NEW_DEVICE(info)
   function d:offline() self.state = "offline" end
   function d:supports_capability() return false end
   function d:get_latest_state() return nil end
+  function d:try_update_metadata(m) self.new_profile = m.profile end
   function d:get_parent_device() for _, p in ipairs(DEVICES) do if p.id == self.parent_device_id then return p end end end
   d.thread = { cancel_timer = function() end, call_with_delay = function() return {} end }
   DEVICES[#DEVICES + 1] = d

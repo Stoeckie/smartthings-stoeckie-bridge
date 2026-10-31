@@ -1,4 +1,4 @@
-name: stoeckie-rain-v2
+name: stoeckie-rain-v3
 components:
   - id: main
     capabilities:
@@ -7,4 +7,4 @@ components:
       - id: refresh
         version: 1
     categories:
-      - name: LeakSensor
+      - name: RainSensor

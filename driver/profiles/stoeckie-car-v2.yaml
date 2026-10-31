@@ -1,4 +1,4 @@
-name: stoeckie-car
+name: stoeckie-car-v2
 components:
   - id: main
     capabilities:
@@ -11,7 +11,7 @@ components:
       - id: refresh
         version: 1
     categories:
-      - name: Others
+      - name: ElectricVehicleCharger
   - id: plug
     label: Charging cable
     capabilities:

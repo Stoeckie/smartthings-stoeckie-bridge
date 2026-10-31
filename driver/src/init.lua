@@ -14,7 +14,7 @@ local log = require "log"
 local cosock = require "cosock"
 local api = require "bridge_api"
 
-local BUILD = "2026-10-31c"
+local BUILD = "2026-11-01a"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -31,8 +31,8 @@ local oscillation = capabilities.fanOscillationMode
 local coolSetpoint = capabilities.thermostatCoolingSetpoint
 
 local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor = "stoeckie-climate",
-                  aircon = "stoeckie-aircon", car = "stoeckie-car",
-                  velux_lock = "stoeckie-velux-lock", rain = "stoeckie-rain-v2" }
+                  aircon = "stoeckie-aircon", car = "stoeckie-car-v2",
+                  velux_lock = "stoeckie-velux-lock", rain = "stoeckie-rain-v3" }
 local MANUFACTURER = { dryer = "AEG", aircon = "Fujitsu", car = "Skoda" }
 
 -- bridge value <-> SmartThings value
@@ -234,6 +234,13 @@ local EMIT = { dryer = emit_dryer, window = emit_window, sensor = emit_sensor, a
 
 -- polling -------------------------------------------------------------------------
 
+-- profile for an existing child, from its key (the bridge type is not stored on the device)
+local function child_profile(key)
+  if key:match("^velux%-rain%-") or key == "demo-rain" then return PROFILE.rain end
+  if key:match("^velux%-") or key == "demo-velux" then return PROFILE.velux_lock end
+  if key:match("^skoda%-") or key == "demo-car" then return PROFILE.car end
+end
+
 local function create_child(driver, parent, d)
   local profile = PROFILE[d.type]
   if not profile then return end
@@ -405,15 +412,11 @@ local function device_init(driver, device)
   if device:supports_capability(dryerOp) then
     device:emit_event(dryerOp.supportedMachineStates({ "run", "pause", "stop" }, { visibility = { displayed = false } }))
   end
-  -- build 2026-10-31a had the rain sensor inside the lock device: move the lock to the profile without it
-  if device:supports_capability(capabilities.lock) and device.profile and device.profile.components
-      and device.profile.components.rain then
-    device:try_update_metadata({ profile = "stoeckie-velux-lock" })
-  end
-  -- rain sensor: profile v2 has the LeakSensor category (water drop icon instead of the generic one)
-  if key:match("^velux%-rain%-") and not device:get_field("rain_v2") then
-    device:try_update_metadata({ profile = "stoeckie-rain-v2" })
-    device:set_field("rain_v2", true, { persist = true })
+  -- profile changed since the device was made (new category/icon, rain moved out of the lock): switch it once
+  local want = child_profile(key)
+  if want and device:get_field("profile") ~= want then
+    device:try_update_metadata({ profile = want })
+    device:set_field("profile", want, { persist = true })
   end
   log.debug("[stbridge] init child " .. key)
 end
