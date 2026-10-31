@@ -19,14 +19,14 @@ Electrolux / FGLair / Škoda / iRobot / VELUX cloud <-- bridge (Windows pc or Do
 ```
 
 * `bridge/`: small Python service for a pc that is always on: Windows (installer) or any Docker host (Linux, NAS, Raspberry Pi)
-* `driver/`: SmartThings Edge driver **Stoeckie Bridge (local)** that finds the bridge and creates the devices
+* `driver/`: SmartThings Edge driver **Stoeckie Bridge (local)** that finds the bridge and creates the devices (it also finds the bridge again when it moves to another IP)
 
 ## 1. Bridge on Windows
 
 1. Download this repository (Code → Download ZIP) and copy the `bridge` folder to the pc, e.g. `C:\StoeckieBridge`.
 2. Double-click `install.bat`. It installs Python if needed (winget), the packages, a firewall rule for port 8787 (Windows asks once) and a scheduled task that starts the bridge at logon and restarts it on failure. Then the setup page opens.
 3. Fill in the sections you need on the setup page (`setup.bat` or http://localhost:8787/setup, only reachable on the pc itself). See the brand pages for where to get each key.
-4. `check.bat` tests the AEG and FGLair logins. `restart.bat` restarts the bridge. Log: `bridge.log`.
+4. `check.bat` tests the AEG and FGLair logins. `restart.bat` restarts the bridge, `stop.bat` stops it and switches its autostart off. Log: `bridge.log`.
 
 Set the Windows network to **Private** and give the pc a fixed IP (DHCP reservation), otherwise the hub can not reach the bridge.
 
@@ -37,6 +37,7 @@ Set the Windows network to **Private** and give the pc a fixed IP (DHCP reservat
 1. On the target pc, once: right click `prep-remote.bat` > Run as administrator (network to Private, PowerShell remoting on).
 2. On the pc where the bridge runs now: `install-remote.bat`. It asks for the target IP and an administrator login of the target (not stored), installs Python, the bridge and the packages in `C:\StoeckieBridge`, copies `config.json`, opens port 8787, registers a task that starts the bridge at boot as SYSTEM (no logon needed), checks the target over the LAN and then switches the bridge off here. On any error the bridge here starts again.
 3. SmartThings needs nothing: the bridge id moves with `config.json`, so the driver finds the same bridge on the new IP by itself within a few minutes (or Add device > Scan nearby). Give the target a DHCP reservation.
+4. **Update later:** put the new files in the bridge folder here and run `install-remote.bat` again; answer **n** when it asks to overwrite `config.json` on the target (the target has the current tokens). On the target the bridge runs as SYSTEM, so `restart.bat` there needs "Run as administrator".
 
 Never run two bridges with the same `config.json`: Electrolux refresh tokens rotate and Škoda allows 20 requests per hour.
 
@@ -86,7 +87,7 @@ pip install -r bridge/requirements.txt pytest lupa
 python -m pytest bridge/tests driver/tests
 ```
 
-Tests run without real accounts: a fake Ayla cloud (FGLair), a fake Škoda API, a fake iRobot account, and the Edge driver (`driver/src/init.lua`) with a mocked SmartThings runtime against the bridge in `--demo` mode.
+Tests run without real accounts: a fake Ayla cloud (FGLair), a fake Škoda API, a fake iRobot account, a fake VELUX cloud and gateway pairing port, and the Edge driver (`driver/src/init.lua`) with a mocked SmartThings runtime against the bridge in `--demo` mode.
 
 ## License
 
