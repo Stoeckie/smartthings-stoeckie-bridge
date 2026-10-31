@@ -7,7 +7,7 @@ One small bridge brings cloud-only appliances into SmartThings:
 | **AEG / Electrolux** dryer (official Electrolux Group Developer API) | state, job, remaining time, door, finished; start, pause, stop | [smartthings-aeg-bridge](https://github.com/Stoeckie/smartthings-aeg-bridge) |
 | **Fujitsu FGLair** air conditioners | on/off, mode, setpoint, fan, swing, room and outdoor temperature | [smartthings-fujitsu-fglair](https://github.com/Stoeckie/smartthings-fujitsu-fglair) |
 | **Škoda** cars (official MyŠkoda public API) | battery, charging on/off and power, charging cable, climate, at home, doors | [smartthings-skoda-bridge](https://github.com/Stoeckie/smartthings-skoda-bridge) |
-| **VELUX ACTIVE** departure mode (optional) | lock and unlock (departure mode: all windows and blinds blocked), rain | windows: [VELUX ACTIVE (HomeKit local)](https://github.com/Stoeckie/smartthings-velux-active-local) |
+| **VELUX ACTIVE** departure mode (optional) | lock and unlock (departure mode: all windows and blinds blocked); rain sensor as its own device | windows: [VELUX ACTIVE (HomeKit local)](https://github.com/Stoeckie/smartthings-velux-active-local) |
 | **iRobot** favorites (optional) | favorite names and rooms for the [iRobot Roomba (local)](https://github.com/Stoeckie/smartthings-irobot-roomba-local) driver | |
 
 **This repository is the only place with the code.** The brand pages above explain one brand each and point here. Use only what you need: a source you do not set up is skipped.
@@ -64,7 +64,7 @@ The windows and blinds run locally on the hub with the [VELUX ACTIVE (HomeKit lo
 1. Setup page, section VELUX: e-mail and password of the VELUX ACTIVE app. Locking works right away.
 2. Unlocking must be signed with a key from the gateway. Once: fill in the gateway IP, click **Gateway koppelen**, wait until the gateway light flashes and press the gateway button within 3 minutes. The key stays in `config.json`.
 
-The **Rain** component shows the gateway's rain sensor.
+The gateway's rain sensor becomes its own device, **VELUX regensensor** (water sensor: wet = raining).
 
 ## Security and privacy
 

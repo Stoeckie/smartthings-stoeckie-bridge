@@ -6,14 +6,15 @@
 --   sensor (VELUX climate sensor)     -> temperature, humidity, CO2
 --   aircon (Fujitsu via FGLair)       -> switch, airConditionerMode, setpoint, fan, swing, indoor/outdoor temp
 --   car    (Škoda public API)         -> battery, charging switch + power, at home, plug, climate, doors
---   velux_lock (VELUX departure mode) -> lock (locked = away: all windows and blinds blocked), rain
+--   velux_lock (VELUX departure mode) -> lock (locked = away: all windows and blinds blocked)
+--   rain   (VELUX gateway rain sensor) -> waterSensor (wet = raining)
 local Driver = require "st.driver"
 local capabilities = require "st.capabilities"
 local log = require "log"
 local cosock = require "cosock"
 local api = require "bridge_api"
 
-local BUILD = "2026-10-31a"
+local BUILD = "2026-10-31b"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -31,7 +32,7 @@ local coolSetpoint = capabilities.thermostatCoolingSetpoint
 
 local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor = "stoeckie-climate",
                   aircon = "stoeckie-aircon", car = "stoeckie-car",
-                  velux_lock = "stoeckie-velux-lock" }
+                  velux_lock = "stoeckie-velux-lock", rain = "stoeckie-rain" }
 local MANUFACTURER = { dryer = "AEG", aircon = "Fujitsu", car = "Skoda" }
 
 -- bridge value <-> SmartThings value
@@ -220,13 +221,16 @@ local function emit_velux_lock(dev, s)
   if s.locked ~= nil then
     try_emit(dev, function() return s.locked and capabilities.lock.lock.locked() or capabilities.lock.lock.unlocked() end)
   end
+end
+
+local function emit_rain(dev, s)
   if s.raining ~= nil then
-    comp_emit(dev, "rain", function() return s.raining and capabilities.waterSensor.water.wet() or capabilities.waterSensor.water.dry() end)
+    try_emit(dev, function() return s.raining and capabilities.waterSensor.water.wet() or capabilities.waterSensor.water.dry() end)
   end
 end
 
 local EMIT = { dryer = emit_dryer, window = emit_window, sensor = emit_sensor, aircon = emit_aircon, car = emit_car,
-               velux_lock = emit_velux_lock }
+               velux_lock = emit_velux_lock, rain = emit_rain }
 
 -- polling -------------------------------------------------------------------------
 
@@ -400,6 +404,11 @@ local function device_init(driver, device)
   end
   if device:supports_capability(dryerOp) then
     device:emit_event(dryerOp.supportedMachineStates({ "run", "pause", "stop" }, { visibility = { displayed = false } }))
+  end
+  -- build 2026-10-31a had the rain sensor inside the lock device: move the lock to the profile without it
+  if device:supports_capability(capabilities.lock) and device.profile and device.profile.components
+      and device.profile.components.rain then
+    device:try_update_metadata({ profile = "stoeckie-velux-lock" })
   end
   log.debug("[stbridge] init child " .. key)
 end

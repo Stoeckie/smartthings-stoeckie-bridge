@@ -176,6 +176,7 @@ def test_source_lock_unlock(monkeypatch):
         assert calls[0] == ("token", "password", sb.VELUX_CLIENT["client_id"])
         assert ("homesdata", "Bearer at1") in calls
         assert sb.load_config()["velux"]["tokens"]["refresh_token"] == "rt1"  # kept for the next start
+        assert sb.REG.devices["velux-rain-70:ee:50:00:00:01"]["state"] == {"raining": False}
 
         h = sb.REG.handlers[dev_id]
         try:

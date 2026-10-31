@@ -23,6 +23,7 @@ LAN API (default port 8787, no auth, LAN only)
                | swing (off vertical horizontal both) | refresh
       car:     on | off (charging) | climate_on | climate_off | limit (percent) | refresh
       velux_lock: lock | unlock | refresh
+      rain:    refresh (VELUX gateway rain sensor)
   GET  /stbridge/irobot/<blid>[?refresh=1] -> {"name", "favorites": [{name, id, command, params}], "updated"}
 
 Usage
@@ -51,7 +52,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-10-31a"
+VERSION = "2026-10-31b"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -928,17 +929,26 @@ class VeluxCloud:
             REG.set_online("velux-", False)
             raise RuntimeError("gateway not in homestatus (offline?)")
         cfg = load_config().get("velux") or {}
-        state = {"locked": bool(gw.get("locked")), "locking": bool(gw.get("locking")),
-                 "raining": bool(gw.get("is_raining")), "busy": bool(gw.get("busy")),
+        state = {"locked": bool(gw.get("locked")), "locking": bool(gw.get("locking")), "busy": bool(gw.get("busy")),
                  "canUnlock": bool(cfg.get("hash_sign_key") and cfg.get("sign_key_id")),
                  "pairing": VELUX_PAIR["state"]}
         REG.upsert("velux-" + self.home["gateway"], "velux_lock", "VELUX vertrekstand", state, True, self._command())
-        log.debug("[velux] locked %s, raining %s", state["locked"], state["raining"])
+        if "is_raining" in gw:  # the gateway's rain sensor as its own device
+            REG.upsert("velux-rain-" + self.home["gateway"], "rain", "VELUX regensensor",
+                       {"raining": bool(gw.get("is_raining"))}, True, self._refresh_only())
+        log.debug("[velux] locked %s, raining %s", state["locked"], gw.get("is_raining"))
 
     async def _scenario(self, modules: list[dict]) -> None:
         payload = {"app_type": "app_velux", "app_version": VELUX_APP_VERSION,
                    "home": {"id": self.home["id"], "timezone": self.home["timezone"], "modules": modules}}
         await self._post(VELUX_SYNC + "setstate", body=payload)
+
+    def _refresh_only(self):
+        async def handler(cmd: str, value: Any) -> None:
+            if cmd != "refresh":
+                raise ValueError(f"unsupported command {cmd}")
+            self.wake.set()
+        return handler
 
     def _command(self):
         async def handler(cmd: str, value: Any) -> None:
@@ -1357,7 +1367,8 @@ async def demo_devices() -> None:
         REG.upsert("demo-car", "car", "Demo auto", car, True, demo_car)
 
     await demo_car("refresh", None)
-    velux = {"locked": True, "raining": False, "canUnlock": True}
+    velux = {"locked": True, "canUnlock": True}
+    REG.upsert("demo-rain", "rain", "Demo regensensor", {"raining": False}, True, dry)
 
     async def demo_velux(cmd, value):
         if cmd in ("lock", "unlock"):

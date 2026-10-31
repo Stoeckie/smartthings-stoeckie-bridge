@@ -8,8 +8,3 @@ components:
         version: 1
     categories:
       - name: SmartLock
-  - id: rain
-    label: Rain
-    capabilities:
-      - id: waterSensor
-        version: 1

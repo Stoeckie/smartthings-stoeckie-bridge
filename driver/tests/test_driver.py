@@ -241,7 +241,10 @@ def test_velux_lock_flow(bridge):
     lock = lua.eval("LOCK")
     assert lock is not None
     paths = [f"{lock.events[i].comp}:{lock.events[i].path}" for i in range(1, len(lock.events) + 1)]
-    assert "main:cap.lock.lock.locked" in paths and "rain:cap.waterSensor.water.dry" in paths
+    assert "main:cap.lock.lock.locked" in paths
+    lua.execute('for _, d in ipairs(DEVICES) do if d.parent_assigned_child_key == "demo-rain" then RAIN = d end end')
+    rain = lua.eval("RAIN")
+    assert rain is not None and rain.events[1].path == "cap.waterSensor.water.dry"
 
     def state():
         with urllib.request.urlopen(f"http://127.0.0.1:{bridge}/stbridge/devices") as r:
