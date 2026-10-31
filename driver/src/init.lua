@@ -14,7 +14,7 @@ local log = require "log"
 local cosock = require "cosock"
 local api = require "bridge_api"
 
-local BUILD = "2026-10-31b"
+local BUILD = "2026-10-31c"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -32,7 +32,7 @@ local coolSetpoint = capabilities.thermostatCoolingSetpoint
 
 local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor = "stoeckie-climate",
                   aircon = "stoeckie-aircon", car = "stoeckie-car",
-                  velux_lock = "stoeckie-velux-lock", rain = "stoeckie-rain" }
+                  velux_lock = "stoeckie-velux-lock", rain = "stoeckie-rain-v2" }
 local MANUFACTURER = { dryer = "AEG", aircon = "Fujitsu", car = "Skoda" }
 
 -- bridge value <-> SmartThings value
@@ -409,6 +409,11 @@ local function device_init(driver, device)
   if device:supports_capability(capabilities.lock) and device.profile and device.profile.components
       and device.profile.components.rain then
     device:try_update_metadata({ profile = "stoeckie-velux-lock" })
+  end
+  -- rain sensor: profile v2 has the LeakSensor category (water drop icon instead of the generic one)
+  if key:match("^velux%-rain%-") and not device:get_field("rain_v2") then
+    device:try_update_metadata({ profile = "stoeckie-rain-v2" })
+    device:set_field("rain_v2", true, { persist = true })
   end
   log.debug("[stbridge] init child " .. key)
 end
