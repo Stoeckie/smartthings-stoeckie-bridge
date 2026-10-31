@@ -8,6 +8,7 @@
 #  - stops the bridge here and copies config.json (keys + bridge id, so SmartThings keeps the same devices)
 #  - firewall rule 8787, scheduled task at startup as SYSTEM (runs without anyone logged on), starts it
 #  - checks from here that the target answers on port 8787; then disables the bridge here (or restarts it on failure)
+#  - copies the target's config.json back here, so the copy here stays a current backup
 param([string]$Target)
 $ErrorActionPreference = "Stop"
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -211,6 +212,14 @@ try {
     if ($localStopped -and $localTask) {
         Disable-ScheduledTask -TaskName $taskName | Out-Null
         Write-Host "Bridge op deze pc uitgezet (taak uitgeschakeld). De map hier kun je later weggooien."
+    }
+    # keep the copy here up to date (backup with the current tokens and keys from the target); never run both
+    try {
+        Copy-Item -FromSession $session -Path "$remoteDir\config.json" -Destination "$dir\config.json.new" -Force
+        Move-Item "$dir\config.json.new" "$dir\config.json" -Force
+        Write-Host "config.json van $Target gekopieerd naar deze pc (backup; de bridge hier blijft uit)."
+    } catch {
+        Write-Host "config.json terughalen lukte niet: $($_.Exception.Message)"
     }
     if ($allow) { Write-Host "Setup pagina: http://${Target}:8787/setup" }
     Write-Host "Geef $Target een vaste DHCP reservering in UniFi."
