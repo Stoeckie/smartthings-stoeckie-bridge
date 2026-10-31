@@ -14,7 +14,7 @@ local log = require "log"
 local cosock = require "cosock"
 local api = require "bridge_api"
 
-local BUILD = "2026-11-01a"
+local BUILD = "2026-11-01b"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -188,9 +188,24 @@ local function comp_emit(dev, id, make)
   if not ok then log.warn("[stbridge] " .. dev.label .. " " .. id .. ": " .. tostring(err)) end
 end
 
+-- battery history: SmartThings draws no graph for battery %, so optionally repeat it as a reading that has one
+local CAR_GRAPH = { off = "", humidity = "-hum", power = "-pow" }
+
+local function graph_mode(dev)
+  local m = (dev.preferences or {}).batteryGraph
+  return CAR_GRAPH[m or ""] and m or "off"
+end
+
 local function emit_car(dev, s)
   if tonumber(s.battery) then
-    try_emit(dev, function() return capabilities.battery.battery(math.max(0, math.min(100, math.floor(tonumber(s.battery) + 0.5)))) end)
+    local soc = math.max(0, math.min(100, math.floor(tonumber(s.battery) + 0.5)))
+    try_emit(dev, function() return capabilities.battery.battery(soc) end)
+    local mode = graph_mode(dev)
+    if mode == "humidity" then
+      try_emit(dev, function() return capabilities.relativeHumidityMeasurement.humidity(soc) end)
+    elseif mode == "power" then
+      comp_emit(dev, "graph", function() return capabilities.powerMeter.power({ value = soc, unit = "W" }) end)
+    end
   end
   local charging = tostring(s.charging or ""):upper()
   if charging ~= "" then
@@ -235,10 +250,19 @@ local EMIT = { dryer = emit_dryer, window = emit_window, sensor = emit_sensor, a
 -- polling -------------------------------------------------------------------------
 
 -- profile for an existing child, from its key (the bridge type is not stored on the device)
-local function child_profile(key)
+local function child_profile(key, device)
   if key:match("^velux%-rain%-") or key == "demo-rain" then return PROFILE.rain end
   if key:match("^velux%-") or key == "demo-velux" then return PROFILE.velux_lock end
-  if key:match("^skoda%-") or key == "demo-car" then return PROFILE.car end
+  if key:match("^skoda%-") or key == "demo-car" then return PROFILE.car .. CAR_GRAPH[graph_mode(device)] end
+end
+
+local function sync_profile(device)
+  local want = child_profile(device.parent_assigned_child_key or "", device)
+  if want and device:get_field("profile") ~= want then
+    device:try_update_metadata({ profile = want })
+    device:set_field("profile", want, { persist = true })
+    log.info("[stbridge] " .. device.label .. ": profile " .. want)
+  end
 end
 
 local function create_child(driver, parent, d)
@@ -412,12 +436,8 @@ local function device_init(driver, device)
   if device:supports_capability(dryerOp) then
     device:emit_event(dryerOp.supportedMachineStates({ "run", "pause", "stop" }, { visibility = { displayed = false } }))
   end
-  -- profile changed since the device was made (new category/icon, rain moved out of the lock): switch it once
-  local want = child_profile(key)
-  if want and device:get_field("profile") ~= want then
-    device:try_update_metadata({ profile = want })
-    device:set_field("profile", want, { persist = true })
-  end
+  -- profile changed since the device was made (new category/icon, battery graph option): switch it once
+  sync_profile(device)
   log.debug("[stbridge] init child " .. key)
 end
 
@@ -437,6 +457,7 @@ local function info_changed(driver, device, event, args)
     schedule_poll(driver, device)
     return
   end
+  sync_profile(device) -- battery graph option changed: other profile
   -- car settings: pass them to the bridge
   local old = args and args.old_st_store and args.old_st_store.preferences or {}
   local p = device.preferences or {}

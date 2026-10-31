@@ -33,7 +33,7 @@ local caps = capmock("cap")
 for _, id in ipairs({ "windowShade", "windowShadeLevel", "refresh", "dryerOperatingState", "switch", "battery",
                       "powerMeter", "presenceSensor", "contactSensor",
                       "airConditionerMode", "airConditionerFanMode", "fanOscillationMode",
-                      "thermostatCoolingSetpoint", "lock", "waterSensor" }) do caps[id].ID = id end
+                      "thermostatCoolingSetpoint", "lock", "waterSensor", "relativeHumidityMeasurement" }) do caps[id].ID = id end
 package.loaded["st.capabilities"] = caps
 package.loaded["st.driver"] = function(name, tmpl) DRIVER = tmpl; return { run = function() end } end
 package.loaded["log"] = { info = function(m) print("I " .. m) end, warn = function(m) print("W " .. m) end,
@@ -58,7 +58,7 @@ function NEW_DEVICE(info)
               events = {}, state = "online",
               profile = { components = { main = { id = "main" }, outdoor = { id = "outdoor" }, plug = { id = "plug" },
                                          climate = { id = "climate" }, status = { id = "status" },
-                                         rain = { id = "rain" } } } }
+                                         rain = { id = "rain" }, graph = { id = "graph" } } } }
   function d:get_field(k) return self.fields[k] end
   function d:set_field(k, v) self.fields[k] = v end
   function d:emit_event(e) self.events[#self.events + 1] = { comp = "main", path = e.path, arg = e.arg } end
@@ -255,3 +255,36 @@ def test_velux_lock_flow(bridge):
     assert state()["locked"] is False
     lua.execute('DRIVER.capability_handlers.lock.lock(DRIVER_OBJ, LOCK, {})')
     assert state()["locked"] is True
+
+
+def test_car_battery_graph(bridge):
+    lua = lua53.LuaRuntime(unpack_returned_tuples=True)
+    lua.execute(f'package.path = "{SRC}/?.lua;{HERE}/?.lua;" .. package.path')
+    lua.globals().py_http = py_http
+    lua.execute(HARNESS)
+    lua.execute(f'dofile("{SRC}/init.lua")')
+    lua.execute(f'''
+      PARENT = NEW_DEVICE({{ id = "p1", label = "Bridge", device_network_id = "stbridge-test1",
+                            preferences = {{ ipAddress = "127.0.0.1", port = "{bridge}" }} }})
+      DRIVER.lifecycle_handlers.init(DRIVER_OBJ, PARENT)
+      DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
+      for _, d in ipairs(DEVICES) do if d.parent_assigned_child_key == "demo-car" then CAR = d end end
+      CAR.preferences = {{ batteryGraph = "humidity" }}
+      DRIVER.lifecycle_handlers.infoChanged(DRIVER_OBJ, CAR, "infoChanged", {{ old_st_store = {{ preferences = {{}} }} }})
+      CAR.events = {{}}
+      DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
+    ''')
+    car = lua.eval("CAR")
+    assert car.new_profile == "stoeckie-car-v2-hum"
+    ev = {f"{car.events[i].comp}:{car.events[i].path}": car.events[i].arg for i in range(1, len(car.events) + 1)}
+    assert ev["main:cap.relativeHumidityMeasurement.humidity"] == 64
+    lua.execute('''
+      CAR.preferences = { batteryGraph = "power" }
+      DRIVER.lifecycle_handlers.infoChanged(DRIVER_OBJ, CAR, "infoChanged", { old_st_store = { preferences = {} } })
+      CAR.events = {}
+      DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
+    ''')
+    car = lua.eval("CAR")
+    assert car.new_profile == "stoeckie-car-v2-pow"
+    ev = {f"{car.events[i].comp}:{car.events[i].path}": car.events[i].arg for i in range(1, len(car.events) + 1)}
+    assert ev["graph:cap.powerMeter.power"]["value"] == 64

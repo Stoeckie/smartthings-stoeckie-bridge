@@ -58,6 +58,16 @@ docker compose up -d --build
 1. Enroll your hub in the channel: https://bestow-regional.api.smartthings.com/invite/qWjBdybRNG2y (Stoeckie Edge Drivers) and install **Stoeckie Bridge (local)**.
 2. SmartThings app: **Add device → Scan nearby**. The driver scans the hub's subnet on port 8787 and creates a "Stoeckie Bridge" device; your appliances and cars appear at the next poll.
 
+## Battery history graph (car)
+
+SmartThings draws no graph for battery %. The car's setting **Battery history graph** repeats the battery level as a reading that does get a graph:
+
+* **Humidity (%)**: on the car itself, same number in %. The car then also counts as a humidity sensor (routines, voice assistants).
+* **Power (W)**: in an extra part **Battery %**, 1 % = 1 W. Can show up in energy overviews.
+* **Off** (default).
+
+The driver switches the device to the matching profile by itself.
+
 ## VELUX ACTIVE departure mode
 
 The windows and blinds run locally on the hub with the [VELUX ACTIVE (HomeKit local)](https://github.com/Stoeckie/smartthings-velux-active-local) driver. The departure mode (the departure switch, or "away" in the VELUX app) blocks all of them and only exists in the VELUX cloud, so the bridge adds a **lock** device for it:

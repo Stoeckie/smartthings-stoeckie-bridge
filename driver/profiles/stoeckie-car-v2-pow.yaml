@@ -1,0 +1,66 @@
+name: stoeckie-car-v2-pow
+components:
+  - id: main
+    capabilities:
+      - id: battery
+        version: 1
+      - id: switch
+        version: 1
+      - id: powerMeter
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: ElectricVehicleCharger
+  - id: plug
+    label: Charging cable
+    capabilities:
+      - id: contactSensor
+        version: 1
+  - id: climate
+    label: Climate
+    capabilities:
+      - id: switch
+        version: 1
+  - id: status
+    label: Car
+    capabilities:
+      - id: presenceSensor
+        version: 1
+      - id: contactSensor
+        version: 1
+  - id: graph
+    label: Battery %
+    capabilities:
+      - id: powerMeter
+        version: 1
+preferences:
+  - name: pollMinutes
+    title: Update every (minutes)
+    description: How often the bridge reads the car. Škoda allows 20 requests per hour, keep room for commands. 5 to 60.
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 5
+      maximum: 60
+      default: 10
+  - name: climateTemp
+    title: Climate temperature (°C)
+    description: Target temperature when you switch Climate on. 16 to 29.
+    required: false
+    preferenceType: number
+    definition:
+      minimum: 16
+      maximum: 29
+      default: 21
+  - name: batteryGraph
+    title: Battery history graph
+    description: "SmartThings draws no graph for battery %. Humidity: battery % also as a humidity reading on this device (graph in %, the car then also counts as a humidity sensor). Power: battery % as watts in an extra part Battery % (1 % = 1 W)."
+    required: false
+    preferenceType: enumeration
+    definition:
+      options:
+        "off": "Off"
+        humidity: "Humidity (%)"
+        power: "Power (W)"
+      default: "off"
