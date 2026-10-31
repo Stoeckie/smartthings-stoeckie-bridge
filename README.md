@@ -7,6 +7,7 @@ One small bridge brings cloud-only appliances into SmartThings:
 | **AEG / Electrolux** dryer (official Electrolux Group Developer API) | state, job, remaining time, door, finished; start, pause, stop | [smartthings-aeg-bridge](https://github.com/Stoeckie/smartthings-aeg-bridge) |
 | **Fujitsu FGLair** air conditioners | on/off, mode, setpoint, fan, swing, room and outdoor temperature | [smartthings-fujitsu-fglair](https://github.com/Stoeckie/smartthings-fujitsu-fglair) |
 | **Škoda** cars (official MyŠkoda public API) | battery, charging on/off and power, charging cable, climate, at home, doors | [smartthings-skoda-bridge](https://github.com/Stoeckie/smartthings-skoda-bridge) |
+| **VELUX ACTIVE** departure mode (optional) | lock and unlock (departure mode: all windows and blinds blocked), rain | windows: [VELUX ACTIVE (HomeKit local)](https://github.com/Stoeckie/smartthings-velux-active-local) |
 | **iRobot** favorites (optional) | favorite names and rooms for the [iRobot Roomba (local)](https://github.com/Stoeckie/smartthings-irobot-roomba-local) driver | |
 
 **This repository is the only place with the code.** The brand pages above explain one brand each and point here. Use only what you need: a source you do not set up is skipped.
@@ -14,7 +15,7 @@ One small bridge brings cloud-only appliances into SmartThings:
 SmartThings Edge drivers can not reach the internet, so there are two parts:
 
 ```
-Electrolux / FGLair / Škoda / iRobot cloud <-- bridge (Windows pc or Docker, port 8787) <--LAN-- Edge driver on the hub
+Electrolux / FGLair / Škoda / iRobot / VELUX cloud <-- bridge (Windows pc or Docker, port 8787) <--LAN-- Edge driver on the hub
 ```
 
 * `bridge/`: small Python service for a pc that is always on: Windows (installer) or any Docker host (Linux, NAS, Raspberry Pi)
@@ -56,6 +57,15 @@ docker compose up -d --build
 1. Enroll your hub in the channel: https://bestow-regional.api.smartthings.com/invite/qWjBdybRNG2y (Stoeckie Edge Drivers) and install **Stoeckie Bridge (local)**.
 2. SmartThings app: **Add device → Scan nearby**. The driver scans the hub's subnet on port 8787 and creates a "Stoeckie Bridge" device; your appliances and cars appear at the next poll.
 
+## VELUX ACTIVE departure mode
+
+The windows and blinds run locally on the hub with the [VELUX ACTIVE (HomeKit local)](https://github.com/Stoeckie/smartthings-velux-active-local) driver. The departure mode (the departure switch, or "away" in the VELUX app) blocks all of them and only exists in the VELUX cloud, so the bridge adds a **lock** device for it:
+
+1. Setup page, section VELUX: e-mail and password of the VELUX ACTIVE app. Locking works right away.
+2. Unlocking must be signed with a key from the gateway. Once: fill in the gateway IP, click **Gateway koppelen**, wait until the gateway light flashes and press the gateway button within 3 minutes. The key stays in `config.json`.
+
+The **Rain** component shows the gateway's rain sensor.
+
 ## Security and privacy
 
 * Credentials only live in `config.json` on the bridge pc (in `.gitignore`), never in the code or the driver.
@@ -66,6 +76,7 @@ docker compose up -d --build
 
 * FGLair uses [ayla-iot-unofficial](https://pypi.org/project/ayla-iot-unofficial/) (the library of the Home Assistant FGLair integration).
 * iRobot favorites use [roombapy-prime](https://github.com/johnnyh1975/roombapy-prime); iRobot limits logins per account.
+* VELUX departure mode uses the VELUX ACTIVE app login, as documented by [ha-velux-active](https://github.com/Niek/ha-velux-active) (MIT).
 * Electrolux and Škoda use the manufacturers' official APIs.
 
 ## Development
@@ -79,4 +90,4 @@ Tests run without real accounts: a fake Ayla cloud (FGLair), a fake Škoda API, 
 
 ## License
 
-Apache 2.0, see LICENSE. Not affiliated with AB Electrolux, AEG, Fujitsu General, Ayla Networks, Škoda Auto, iRobot or Samsung SmartThings.
+Apache 2.0, see LICENSE. Not affiliated with AB Electrolux, AEG, Fujitsu General, Ayla Networks, Škoda Auto, iRobot, VELUX, Netatmo or Samsung SmartThings.

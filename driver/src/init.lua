@@ -6,13 +6,14 @@
 --   sensor (VELUX climate sensor)     -> temperature, humidity, CO2
 --   aircon (Fujitsu via FGLair)       -> switch, airConditionerMode, setpoint, fan, swing, indoor/outdoor temp
 --   car    (Škoda public API)         -> battery, charging switch + power, at home, plug, climate, doors
+--   velux_lock (VELUX departure mode) -> lock (locked = away: all windows and blinds blocked), rain
 local Driver = require "st.driver"
 local capabilities = require "st.capabilities"
 local log = require "log"
 local cosock = require "cosock"
 local api = require "bridge_api"
 
-local BUILD = "2026-10-30e"
+local BUILD = "2026-10-31a"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -29,7 +30,8 @@ local oscillation = capabilities.fanOscillationMode
 local coolSetpoint = capabilities.thermostatCoolingSetpoint
 
 local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor = "stoeckie-climate",
-                  aircon = "stoeckie-aircon", car = "stoeckie-car" }
+                  aircon = "stoeckie-aircon", car = "stoeckie-car",
+                  velux_lock = "stoeckie-velux-lock" }
 local MANUFACTURER = { dryer = "AEG", aircon = "Fujitsu", car = "Skoda" }
 
 -- bridge value <-> SmartThings value
@@ -214,7 +216,17 @@ local function emit_car(dev, s)
   end
 end
 
-local EMIT = { dryer = emit_dryer, window = emit_window, sensor = emit_sensor, aircon = emit_aircon, car = emit_car }
+local function emit_velux_lock(dev, s)
+  if s.locked ~= nil then
+    try_emit(dev, function() return s.locked and capabilities.lock.lock.locked() or capabilities.lock.lock.unlocked() end)
+  end
+  if s.raining ~= nil then
+    comp_emit(dev, "rain", function() return s.raining and capabilities.waterSensor.water.wet() or capabilities.waterSensor.water.dry() end)
+  end
+end
+
+local EMIT = { dryer = emit_dryer, window = emit_window, sensor = emit_sensor, aircon = emit_aircon, car = emit_car,
+               velux_lock = emit_velux_lock }
 
 -- polling -------------------------------------------------------------------------
 
@@ -312,9 +324,10 @@ local function send(driver, child, cmd, value)
   local res, err = api.command(ip, port, child.parent_assigned_child_key, cmd, value)
   if not res then
     log.error(string.format("[stbridge] %s %s failed: %s", child.label, cmd, tostring(err)))
-    return
+    return false
   end
   speed_up(driver, parent)
+  return true
 end
 
 local function handle_refresh(driver, device)
@@ -350,6 +363,16 @@ end
 local function handle_switch_off(driver, device, cmd)
   send(driver, device, (cmd and cmd.component == "climate") and "climate_off" or "off")
 end
+-- a refused lock command (e.g. unlock without the gateway key): show the real state again instead of a spinner
+local function lock_cmd(driver, device, cmd)
+  if send(driver, device, cmd) then return end
+  local cur = device:get_latest_state("main", capabilities.lock.ID, capabilities.lock.lock.NAME)
+  try_emit(device, function()
+    return cur == "unlocked" and capabilities.lock.lock.unlocked() or capabilities.lock.lock.locked()
+  end)
+end
+local function handle_lock(driver, device) lock_cmd(driver, device, "lock") end
+local function handle_unlock(driver, device) lock_cmd(driver, device, "unlock") end
 local function handle_ac_mode(driver, device, cmd)
   local m = AC_MODE_FROM_ST[cmd.args.mode or ""]
   if m then send(driver, device, "mode", m) else log.warn("[stbridge] unsupported AC mode " .. tostring(cmd.args.mode)) end
@@ -520,6 +543,10 @@ local driver = Driver("stoeckie-bridge-local", {
     [capabilities.switch.ID] = {
       [capabilities.switch.commands.on.NAME] = handle_switch_on,
       [capabilities.switch.commands.off.NAME] = handle_switch_off,
+    },
+    [capabilities.lock.ID] = {
+      [capabilities.lock.commands.lock.NAME] = handle_lock,
+      [capabilities.lock.commands.unlock.NAME] = handle_unlock,
     },
     [acMode.ID] = {
       [acMode.commands.setAirConditionerMode.NAME] = handle_ac_mode,

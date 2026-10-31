@@ -9,6 +9,8 @@ Sources
     plug, doors, climate; start/stop charging and climate. Polled every 10 minutes (the API allows 20 calls/hour).
   * iRobot account (optional): favorite names and rooms for the "iRobot Roomba (local)" Edge driver
     (library roombapy-prime). Only read, twice a day; the robot itself is controlled locally by the hub.
+  * VELUX ACTIVE (optional): departure mode lock/unlock via the VELUX/Netatmo cloud. Unlock is signed with a key
+    the gateway hands out locally once (button press). The windows stay local (HomeKit driver on the hub).
 
 Credentials live only in config.json next to this script (never in the code).
 
@@ -20,6 +22,7 @@ LAN API (default port 8787, no auth, LAN only)
       aircon:  on | off | mode (auto cool dry fan heat) | setpoint (C) | fan (quiet low medium high auto)
                | swing (off vertical horizontal both) | refresh
       car:     on | off (charging) | climate_on | climate_off | limit (percent) | refresh
+      velux_lock: lock | unlock | refresh
   GET  /stbridge/irobot/<blid>[?refresh=1] -> {"name", "favorites": [{name, id, command, params}], "updated"}
 
 Usage
@@ -31,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import datetime as dt
 import html
 import ipaddress
@@ -47,7 +51,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-10-30g"
+VERSION = "2026-10-31a"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -694,6 +698,329 @@ class IRobotCloud:
                     await asyncio.sleep(gap)
 
 
+# ---------------------------------------------------------------- VELUX ACTIVE departure mode (lock / unlock)
+# The windows themselves are controlled locally over HomeKit by the VELUX driver on the hub. The departure mode
+# (away = all windows and blinds blocked) only exists in the VELUX/Netatmo cloud. Locking is a plain command,
+# unlocking must be signed with a key that the gateway hands out locally (port 25050) after its button is pressed.
+# Protocol as documented by ha-velux-active (github.com/Niek/ha-velux-active, MIT).
+
+VELUX_NETATMO = "https://api.netatmo.com/"
+VELUX_SYNC = "https://app.velux-active.com/syncapi/v1/"
+VELUX_CLIENT = {"client_id": "5931426da127d981e76bdd3f", "client_secret": "6ae2d89d15e767ae5c56b456b452d319"}
+VELUX_APP_VERSION = "791302006"
+VELUX_PAIR: dict[str, Any] = {"state": None, "error": None, "start": None}
+
+
+def velux_configured(v: dict[str, Any]) -> bool:
+    return bool(v.get("username") and v.get("password"))
+
+
+def velux_sign(hash_sign_key: str, message: str) -> str:
+    """HMAC-SHA512 with the gateway key (base64), url-safe base64 like the VELUX app."""
+    import hashlib
+    import hmac
+    raw = hash_sign_key.strip().replace("-", "+").replace("_", "/")
+    key = base64.b64decode(raw + "=" * (-len(raw) % 4))
+    digest = hmac.new(key, message.encode(), hashlib.sha512).digest()
+    return base64.b64encode(digest).decode().replace("+", "-").replace("/", "_")
+
+
+def velux_scenario_hash(hash_sign_key: str, scenario: str, ts: int, nonce: int, gateway: str) -> str:
+    return velux_sign(hash_sign_key, f"scenario{scenario}{ts}{nonce}{gateway}")
+
+
+def velux_retrieve_key(host: str, timeout: float = 180.0, port: int = 25050) -> tuple[str, str]:
+    """Wait for the gateway's pairing listener (after its button is pressed) and fetch a signing key.
+    Returns (sign_key_id, hash_sign_key), both url-safe base64. Blocking: run it in a thread."""
+    import hashlib
+    import struct
+    from cryptography.hazmat.primitives.asymmetric import x25519
+    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+    from cryptography.hazmat.primitives import serialization
+
+    PING, PONG, CLOSE, SECURE = 0x0000, 0x0001, 0x0008, 0x0200
+    ECDH_REQ, ECDH_RESP = 0x0201, 0x0202
+    NONCE_REQ, NONCE_RESP, CHAL_REQ, CHAL_RESP, KEY_REQ, KEY_RESP = 0x020A, 0x020B, 0x020C, 0x020D, 0x020E, 0x020F
+
+    def frame(t: int, payload: bytes = b"") -> bytes:
+        return struct.pack("<HH", t, len(payload)) + payload
+
+    def bump(n: bytearray) -> None:
+        for i in range(11, 3, -1):
+            if n[i] < 0xFF:
+                n[i] += 1
+                return
+            n[i] = 0
+        n[:] = bytes(12)
+
+    def attempt() -> tuple[str, str]:
+        s = socket.create_connection((host, port), timeout=10)
+        s.settimeout(10)
+        buf = bytearray()
+
+        def recv() -> tuple[int, bytes]:
+            while True:
+                if len(buf) >= 4:
+                    t, n = struct.unpack_from("<HH", buf)
+                    if len(buf) >= 4 + n:
+                        out = (t, bytes(buf[4:4 + n]))
+                        del buf[:4 + n]
+                        if t == PING:
+                            s.sendall(frame(PONG))
+                            continue
+                        return out
+                chunk = s.recv(4096)
+                if not chunk:
+                    raise ConnectionError("gateway closed the connection")
+                buf.extend(chunk)
+
+        try:
+            s.sendall(frame(PING))
+            if recv()[0] != PONG:
+                raise ConnectionError("no pong")
+            priv = x25519.X25519PrivateKey.generate()
+            pub = priv.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+            s.sendall(frame(ECDH_REQ, b"\x01" + pub))
+            t, gw_pub = recv()
+            if t != ECDH_RESP:
+                raise ConnectionError(f"unexpected frame {t:#06x}")
+            if len(gw_pub) == 33 and gw_pub[0] in (0, 1):
+                gw_pub = gw_pub[1:]
+            shared = priv.exchange(x25519.X25519PublicKey.from_public_bytes(gw_pub))
+            aead = ChaCha20Poly1305(hashlib.sha512(shared).digest()[:32])
+            tx, rx = bytearray(12), bytearray(12)
+
+            def send_secure(t: int, payload: bytes = b"") -> None:
+                s.sendall(frame(SECURE, aead.encrypt(bytes(tx), frame(t, payload), None)))
+                bump(tx)
+
+            def recv_secure(want: int) -> bytes:
+                t, p = recv()
+                if t != SECURE:
+                    raise ConnectionError(f"unexpected frame {t:#06x}")
+                plain = aead.decrypt(bytes(rx), p, None)
+                bump(rx)
+                t, n = struct.unpack_from("<HH", plain)
+                if t != want or len(plain) != 4 + n:
+                    raise ConnectionError(f"unexpected secure frame {t:#06x}")
+                return plain[4:]
+
+            key_id = uuid.uuid4().bytes
+            send_secure(KEY_REQ, b"\x00" + key_id)
+            r = recv_secure(KEY_RESP)
+            if not r or r[0] != 0 or len(r) != 33:
+                raise PermissionError({1: "refused", 2: "bad key id", 3: "key table full"}.get(r[0] if r else -1,
+                                                                                           "refused"))
+            gw_key = r[1:]
+            send_secure(NONCE_REQ, b"\x00")
+            nonce = recv_secure(NONCE_RESP)
+            send_secure(CHAL_REQ, key_id + hashlib.sha512(key_id + gw_key + nonce).digest())
+            r = recv_secure(CHAL_RESP)
+            if not r or r[0] != 0:
+                raise PermissionError("gateway refused the key check")
+            send_secure(CLOSE)
+            return base64.urlsafe_b64encode(key_id).decode(), base64.urlsafe_b64encode(gw_key).decode()
+        finally:
+            s.close()
+
+    deadline = time.monotonic() + timeout
+    last: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.5):
+                pass
+        except OSError:
+            time.sleep(1)
+            continue
+        try:
+            return attempt()
+        except PermissionError:
+            raise
+        except Exception as ex:  # noqa: BLE001  (listener not ready yet: try again)
+            last = ex
+            time.sleep(1)
+    raise TimeoutError(f"gateway did not open its pairing port ({last or 'button not pressed?'})")
+
+
+class VeluxCloud:
+    POLL = 60
+
+    def __init__(self, cfg: dict[str, Any]) -> None:
+        self.v = cfg.get("velux") or {}
+        self.session = None
+        self.wake = asyncio.Event()
+        self.home: dict[str, Any] | None = None  # {"id", "timezone", "gateway", "name"}
+        self.last_ts, self.last_nonce = 0, -1
+        self.fast = 0  # fast polls left after a command
+
+    # -- auth
+    async def _tokens(self, data: dict[str, str]) -> None:
+        body = {**VELUX_CLIENT, "app_version": VELUX_APP_VERSION, **data}
+        async with self.session.post(VELUX_NETATMO + "oauth2/token", data=body) as r:
+            raw = await r.json(content_type=None)
+        if r.status >= 400 or "access_token" not in (raw or {}):
+            err = (raw or {}).get("error") if isinstance(raw, dict) else None
+            if r.status in (400, 401, 403) or err == "invalid_grant":
+                raise PermissionError(f"login refused ({err or r.status})")
+            raise RuntimeError(f"token request failed: HTTP {r.status}")
+        t = {"access_token": raw["access_token"], "refresh_token": raw.get("refresh_token"),
+             "expires_at": int(time.time()) + int(raw.get("expires_in") or raw.get("expire_in") or 3600)}
+        self.v["tokens"] = t
+        cfg = load_config()
+        cfg.setdefault("velux", {})["tokens"] = t
+        save_config(cfg)
+
+    async def _access(self) -> str:
+        t = self.v.get("tokens") or {}
+        if t.get("access_token") and time.time() < t.get("expires_at", 0) - 60:
+            return t["access_token"]
+        if t.get("refresh_token"):
+            try:
+                await self._tokens({"grant_type": "refresh_token", "refresh_token": t["refresh_token"]})
+                return self.v["tokens"]["access_token"]
+            except PermissionError:
+                log.info("[velux] refresh token refused, logging in again")
+        await self._tokens({"grant_type": "password", "username": self.v["username"], "password": self.v["password"],
+                            "scope": "velux_scopes", "user_prefix": "velux"})
+        return self.v["tokens"]["access_token"]
+
+    async def _post(self, url: str, data: dict | None = None, body: dict | None = None) -> dict[str, Any]:
+        for again in (True, False):
+            headers = {"Authorization": "Bearer " + await self._access()}
+            kw = {"json": body} if body is not None else {"data": data or {}}
+            async with self.session.post(url, headers=headers, **kw) as r:
+                text = await r.text()
+            if r.status in (401, 403) and again:
+                self.v.setdefault("tokens", {})["expires_at"] = 0  # token revoked: refresh once
+                continue
+            try:
+                raw = json.loads(text) if text.strip() else {}
+            except ValueError:
+                raw = {"raw": text[:200]}
+            if r.status >= 400:
+                raise RuntimeError(f"HTTP {r.status}: {str(raw)[:200]}")
+            errors = (raw.get("body") or {}).get("errors") if isinstance(raw.get("body"), dict) else None
+            if errors:
+                raise RuntimeError(f"VELUX refused: {errors}")
+            return raw
+        raise RuntimeError("unauthorized")
+
+    # -- state
+    async def _discover(self) -> None:
+        raw = await self._post(VELUX_NETATMO + "api/homesdata")
+        for h in (raw.get("body") or {}).get("homes") or []:
+            gws = [m for m in h.get("modules") or [] if m.get("type") == "NXG"]
+            if gws:
+                gw = gws[0]
+                self.home = {"id": h["id"], "timezone": h.get("timezone") or "Europe/Amsterdam",
+                             "gateway": gw["id"], "name": gw.get("name") or h.get("name") or "VELUX"}
+                log.info("[velux] home %s, gateway %s", h.get("name"), gw["id"])
+                return
+        raise RuntimeError("no VELUX gateway on this account")
+
+    async def _refresh(self) -> None:
+        if not self.home:
+            await self._discover()
+        raw = await self._post(VELUX_NETATMO + "api/homestatus", data={"home_id": self.home["id"]})
+        mods = ((raw.get("body") or {}).get("home") or {}).get("modules") or []
+        gw = next((m for m in mods if m.get("id") == self.home["gateway"]), None)
+        if gw is None:
+            REG.set_online("velux-", False)
+            raise RuntimeError("gateway not in homestatus (offline?)")
+        cfg = load_config().get("velux") or {}
+        state = {"locked": bool(gw.get("locked")), "locking": bool(gw.get("locking")),
+                 "raining": bool(gw.get("is_raining")), "busy": bool(gw.get("busy")),
+                 "canUnlock": bool(cfg.get("hash_sign_key") and cfg.get("sign_key_id")),
+                 "pairing": VELUX_PAIR["state"]}
+        REG.upsert("velux-" + self.home["gateway"], "velux_lock", "VELUX vertrekstand", state, True, self._command())
+        log.debug("[velux] locked %s, raining %s", state["locked"], state["raining"])
+
+    async def _scenario(self, modules: list[dict]) -> None:
+        payload = {"app_type": "app_velux", "app_version": VELUX_APP_VERSION,
+                   "home": {"id": self.home["id"], "timezone": self.home["timezone"], "modules": modules}}
+        await self._post(VELUX_SYNC + "setstate", body=payload)
+
+    def _command(self):
+        async def handler(cmd: str, value: Any) -> None:
+            if cmd == "refresh":
+                self.wake.set()
+                return
+            if cmd == "lock":
+                await self._scenario([{"id": self.home["gateway"], "scenario": "away"}])
+            elif cmd == "unlock":
+                cfg = load_config().get("velux") or {}
+                key, key_id = cfg.get("hash_sign_key"), cfg.get("sign_key_id")
+                if not (key and key_id):
+                    raise PermissionError("unlock needs the gateway key: press 'Gateway koppelen' on the setup page")
+                if cfg.get("sign_key_gateway") and cfg["sign_key_gateway"] != self.home["gateway"]:
+                    raise PermissionError("key belongs to another gateway: pair again")
+                now = int(time.time())
+                ts, nonce = (self.last_ts, self.last_nonce + 1) if now <= self.last_ts else (now, 0)
+                self.last_ts, self.last_nonce = ts, nonce
+                await self._scenario([{"id": self.home["gateway"], "nonce": nonce, "sign_key_id": key_id,
+                                       "scenario": "home", "timestamp": ts,
+                                       "hash_scenario": velux_scenario_hash(key, "home", ts, nonce,
+                                                                            self.home["gateway"])}])
+            else:
+                raise ValueError(f"unsupported command {cmd}")
+            log.info("[velux] %s sent", cmd)
+            self.fast = 4  # the gateway applies it with a delay
+            self.wake.set()
+        return handler
+
+    async def pair(self, host: str) -> None:
+        """Ask the cloud to put the gateway in key mode, then fetch the key locally once its button is pressed."""
+        VELUX_PAIR.update(state="waiting", error=None, start=int(time.time()))
+        try:
+            if not self.home:
+                await self._discover()
+            await self._post(VELUX_NETATMO + "api/setstate", body={
+                "home": {"id": self.home["id"], "modules": [{"id": self.home["gateway"], "retrieve_key": True}]}})
+            log.info("[velux] gateway in key mode: press the button on the gateway now")
+            VELUX_PAIR["state"] = "press"
+            key_id, key = await asyncio.to_thread(velux_retrieve_key, host)
+            cfg = load_config()
+            v = cfg.setdefault("velux", {})
+            v.update(sign_key_id=key_id, hash_sign_key=key, sign_key_gateway=self.home["gateway"], gateway_ip=host)
+            save_config(cfg)
+            VELUX_PAIR.update(state="done", error=None)
+            log.info("[velux] gateway paired, unlocking is possible now")
+            self.wake.set()
+        except Exception as ex:  # noqa: BLE001
+            VELUX_PAIR.update(state="failed", error=str(ex)[:200])
+            log.warning("[velux] pairing failed: %s", ex)
+
+    async def run(self) -> None:
+        if not velux_configured(self.v):
+            log.info("[velux] not configured (optional: VELUX departure mode lock/unlock)")
+            return
+        import aiohttp
+        VELUX["source"] = self
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
+            self.session = session
+            while True:
+                try:
+                    await self._refresh()
+                except PermissionError as ex:
+                    log.error("[velux] %s. Not retrying; fix it on the setup page", ex)
+                    VELUX["error"] = str(ex)
+                    REG.set_online("velux-", False)
+                    return
+                except Exception as ex:  # noqa: BLE001
+                    log.warning("[velux] update failed: %s", ex)
+                    self.home = None if "no VELUX gateway" in str(ex) else self.home
+                self.wake.clear()
+                wait = 5 if self.fast > 0 else self.POLL
+                self.fast = max(0, self.fast - 1)
+                try:
+                    await asyncio.wait_for(self.wake.wait(), timeout=wait)
+                except asyncio.TimeoutError:
+                    pass
+
+
+VELUX: dict[str, Any] = {"source": None, "error": None}
+
+
 # ---------------------------------------------------------------- LAN HTTP API
 
 SETUP_HTML = """<!doctype html><html lang="nl"><head><meta charset="utf-8">
@@ -740,7 +1067,19 @@ twee keer per dag, voor de Roomba driver op de hub. De robot zelf wordt lokaal b
 <label>E-mail</label><input name="username" type="email" autocomplete="off" required>
 <label>Wachtwoord</label><input name="password" type="password" autocomplete="off" required>
 <label>Land (2 letters)</label><input name="country" value="NL" maxlength="2" required>
-<button type="submit">iRobot opslaan en verbinden</button></form></body></html>"""
+<button type="submit">iRobot opslaan en verbinden</button></form>
+<h3>VELUX ACTIVE vertrekstand (optioneel)</h3>
+<p>Voor vergrendelen en ontgrendelen (vertrekstand: alle ramen en zonwering geblokkeerd) vanuit SmartThings.
+De ramen zelf blijven lokaal via HomeKit lopen. E-mail en wachtwoord van de VELUX ACTIVE app.</p>
+<form method="post"><input type="hidden" name="section" value="velux">
+<label>E-mail</label><input name="username" type="email" autocomplete="off" required>
+<label>Wachtwoord</label><input name="password" type="password" autocomplete="off" required>
+<button type="submit">VELUX opslaan en verbinden</button></form>
+<p>Ontgrendelen moet ondertekend worden met een sleutel van de gateway. Eenmalig: vul het IP van de VELUX gateway in,
+klik op koppelen, wacht tot het lampje op de gateway knippert en druk dan binnen 3 minuten op de knop van de gateway.</p>
+<form method="post"><input type="hidden" name="section" value="velux_pair">
+<label>IP van de VELUX gateway</label><input name="gateway_ip" value="{velux_ip}" required>
+<button type="submit">Gateway koppelen</button></form></body></html>"""
 
 
 def make_app(bridge_id: str, on_setup=None) -> web.Application:
@@ -815,6 +1154,26 @@ def make_app(bridge_id: str, on_setup=None) -> web.Application:
                     for d in cars))
             else:
                 lines.append("Škoda ingesteld, nog geen gegevens (zie bridge.log).")
+        v = cfg.get("velux") or {}
+        if velux_configured(v):
+            locks = [d for d in REG.devices.values() if d["type"] == "velux_lock"]
+            if VELUX.get("error"):
+                lines.append("VELUX: " + str(VELUX["error"]))
+            elif locks:
+                st = locks[0]["state"]
+                lines.append("VELUX verbonden: " + ("vergrendeld (vertrekstand)" if st.get("locked") else "ontgrendeld")
+                             + ("" if st.get("canUnlock") else ", ontgrendelen kan pas na Gateway koppelen"))
+            else:
+                lines.append("VELUX ingesteld, bezig met verbinden.")
+            p = VELUX_PAIR.get("state")
+            if p == "press":
+                lines.append("VELUX gateway: druk NU op de knop van de gateway (lampje knippert). Ververs deze pagina.")
+            elif p == "waiting":
+                lines.append("VELUX gateway: koppelen wordt gestart...")
+            elif p == "done":
+                lines.append("VELUX gateway gekoppeld: ontgrendelen werkt.")
+            elif p == "failed":
+                lines.append("VELUX koppelen mislukt: " + str(VELUX_PAIR.get("error")))
         r = cfg.get("irobot") or {}
         if irobot_configured(r):
             if IROBOT.get("error"):
@@ -832,7 +1191,8 @@ def make_app(bridge_id: str, on_setup=None) -> web.Application:
         k = load_config().get("skoda") or {}
         page = (SETUP_HTML.replace("{status}", status_text())
                 .replace("{skoda_poll}", html.escape(str(k.get("poll_minutes", 10))))
-                .replace("{skoda_temp}", html.escape(str(k.get("climate_temp", 21)))))
+                .replace("{skoda_temp}", html.escape(str(k.get("climate_temp", 21))))
+                .replace("{velux_ip}", html.escape(str((load_config().get("velux") or {}).get("gateway_ip", "")))))
         return web.Response(text=page, content_type="text/html")
 
     async def setup_post(req):
@@ -860,6 +1220,27 @@ def make_app(bridge_id: str, on_setup=None) -> web.Application:
             r["country"] = str(form.get("country", "NL")).strip().upper()[:2] or "NL"
             save_config(cfg)
             log.info("[setup] iRobot login saved")
+        elif section == "velux":
+            v = cfg.setdefault("velux", {})
+            v["username"] = str(form.get("username", "")).strip()
+            v["password"] = str(form.get("password", ""))
+            v.pop("tokens", None)
+            save_config(cfg)
+            VELUX["error"] = None
+            log.info("[setup] VELUX login saved")
+        elif section == "velux_pair":
+            ip = str(form.get("gateway_ip", "")).strip()
+            try:
+                ipaddress.ip_address(ip)
+            except ValueError:
+                return web.Response(status=400, text="geen geldig IP adres")
+            src = VELUX.get("source")
+            if src is None or src.session is None:
+                return web.Response(status=409, text="Stel eerst de VELUX login in (en wacht tot hij verbonden is).")
+            if VELUX_PAIR.get("state") not in ("waiting", "press"):
+                asyncio.get_running_loop().create_task(src.pair(ip))
+            await asyncio.sleep(3)
+            raise web.HTTPFound("/setup")
         elif section == "fglair":
             f = cfg.setdefault("fglair", {})
             f["username"] = str(form.get("username", "")).strip()
@@ -976,6 +1357,14 @@ async def demo_devices() -> None:
         REG.upsert("demo-car", "car", "Demo auto", car, True, demo_car)
 
     await demo_car("refresh", None)
+    velux = {"locked": True, "raining": False, "canUnlock": True}
+
+    async def demo_velux(cmd, value):
+        if cmd in ("lock", "unlock"):
+            velux["locked"] = cmd == "lock"
+        REG.upsert("demo-velux", "velux_lock", "Demo VELUX vertrekstand", velux, True, demo_velux)
+
+    await demo_velux("refresh", None)
     t0 = time.time()
     while True:
         el = int(time.time() - t0) % 180
@@ -1012,7 +1401,7 @@ async def serve(args) -> None:
         bridge_id = cfg["bridge_id"] = uuid.uuid4().hex[:12]
         save_config(cfg)
     port = int(cfg.get("port", 8787))
-    sources = {"aeg": Electrolux, "fglair": FGLair, "skoda": Skoda, "irobot": IRobotCloud}
+    sources = {"aeg": Electrolux, "fglair": FGLair, "skoda": Skoda, "irobot": IRobotCloud, "velux": VeluxCloud}
     tasks: dict[str, asyncio.Task] = {}
 
     def start(section: str) -> None:

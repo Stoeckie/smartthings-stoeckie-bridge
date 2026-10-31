@@ -2,3 +2,7 @@ Stoeckie Bridge and SmartThings Edge driver
 Copyright 2026 Stoeckie
 
 Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The VELUX ACTIVE departure mode code (login, scenario signing, gateway key pairing on port 25050) follows the
+protocol documented by ha-velux-active, https://github.com/Niek/ha-velux-active, Copyright (c) 2026 Niek van der
+Maas, MIT License.

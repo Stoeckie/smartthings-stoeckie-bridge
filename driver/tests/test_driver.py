@@ -33,7 +33,7 @@ local caps = capmock("cap")
 for _, id in ipairs({ "windowShade", "windowShadeLevel", "refresh", "dryerOperatingState", "switch", "battery",
                       "powerMeter", "presenceSensor", "contactSensor",
                       "airConditionerMode", "airConditionerFanMode", "fanOscillationMode",
-                      "thermostatCoolingSetpoint" }) do caps[id].ID = id end
+                      "thermostatCoolingSetpoint", "lock", "waterSensor" }) do caps[id].ID = id end
 package.loaded["st.capabilities"] = caps
 package.loaded["st.driver"] = function(name, tmpl) DRIVER = tmpl; return { run = function() end } end
 package.loaded["log"] = { info = function(m) print("I " .. m) end, warn = function(m) print("W " .. m) end,
@@ -57,7 +57,8 @@ function NEW_DEVICE(info)
               parent_assigned_child_key = info.parent_assigned_child_key, label = info.label,
               events = {}, state = "online",
               profile = { components = { main = { id = "main" }, outdoor = { id = "outdoor" }, plug = { id = "plug" },
-                                         climate = { id = "climate" }, status = { id = "status" } } } }
+                                         climate = { id = "climate" }, status = { id = "status" },
+                                         rain = { id = "rain" } } } }
   function d:get_field(k) return self.fields[k] end
   function d:set_field(k, v) self.fields[k] = v end
   function d:emit_event(e) self.events[#self.events + 1] = { comp = "main", path = e.path, arg = e.arg } end
@@ -221,3 +222,32 @@ def test_car_flow(bridge):
     assert state()["charging"] == "CHARGING"
     lua.execute('DRIVER.capability_handlers.switch.on(DRIVER_OBJ, CAR, { component = "climate" })')
     assert state()["climate"] == "ON"
+
+
+def test_velux_lock_flow(bridge):
+    lua = lua53.LuaRuntime(unpack_returned_tuples=True)
+    lua.execute(f'package.path = "{SRC}/?.lua;{HERE}/?.lua;" .. package.path')
+    lua.globals().py_http = py_http
+    lua.execute(HARNESS)
+    lua.execute(f'dofile("{SRC}/init.lua")')
+    lua.execute(f'''
+      PARENT = NEW_DEVICE({{ id = "p1", label = "Bridge", device_network_id = "stbridge-test1",
+                            preferences = {{ ipAddress = "127.0.0.1", port = "{bridge}" }} }})
+      DRIVER.lifecycle_handlers.init(DRIVER_OBJ, PARENT)
+      DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
+      DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
+      for _, d in ipairs(DEVICES) do if d.parent_assigned_child_key == "demo-velux" then LOCK = d end end
+    ''')
+    lock = lua.eval("LOCK")
+    assert lock is not None
+    paths = [f"{lock.events[i].comp}:{lock.events[i].path}" for i in range(1, len(lock.events) + 1)]
+    assert "main:cap.lock.lock.locked" in paths and "rain:cap.waterSensor.water.dry" in paths
+
+    def state():
+        with urllib.request.urlopen(f"http://127.0.0.1:{bridge}/stbridge/devices") as r:
+            devs = json.loads(r.read())["devices"]
+        return next(d for d in devs if d["id"] == "demo-velux")["state"]
+    lua.execute('DRIVER.capability_handlers.lock.unlock(DRIVER_OBJ, LOCK, {})')
+    assert state()["locked"] is False
+    lua.execute('DRIVER.capability_handlers.lock.lock(DRIVER_OBJ, LOCK, {})')
+    assert state()["locked"] is True

@@ -1,0 +1,15 @@
+name: stoeckie-velux-lock
+components:
+  - id: main
+    capabilities:
+      - id: lock
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: SmartLock
+  - id: rain
+    label: Rain
+    capabilities:
+      - id: waterSensor
+        version: 1
