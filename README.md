@@ -111,6 +111,12 @@ The windows and blinds run locally on the hub with the [VELUX ACTIVE (HomeKit lo
 
 The gateway's rain sensor becomes its own device, **VELUX regensensor** (rain sensor: detected = raining).
 
+## Offline notification
+
+SmartThings has no routine trigger for "device offline". The Stoeckie Bridge device therefore has a **Connection** status (Connected or Offline). Make a routine to get a message:
+
+If Stoeckie Bridge device > Connection is Offline, then send a notification to members.
+
 ## Security and privacy
 
 * Credentials only live in `config.json` on the bridge pc (in `.gitignore`), never in the code or the driver.

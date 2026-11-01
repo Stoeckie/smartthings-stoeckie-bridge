@@ -12,11 +12,21 @@
 --                                       rain, minutes of rain, summary)
 local Driver = require "st.driver"
 local capabilities = require "st.capabilities"
+
+-- Connection status as a capability, so routines can notify when this device loses its connection
+-- (SmartThings itself has no "device offline" trigger for routines).
+local conn_cap = capabilities["silvervalley08660.connectionStatus"]
+local function set_conn(dev, up)
+  local v = up and "online" or "offline"
+  if dev:get_field("conn_status") == v then return end
+  local ok = pcall(function() dev:emit_event(conn_cap.status(v)) end)
+  if ok then dev:set_field("conn_status", v) end
+end
 local log = require "log"
 local cosock = require "cosock"
 local api = require "bridge_api"
 
-local BUILD = "2026-11-01f"
+local BUILD = "2026-11-01g"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -337,11 +347,13 @@ local function poll(driver, parent)
     -- bridge moved to another pc or got a new IP: look for it again (same bridge id), unless the IP is fixed
     local fixed = (parent.preferences or {}).ipAddress
     if (fixed == nil or fixed == "" or fixed == "auto") and st and st.fails >= 2 then maybe_rescan(driver, parent) end
+    set_conn(parent, false)
     parent:offline()
     for _, child in pairs(children_by_key(driver, parent)) do child:offline() end
     return
   end
   parent:online()
+  set_conn(parent, true)
   local kids = children_by_key(driver, parent)
   for _, d in ipairs(devices) do
     local child = kids[d.id]
