@@ -141,3 +141,66 @@ def test_settings_endpoint():
         await runner.cleanup()
 
     asyncio.run(main())
+
+
+def test_openmeteo_and_provider():
+    import datetime as dt
+    data = {"minutely_15": {"time": ["2026-11-01T11:00", "2026-11-01T11:15", "2026-11-01T11:30"],
+                            "precipitation": [0.0, 0.5, 0.25]}}
+    now = dt.datetime(2026, 11, 1, 11, 7, tzinfo=dt.timezone.utc)
+    rates = sb.parse_openmeteo(data, now)[0]
+    assert rates == [0.0, 0.0, 2.0, 2.0, 2.0, 1.0, 1.0, 1.0]  # 11:05 step onwards, mm/15min -> mm/h
+    assert len(sb.parse_openmeteo([data, data], now)) == 2
+    s = sb.rain_summary(rates, lang="en")
+    assert s["summary"].startswith("Rain in 10 min, for 30+ min")
+    assert sb.rain_provider({"lat": 52.35, "lon": 5.62}) == "buienradar"
+    assert sb.rain_provider({"lat": 48.85, "lon": 2.35}) == "openmeteo"
+    assert sb.rain_provider({"lat": 52.35, "lon": 5.62, "provider": "openmeteo"}) == "openmeteo"
+    s = sb.buienradar_settings({"address": "Rue de Rivoli 1, Paris", "provider": "x"}, {})
+    assert s["address"] == "Rue de Rivoli 1, Paris" and s["provider"] == "auto" and s["lat"] is None
+
+
+def test_source_abroad(monkeypatch):
+    async def main():
+        app = web.Application()
+        asked = {}
+
+        async def nominatim(req):
+            asked["ua"] = req.headers.get("User-Agent")
+            return web.json_response([{"lat": "48.8566", "lon": "2.3522", "display_name": "Paris, France"}])
+
+        async def openmeteo(req):
+            lats = req.query["latitude"].split(",")
+            asked["points"] = len(lats)
+            now = sb.dt.datetime.now(sb.dt.timezone.utc).replace(second=0, microsecond=0)
+            q = now - sb.dt.timedelta(minutes=now.minute % 15)
+            times = [(q + sb.dt.timedelta(minutes=15 * i)).strftime("%Y-%m-%dT%H:%M") for i in range(9)]
+            one = {"minutely_15": {"time": times, "precipitation": [0.0, 0.0, 0.3, 0.3] + [0.0] * 5}}
+            return web.json_response([one] * len(lats) if len(lats) > 1 else one)
+
+        app.router.add_get("/nominatim", nominatim)
+        app.router.add_get("/om", openmeteo)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        monkeypatch.setattr(sb, "NOMINATIM_URL", f"http://127.0.0.1:{port}/nominatim")
+        monkeypatch.setattr(sb, "OPENMETEO_URL", f"http://127.0.0.1:{port}/om")
+        sb.REG.devices.pop("buienradar", None)
+        sb.save_config({"buienradar": {"enabled": True, "address": "Paris", "radius_m": 5000}})
+        src = sb.Buienradar(sb.load_config())
+        task = asyncio.create_task(src.run())
+        for _ in range(200):
+            d = sb.REG.devices.get("buienradar")
+            if d and "minutesUntilRain" in d["state"]:
+                break
+            await asyncio.sleep(0.02)
+        st = sb.REG.devices["buienradar"]["state"]
+        assert d["name"] == "Rain radar" and st["provider"] == "openmeteo" and st["place"] == "Paris, France"
+        assert asked["points"] == 17 and "stoeckie-bridge" in asked["ua"]
+        assert st["summary"].startswith("Rain in") and 15 <= st["minutesUntilRain"] <= 30
+        task.cancel()
+        await runner.cleanup()
+
+    asyncio.run(main())

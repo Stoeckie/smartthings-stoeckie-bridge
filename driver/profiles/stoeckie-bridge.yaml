@@ -33,8 +33,8 @@ preferences:
       maximum: 600
       default: 10
   - name: rainRadar
-    title: Buienradar (rain radar)
-    description: "On: a Buienradar device appears (rain now and the next 2 hours, NL/BE). Set the address and radius in that device's settings."
+    title: Rain radar (Buienradar / Open-Meteo)
+    description: "On: a rain radar device appears (rain now and the next 2 hours; Buienradar in NL/BE, Open-Meteo worldwide). Set the address and radius in that device's settings."
     required: false
     preferenceType: boolean
     definition:

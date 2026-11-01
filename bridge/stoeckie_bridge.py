@@ -9,7 +9,9 @@ Sources
     plug, doors, climate; start/stop charging and climate. Polled every 10 minutes (the API allows 20 calls/hour).
   * iRobot account (optional): favorite names and rooms for the "iRobot Roomba (local)" Edge driver
     (library roombapy-prime). Only read, twice a day; the robot itself is controlled locally by the hub.
-  * Buienradar (optional): rain now and the next 2 hours for a location (NL/BE) with a radius, every 5 minutes.
+  * Rain radar (optional): rain now and the next 2 hours for an address with a radius, every 5 minutes. Buienradar in
+    the Netherlands and Belgium (5 minute steps), Open-Meteo elsewhere (15 minute steps). Addresses: PDOK (NL
+    postcode) or OpenStreetMap Nominatim (anywhere).
   * VELUX ACTIVE (optional): departure mode lock/unlock via the VELUX/Netatmo cloud. Unlock is signed with a key
     the gateway hands out locally once (button press). The windows stay local (HomeKit driver on the hub).
 
@@ -25,7 +27,7 @@ LAN API (default port 8787, no auth, LAN only)
       car:     on | off (charging) | climate_on | climate_off | limit (percent) | refresh
       velux_lock: lock | unlock | refresh | settings {poll_seconds}
       rain:    refresh (VELUX gateway rain sensor)
-      rainradar: refresh | settings {postcode, housenumber, location, radius_m, threshold}
+      rainradar: refresh | settings {postcode, housenumber, address, location, radius_m, threshold, provider}
                (state: raining, rainRate mm/h, minutesUntilRain, minutesOfRain, intensity, summary)
   POST /stbridge/buienradar               body {"enabled": true} (from the bridge device)
   GET  /stbridge/irobot/<blid>[?refresh=1] -> {"name", "favorites": [{name, id, command, params}], "updated"}
@@ -56,7 +58,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-01c"
+VERSION = "2026-11-01d"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -1071,6 +1073,21 @@ RAIN_THRESHOLD = 0.1  # mm/h counts as rain
 
 
 PDOK_URL = "https://api.pdok.nl/bzk/locatieserver/search/v3_1/free"  # Dutch addresses (Kadaster, free)
+OPENMETEO_URL = "https://api.open-meteo.com/v1/forecast"  # worldwide, 15 minute steps (CC BY 4.0, no key)
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"  # addresses worldwide (OpenStreetMap, ODbL)
+RAIN_PROVIDERS = ("auto", "buienradar", "openmeteo")
+
+
+def in_benelux(lat: float, lon: float) -> bool:
+    """Area of the Buienradar radar forecast (the Netherlands, Belgium and a margin)."""
+    return 49.4 <= lat <= 53.7 and 2.5 <= lon <= 7.3
+
+
+def rain_provider(b: dict[str, Any]) -> str:
+    p = b.get("provider") or "auto"
+    if p == "auto":
+        return "buienradar" if buienradar_configured(b) and in_benelux(float(b["lat"]), float(b["lon"])) else "openmeteo"
+    return p
 
 
 def buienradar_enabled(b: dict[str, Any]) -> bool:
@@ -1106,10 +1123,16 @@ def parse_location(text: Any) -> tuple[float, float] | None:
 
 
 def buienradar_settings(v: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
-    """Validated settings from the device or the setup page. Keys in v: postcode, housenumber, location ('lat, lon',
-    wins over the postcode, also for Belgium), radius_m (0..25000), threshold (mm/h). Missing keys keep the current
-    value; an empty location clears it. Returns the new settings; lat/lon are filled in later from the postcode."""
-    out = {k: current.get(k) for k in ("postcode", "housenumber", "location", "lat", "lon", "place")}
+    """Validated settings from the device or the setup page. Keys in v: postcode + housenumber (NL), address (any
+    country, free text), location ('lat, lon', wins over both), radius_m (0..25000), threshold (mm/h), provider
+    (auto, buienradar, openmeteo). Missing keys keep the current value; empty text clears it. lat/lon are filled in
+    later from the postcode or the address."""
+    out = {k: current.get(k) for k in ("postcode", "housenumber", "address", "location", "lat", "lon", "place")}
+    out["provider"] = current.get("provider", "auto")
+    if "address" in v:
+        out["address"] = str(v.get("address") or "").strip()[:200] or None
+    if v.get("provider") in RAIN_PROVIDERS:
+        out["provider"] = v["provider"]
     out["radius_m"] = current.get("radius_m", int(float(current.get("radius_km") or 0) * 1000))
     out["threshold"] = current.get("threshold", RAIN_THRESHOLD)
     if "postcode" in v:
@@ -1128,9 +1151,40 @@ def buienradar_settings(v: dict[str, Any], current: dict[str, Any]) -> dict[str,
     loc = parse_location(out["location"]) if out["location"] else None
     if loc:
         out["lat"], out["lon"], out["place"] = round(loc[0], 4), round(loc[1], 4), out["location"]
-    elif (not (out["postcode"] and out["housenumber"]) or current.get("location")
-          or (out["postcode"], out["housenumber"]) != (current.get("postcode"), current.get("housenumber"))):
+    elif (not ((out["postcode"] and out["housenumber"]) or out["address"]) or current.get("location")
+          or (out["postcode"], out["housenumber"], out["address"])
+          != (current.get("postcode"), current.get("housenumber"), current.get("address"))):
         out["lat"] = out["lon"] = out["place"] = None  # look the address up again
+    return out
+
+
+async def geocode_address(session, address: str) -> tuple[float, float, str] | None:
+    """Free text address anywhere -> (lat, lon, name) via OpenStreetMap Nominatim (once per address change)."""
+    async with session.get(NOMINATIM_URL, params={"q": address, "format": "jsonv2", "limit": "1"},
+                           headers={"User-Agent": f"stoeckie-bridge/{VERSION} (SmartThings Edge bridge)"}) as r:
+        if r.status != 200:
+            raise RuntimeError(f"Nominatim HTTP {r.status}")
+        data = await r.json(content_type=None)
+    if not data:
+        return None
+    d = data[0]
+    return round(float(d["lat"]), 5), round(float(d["lon"]), 5), str(d.get("display_name") or address)[:120]
+
+
+def parse_openmeteo(data: Any, now: dt.datetime | None = None) -> list[list[float]]:
+    """Open-Meteo minutely_15 precipitation (mm per 15 min, one or more locations) -> mm/h per 5 minutes from now."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    out = []
+    for loc in data if isinstance(data, list) else [data]:
+        m = (loc or {}).get("minutely_15") or {}
+        times, rain = m.get("time") or [], m.get("precipitation") or []
+        rates: list[float] = []
+        for t, mm in zip(times, rain):
+            start = dt.datetime.fromisoformat(t).replace(tzinfo=dt.timezone.utc)
+            for k in range(3):
+                if start + dt.timedelta(minutes=5 * (k + 1)) > now:  # skip 5 minute steps that are over
+                    rates.append(round(float(mm or 0) * 4, 2))
+        out.append(rates[:24])
     return out
 
 
@@ -1181,8 +1235,8 @@ def parse_raintext(text: str) -> list[float]:
     return out
 
 
-def rain_summary(rates: list[float], threshold: float = RAIN_THRESHOLD) -> dict[str, Any]:
-    """Now, minutes until rain, how long it rains, intensity class and a short Dutch summary."""
+def rain_summary(rates: list[float], threshold: float = RAIN_THRESHOLD, lang: str = "nl") -> dict[str, Any]:
+    """Now, minutes until rain, how long it rains, intensity class and a short summary (Dutch or English)."""
     if not rates:
         return {}
     wet = [r >= threshold for r in rates]
@@ -1215,12 +1269,20 @@ def rain_summary(rates: list[float], threshold: float = RAIN_THRESHOLD) -> dict[
     if intensity == "none" and until <= 15:
         intensity = "possiblePrecipitation"
     more = "+" if start is not None and start * 5 + lasts >= horizon else ""
-    if wet[0]:
-        text = f"Regent nu ({now:g} mm/u), nog {lasts}{more} min"
-    elif start is not None:
-        text = f"Regen over {until} min, {lasts}{more} min lang, max {peak:g} mm/u"
+    if lang == "nl":
+        if wet[0]:
+            text = f"Regent nu ({now:g} mm/u), nog {lasts}{more} min"
+        elif start is not None:
+            text = f"Regen over {until} min, {lasts}{more} min lang, max {peak:g} mm/u"
+        else:
+            text = f"Droog, geen regen verwacht ({horizon // 60} uur)"
     else:
-        text = f"Droog, geen regen verwacht ({horizon // 60} uur)"
+        if wet[0]:
+            text = f"Raining now ({now:g} mm/h), {lasts}{more} more min"
+        elif start is not None:
+            text = f"Rain in {until} min, for {lasts}{more} min, up to {peak:g} mm/h"
+        else:
+            text = f"Dry, no rain expected ({horizon // 60} h)"
     return {"raining": bool(wet[0]), "rainRate": round(now, 2), "minutesUntilRain": until, "minutesOfRain": lasts,
             "peakRate": round(peak, 2), "totalMm": total, "intensity": intensity, "summary": text,
             "horizonMinutes": horizon}
@@ -1242,52 +1304,77 @@ class Buienradar:
                 raise RuntimeError(f"HTTP {r.status}")
             return parse_raintext(await r.text())
 
+    async def _fetch_openmeteo(self, pts: list[tuple[float, float]]) -> list[list[float]]:
+        """All points in one request (Open-Meteo accepts lists of coordinates)."""
+        params = {"latitude": ",".join(f"{p[0]:.4f}" for p in pts), "longitude": ",".join(f"{p[1]:.4f}" for p in pts),
+                  "minutely_15": "precipitation", "forecast_minutely_15": "9", "timezone": "UTC"}
+        async with self.session.get(OPENMETEO_URL, params=params,
+                                    headers={"User-Agent": f"stoeckie-bridge/{VERSION}"}) as r:
+            if r.status != 200:
+                raise RuntimeError(f"Open-Meteo HTTP {r.status}")
+            return parse_openmeteo(await r.json(content_type=None))
+
     def _settings_state(self) -> dict[str, Any]:
         b = self.b
-        return {"postcode": b.get("postcode"), "housenumber": b.get("housenumber"), "place": b.get("place"),
+        return {"postcode": b.get("postcode"), "housenumber": b.get("housenumber"), "address": b.get("address"),
+                "place": b.get("place"),
                 "lat": b.get("lat"), "lon": b.get("lon"), "radiusM": b.get("radius_m", 0),
                 "threshold": b.get("threshold", RAIN_THRESHOLD)}
 
     async def _locate(self) -> None:
-        """Postcode + house number -> lat/lon (once, stored in config.json)."""
+        """Postcode + house number (NL) or an address (anywhere) -> lat/lon (once, stored in config.json)."""
         b = self.b
-        if buienradar_configured(b) or not (b.get("postcode") and b.get("housenumber")):
+        if buienradar_configured(b):
             return
-        found = await geocode_nl(self.session, b["postcode"], int(b["housenumber"]))
+        if b.get("postcode") and b.get("housenumber"):
+            found = await geocode_nl(self.session, b["postcode"], int(b["housenumber"]))
+            what = f"{b['postcode']} {b['housenumber']}"
+        elif b.get("address"):
+            found = await geocode_address(self.session, b["address"])
+            what = b["address"]
+        else:
+            return
         if not found:
-            self.error = f"Adres {b['postcode']} {b['housenumber']} niet gevonden"
+            self.error = f"Adres niet gevonden / address not found: {what}"
             return
         b["lat"], b["lon"], b["place"] = found
         cfg = load_config()
         cfg.setdefault("buienradar", {}).update({k: b[k] for k in ("lat", "lon", "place")})
         save_config(cfg)
-        log.info("[buienradar] location from postcode: %s", b["place"])
+        log.info("[buienradar] location from the address: %s", b["place"])
 
     async def _refresh(self) -> None:
         self.error = None
         await self._locate()
         if not buienradar_configured(self.b):
-            summary = self.error or "Geen locatie: vul postcode en huisnummer in (instellingen van dit apparaat)"
+            summary = self.error or ("Geen locatie: vul postcode en huisnummer of adres in (instellingen van dit apparaat)"
+                                     " / No location: enter your address or coordinates in the device settings")
             REG.upsert("buienradar", "rainradar", "Buienradar", {"summary": summary, **self._settings_state()}, True,
                        self._command())
             return
         lat, lon = float(self.b["lat"]), float(self.b["lon"])
         radius = float(self.b.get("radius_m") or 0)
         pts = rain_points(lat, lon, radius)
-        sem = asyncio.Semaphore(4)
+        provider = rain_provider(self.b)
+        if provider == "openmeteo":
+            series = [s for s in await self._fetch_openmeteo(pts) if s]
+        else:
+            sem = asyncio.Semaphore(4)
 
-        async def one(p):
-            async with sem:
-                return await self._fetch(*p)
-        series = [s for s in await asyncio.gather(*(one(p) for p in pts), return_exceptions=True)
-                  if isinstance(s, list) and s]
+            async def one(p):
+                async with sem:
+                    return await self._fetch(*p)
+            series = [s for s in await asyncio.gather(*(one(p) for p in pts), return_exceptions=True)
+                      if isinstance(s, list) and s]
         if not series:
-            raise RuntimeError("no data from Buienradar")
+            raise RuntimeError(f"no data from {provider}")
         n = min(len(s) for s in series)
         rates = [max(s[i] for s in series) for i in range(n)]  # heaviest rain anywhere in the radius
-        state = rain_summary(rates, float(self.b.get("threshold") or RAIN_THRESHOLD))
-        state.update(points=len(series), **self._settings_state())
-        REG.upsert("buienradar", "rainradar", "Buienradar", state, True, self._command())
+        lang = "nl" if in_benelux(lat, lon) else "en"
+        state = rain_summary(rates, float(self.b.get("threshold") or RAIN_THRESHOLD), lang)
+        state.update(points=len(series), provider=provider, **self._settings_state())
+        name = "Buienradar" if provider == "buienradar" else "Rain radar"
+        REG.upsert("buienradar", "rainradar", name, state, True, self._command())
         log.info("[buienradar] %s (%d point(s), radius %g m)", state["summary"], len(series), radius)
 
     def apply_settings(self, v: dict[str, Any]) -> bool:
@@ -1450,12 +1537,16 @@ twee keer per dag, voor de Roomba driver op de hub. De robot zelf wordt lokaal b
 <label>Land (2 letters)</label><input name="country" value="NL" maxlength="2" required>
 <button type="submit">iRobot opslaan en verbinden</button></form>
 <h3>Buienradar (optioneel)</h3>
-<p>Regen nu en de komende 2 uur bij je huis, met straal. Ook in te stellen bij het Buienradar apparaat in SmartThings
+<p>Regen nu en de komende 2 uur bij je huis, met straal. In Nederland en België via Buienradar, elders via Open-Meteo. Ook in te stellen bij het Buienradar apparaat in SmartThings
 (aanzetten: instelling Buienradar bij het Stoeckie Bridge apparaat). Laatste wijziging telt.</p>
 <form method="post"><input type="hidden" name="section" value="buienradar">
 <label>Postcode</label><input name="postcode" value="{rain_pc}" placeholder="1234AB">
 <label>Huisnummer</label><input name="housenumber" value="{rain_nr}" placeholder="12">
-<label>Of breedtegraad, lengtegraad (bijvoorbeeld in België)</label><input name="location" value="{rain_loc}" placeholder="52.35, 5.62">
+<label>Of adres (elk land: straat huisnummer, plaats, land)</label><input name="address" value="{rain_addr}" placeholder="Rue de la Loi 16, Brussel, België">
+<label>Of breedtegraad, lengtegraad</label><input name="location" value="{rain_loc}" placeholder="52.35, 5.62">
+<label>Bron</label><select name="provider"><option value="auto"{rain_p_auto}>Automatisch (Buienradar in NL/BE, anders Open-Meteo)</option>
+<option value="buienradar"{rain_p_buienradar}>Buienradar (NL/BE, radar, 5 minuten)</option>
+<option value="openmeteo"{rain_p_openmeteo}>Open-Meteo (wereldwijd, 15 minuten)</option></select>
 <label>Straal in meters (0 = alleen dit adres, max 25000)</label><input name="radius_m" type="number" min="0" max="25000" value="{rain_radius}">
 <label>Regen vanaf (mm/u)</label><input name="threshold" value="{rain_thr}">
 <button type="submit">Buienradar opslaan</button></form>
@@ -1610,6 +1701,10 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
                 .replace("{rain_pc}", html.escape(str(rb.get("postcode") or "")))
                 .replace("{rain_nr}", html.escape(str(rb.get("housenumber") or "")))
                 .replace("{rain_loc}", html.escape(str(rb.get("location") or "")))
+                .replace("{rain_addr}", html.escape(str(rb.get("address") or "")))
+                .replace("{rain_p_auto}", " selected" if rb.get("provider", "auto") == "auto" else "")
+                .replace("{rain_p_buienradar}", " selected" if rb.get("provider") == "buienradar" else "")
+                .replace("{rain_p_openmeteo}", " selected" if rb.get("provider") == "openmeteo" else "")
                 .replace("{rain_radius}", html.escape(str(rb.get("radius_m", int(float(rb.get("radius_km") or 0) * 1000)))))
                 .replace("{rain_thr}", html.escape(str(rb.get("threshold", RAIN_THRESHOLD))))
                 .replace("{velux_ip}", html.escape(str((load_config().get("velux") or {}).get("gateway_ip", "")))))
@@ -1651,10 +1746,11 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             section = name
         elif section == "buienradar":
             b = cfg.setdefault("buienradar", {})
-            v = {k: form.get(k, "") for k in ("postcode", "housenumber", "location", "radius_m", "threshold")}
+            v = {k: form.get(k, "") for k in ("postcode", "housenumber", "address", "location", "radius_m", "threshold",
+                                              "provider")}
             new = buienradar_settings(v, b)
-            if not (new.get("location") or (new.get("postcode") and new.get("housenumber"))):
-                return web.Response(status=400, text="vul postcode en huisnummer in, of breedtegraad, lengtegraad")
+            if not (new.get("location") or (new.get("postcode") and new.get("housenumber")) or new.get("address")):
+                return web.Response(status=400, text="vul postcode en huisnummer, een adres of breedtegraad, lengtegraad in")
             b.update(new)
             b["enabled"] = True
             b.pop("radius_km", None)
@@ -1730,7 +1826,8 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
         if "enabled" in body and bool(body["enabled"]) != bool(b.get("enabled")):
             b["enabled"] = bool(body["enabled"])
             changed = True
-        settings = {k: body[k] for k in ("postcode", "housenumber", "location", "radius_m", "threshold") if k in body}
+        settings = {k: body[k] for k in ("postcode", "housenumber", "address", "location", "radius_m", "threshold",
+                                         "provider") if k in body}
         if settings:
             new = buienradar_settings(settings, b)
             if any(b.get(k) != new.get(k) for k in new):

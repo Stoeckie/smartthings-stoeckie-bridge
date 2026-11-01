@@ -8,7 +8,7 @@ One small bridge brings cloud-only appliances into SmartThings:
 | **Fujitsu FGLair** air conditioners | on/off, mode, setpoint, fan, swing, room and outdoor temperature | [smartthings-fujitsu-fglair](https://github.com/Stoeckie/smartthings-fujitsu-fglair) |
 | **Škoda** cars (official MyŠkoda public API) | battery, charging on/off and power, charging cable, climate, at home, doors | [smartthings-skoda-bridge](https://github.com/Stoeckie/smartthings-skoda-bridge) |
 | **VELUX ACTIVE** departure mode (optional) | lock and unlock (departure mode: all windows and blinds blocked); rain sensor as its own device | windows: [VELUX ACTIVE (HomeKit local)](https://github.com/Stoeckie/smartthings-velux-active-local) |
-| **Buienradar** (optional) | rain now and the next 2 hours for a location in NL/BE with a radius: rain or dry, mm/h, minutes until rain, how long it rains | |
+| **Rain radar** (optional) | rain now and the next 2 hours at your address with a radius: rain or dry, mm/h, minutes until rain, how long it rains. Buienradar in NL/BE, Open-Meteo worldwide | |
 | **iRobot** favorites (optional) | favorite names and rooms for the [iRobot Roomba (local)](https://github.com/Stoeckie/smartthings-irobot-roomba-local) driver | |
 
 **This repository is the only place with the code.** The brand pages above explain one brand each and point here. Use only what you need: a source you do not set up is skipped.
@@ -16,7 +16,7 @@ One small bridge brings cloud-only appliances into SmartThings:
 SmartThings Edge drivers can not reach the internet, so there are two parts:
 
 ```
-Electrolux / FGLair / Škoda / iRobot / VELUX / Buienradar <-- bridge (Windows pc or Docker, port 8787) <--LAN-- Edge driver on the hub
+Electrolux / FGLair / Škoda / iRobot / VELUX / Buienradar / Open-Meteo <-- bridge (Windows pc or Docker, port 8787) <--LAN-- Edge driver on the hub
 ```
 
 * `bridge/`: small Python service for a pc that is always on: Windows (installer) or any Docker host (Linux, NAS, Raspberry Pi)
@@ -69,22 +69,28 @@ Everything that is not a secret can be set in both places; the last change wins.
 | Fujitsu FGLair | update interval (any air conditioner, applies to all) | login, region |
 | Škoda | update interval, climate temperature, battery history graph | API key, VIN |
 | VELUX | update interval (on VELUX vertrekstand) | login, gateway pairing |
-| Buienradar | on/off (Stoeckie Bridge device); postcode, house number or coordinates, radius, rain threshold, show (Buienradar device) | |
+| Rain radar | on/off (Stoeckie Bridge device); postcode + house number, address or coordinates, radius, rain threshold, source, show (rain radar device) | |
 | iRobot | | login |
 
-## Buienradar rain radar
+## Rain radar (Buienradar, Open-Meteo)
 
-Rain at your address in the Netherlands or Belgium, now and the next two hours (5 minute steps, refreshed every 5 minutes).
+Rain at your address, now and the next two hours, refreshed every 5 minutes. Sources:
 
-1. Switch it on: setting **Buienradar (rain radar)** of the **Stoeckie Bridge** device in SmartThings (or fill in the Buienradar section of the setup page). A **Buienradar** device appears.
-2. In the settings of the **Buienradar** device:
-   * **Postcode** and **House number**: the bridge looks up the location once (PDOK Locatieserver, Dutch addresses).
-   * **Or latitude, longitude** (e.g. in Belgium): wins over the postcode.
-   * **Radius (meters)**: 0 to 25000. With a radius the bridge also reads 8 points on a ring at that distance (and 8 at half of it, from 3 km) and takes the heaviest rain per 5 minutes, so "rain" means rain anywhere within the radius.
+* **Buienradar** in the Netherlands and Belgium: radar forecast in 5 minute steps.
+* **Open-Meteo** everywhere else: forecast in 15 minute steps, no account or key ([open-meteo.com](https://open-meteo.com), CC BY 4.0).
+* **Auto** (default) picks Buienradar inside NL/BE and Open-Meteo outside.
+
+1. Switch it on: setting **Rain radar** of the **Stoeckie Bridge** device in SmartThings (or fill in the rain radar section of the setup page). A **Buienradar** / **Rain radar** device appears.
+2. In the settings of that device:
+   * **Postcode (NL)** and **House number**: looked up once via the PDOK Locatieserver.
+   * **Or address (any country)**: e.g. `Rue de Rivoli 1, Paris, France`, looked up once via OpenStreetMap Nominatim.
+   * **Or latitude, longitude**: wins over both.
+   * **Radius (meters)**: 0 to 25000. With a radius the bridge also reads 8 points on a ring at that distance (and 8 at half of it, from 3 km) and takes the heaviest rain per time step, so "rain" means rain anywhere within the radius.
    * **Rain from (mm/h)**: default 0.1.
-   * **Show**: **Detail** (default): `rainSensor` (rain detected or not), `precipitationSensor` (none, possible, light, moderate, heavy, violent) and the custom capability `silvervalley08660.rainForecast`: rain now (mm/h), rain starts in (minutes, 999 = no rain in the next 2 hours), rain lasts (minutes) and a short summary, all usable in routines, e.g. *rain starts in less than 15 minutes → close the windows*. **Rain or dry only**: just `rainSensor`.
+   * **Source**: Auto, Buienradar or Open-Meteo.
+   * **Show**: **Detail** (default): `rainSensor` (rain detected or not), `precipitationSensor` (none, possible, light, moderate, heavy, violent) and the custom capability `silvervalley08660.rainForecast`: rain now (mm/h), rain starts in (minutes, 999 = no rain in the next 2 hours), rain lasts (minutes) and a short summary (Dutch in NL/BE, English elsewhere), all usable in routines, e.g. *rain starts in less than 15 minutes → close the windows*. **Rain or dry only**: just `rainSensor`.
 
-The setup page has the same fields; the last change wins. Data: [Buienradar](https://www.buienradar.nl), free for personal use; addresses: [PDOK Locatieserver](https://www.pdok.nl).
+The setup page has the same fields; the last change wins. Data: [Buienradar](https://www.buienradar.nl) (free for personal use), [Open-Meteo](https://open-meteo.com) (CC BY 4.0); addresses: [PDOK](https://www.pdok.nl), [OpenStreetMap Nominatim](https://nominatim.org) (© OpenStreetMap contributors, ODbL).
 
 ## Battery history graph (car)
 
@@ -128,8 +134,8 @@ pip install -r bridge/requirements.txt pytest lupa
 python -m pytest bridge/tests driver/tests
 ```
 
-Tests run without real accounts: a fake Ayla cloud (FGLair), a fake Škoda API, a fake iRobot account, a fake VELUX cloud and gateway pairing port, a fake Buienradar, and the Edge driver (`driver/src/init.lua`) with a mocked SmartThings runtime against the bridge in `--demo` mode.
+Tests run without real accounts: a fake Ayla cloud (FGLair), a fake Škoda API, a fake iRobot account, a fake VELUX cloud and gateway pairing port, a fake Buienradar, Open-Meteo and Nominatim, and the Edge driver (`driver/src/init.lua`) with a mocked SmartThings runtime against the bridge in `--demo` mode.
 
 ## License
 
-Apache 2.0, see LICENSE. Not affiliated with AB Electrolux, AEG, Fujitsu General, Ayla Networks, Škoda Auto, iRobot, VELUX, Netatmo, Buienradar or Samsung SmartThings.
+Apache 2.0, see LICENSE. Not affiliated with AB Electrolux, AEG, Fujitsu General, Ayla Networks, Škoda Auto, iRobot, VELUX, Netatmo, Buienradar, Open-Meteo, OpenStreetMap or Samsung SmartThings.

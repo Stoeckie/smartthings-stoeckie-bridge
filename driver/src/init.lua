@@ -8,7 +8,7 @@
 --   car    (Škoda public API)         -> battery, charging switch + power, at home, plug, climate, doors
 --   velux_lock (VELUX departure mode) -> lock (locked = away: all windows and blinds blocked)
 --   rain   (VELUX gateway rain sensor) -> rainSensor (detected = raining)
---   rainradar (Buienradar)           -> rainSensor; detail: precipitationSensor + rainForecast (mm/h, minutes until
+--   rainradar (Buienradar / Open-Meteo) -> rainSensor; detail: precipitationSensor + rainForecast (mm/h, minutes until
 --                                       rain, minutes of rain, summary)
 local Driver = require "st.driver"
 local capabilities = require "st.capabilities"
@@ -16,7 +16,7 @@ local log = require "log"
 local cosock = require "cosock"
 local api = require "bridge_api"
 
-local BUILD = "2026-11-01e"
+local BUILD = "2026-11-01f"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -509,12 +509,13 @@ local function info_changed(driver, device, event, args)
     send(driver, device, "settings", { poll_seconds = p.pollSeconds })
   end
   -- Buienradar settings: pass them to the bridge (it looks up the postcode)
-  local rkeys = { "postcode", "houseNumber", "location", "radiusMeters", "rainThreshold" }
+  local rkeys = { "postcode", "houseNumber", "address", "location", "radiusMeters", "rainThreshold", "provider" }
   local rchanged = false
   for _, k in ipairs(rkeys) do if p[k] ~= nil and p[k] ~= old[k] then rchanged = true end end
   if rchanged then
     send(driver, device, "settings", { postcode = p.postcode or "", housenumber = p.houseNumber or "",
-      location = p.location or "", radius_m = p.radiusMeters, threshold = p.rainThreshold })
+      address = p.address or "", location = p.location or "", radius_m = p.radiusMeters,
+      threshold = p.rainThreshold, provider = p.provider or "auto" })
   end
 end
 

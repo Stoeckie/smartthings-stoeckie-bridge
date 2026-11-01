@@ -24,8 +24,8 @@ preferences:
         simple: "Rain or dry only"
       default: "detail"
   - name: postcode
-    title: Postcode
-    description: Dutch postcode, e.g. 1234AB. Together with the house number this sets the location.
+    title: Postcode (NL)
+    description: Dutch postcode, e.g. 1234AB. Together with the house number this sets the location. Elsewhere use the address.
     required: false
     preferenceType: string
     definition:
@@ -38,9 +38,17 @@ preferences:
     definition:
       stringType: text
       default: ""
+  - name: address
+    title: Or address (any country)
+    description: "Street and number, city, country, e.g. Rue de Rivoli 1, Paris, France. Looked up once (OpenStreetMap)."
+    required: false
+    preferenceType: string
+    definition:
+      stringType: text
+      default: ""
   - name: location
     title: Or latitude, longitude
-    description: "Instead of a postcode (e.g. in Belgium): 50.85, 4.35. Wins over the postcode. Leave empty to use the postcode."
+    description: "e.g. 48.86, 2.35. Wins over the postcode and the address. Leave empty to use those."
     required: false
     preferenceType: string
     definition:
@@ -64,3 +72,14 @@ preferences:
       minimum: 0.05
       maximum: 5
       default: 0.1
+  - name: provider
+    title: Source
+    description: "Auto: Buienradar in the Netherlands and Belgium (radar, 5 minute steps), Open-Meteo elsewhere (15 minute steps)."
+    required: false
+    preferenceType: enumeration
+    definition:
+      options:
+        auto: "Auto"
+        buienradar: "Buienradar (NL/BE)"
+        openmeteo: "Open-Meteo (worldwide)"
+      default: "auto"
