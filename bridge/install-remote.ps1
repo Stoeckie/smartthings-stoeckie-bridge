@@ -48,6 +48,7 @@ function Ask-Yes([string]$q, [bool]$default = $true) {
 
 $session = $null
 $saveCred = $false
+$failed = $false
 $localStopped = $false
 try {
     # ---- target, answers of the last run, login
@@ -74,7 +75,8 @@ try {
         catch { Write-Host "Opgeslagen login niet leesbaar, opnieuw vragen."; $cred = $null }
     }
     if (-not $cred) {
-        if ($Unattended) { throw "Geen opgeslagen login. Start install-remote.bat een keer en kies 'login bewaren'." }
+        # no saved login yet: ask once (also from update-remote.bat) and offer to save it
+        $Unattended = $false
         Write-Host ""
         Write-Host "Log in met een beheerder van $Target."
         Write-Host "Gebruiker: PCNAAM\gebruikersnaam, of het e-mailadres van het Microsoft account (wachtwoord, geen pincode)."
@@ -264,6 +266,7 @@ try {
     if ($allow) { Write-Host "Setup pagina: http://${Target}:8787/setup" }
     Write-Host "Geef $Target een vaste DHCP reservering in UniFi."
 } catch {
+    $failed = $true
     Write-Host ""
     Write-Host "FOUT: $($_.Exception.Message)"
     if ($localStopped -and (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) {
@@ -273,5 +276,5 @@ try {
 } finally {
     if ($session) { Remove-PSSession $session }
     Stop-Transcript | Out-Null
-    if (-not $Unattended) { Read-Host "Druk op Enter om te sluiten" }
+    if (-not $Unattended -or $failed) { Read-Host "Druk op Enter om te sluiten" }
 }
