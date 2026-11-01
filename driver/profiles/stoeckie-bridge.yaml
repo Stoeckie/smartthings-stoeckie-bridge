@@ -4,6 +4,8 @@ components:
     capabilities:
       - id: silvervalley08660.connectionStatus
         version: 1
+      - id: silvervalley08660.connectionLog
+        version: 1
       - id: refresh
         version: 1
     categories:

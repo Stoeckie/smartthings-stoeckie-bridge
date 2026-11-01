@@ -16,19 +16,40 @@ local capabilities = require "st.capabilities"
 -- Connection status as a capability, so routines can notify when this device loses its connection
 -- (SmartThings itself has no "device offline" trigger for routines).
 -- Short drops (a reconnect, one missed poll) are ignored: Offline is only emitted after CONN_GRACE seconds down.
+-- Every drop is remembered (time, duration, reason) and shown as "Last drop" once the connection is back.
 local conn_cap = capabilities["silvervalley08660.connectionStatus"]
+local drop_cap = capabilities["silvervalley08660.connectionLog"]
 local CONN_GRACE = 120
 local function emit_conn(dev, v)
   if dev:get_field("conn_status") == v then return end
   local ok = pcall(function() dev:emit_event(conn_cap.status(v)) end)
   if ok then dev:set_field("conn_status", v) end
 end
-local function set_conn(dev, up)
+local function fmt_secs(s)
+  if s < 120 then return string.format("%d s", s) end
+  if s < 7200 then return string.format("%d min", s // 60) end
+  return string.format("%.1f h", s / 3600)
+end
+local function note_drop(dev, reason)
+  if dev:get_field("conn_drop") then return end
+  dev:set_field("conn_drop", { at = os.time(), reason = tostring(reason or "unknown"):sub(1, 120) }, { persist = true })
+end
+local function report_drop(dev)
+  local d = dev:get_field("conn_drop")
+  if type(d) ~= "table" or not d.at then return end
+  dev:set_field("conn_drop", nil, { persist = true })
+  local txt = string.format("%s UTC, %s: %s", os.date("!%Y-%m-%d %H:%M:%S", d.at), fmt_secs(math.max(0, os.time() - d.at)), tostring(d.reason))
+  require("log").info("[conn] " .. tostring(dev.label) .. " back after drop at " .. txt)
+  pcall(function() dev:emit_event(drop_cap.lastDrop(txt:sub(1, 200))) end)
+end
+local function set_conn(dev, up, reason)
   if up then
     dev:set_field("conn_down_since", nil)
+    report_drop(dev)
     emit_conn(dev, "online")
     return
   end
+  note_drop(dev, reason)
   if dev:get_field("conn_down_since") then return end
   local since = os.time()
   dev:set_field("conn_down_since", since)
@@ -43,7 +64,7 @@ local log = require "log"
 local cosock = require "cosock"
 local api = require "bridge_api"
 
-local BUILD = "2026-11-01h"
+local BUILD = "2026-11-01i"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -364,7 +385,7 @@ local function poll(driver, parent)
     -- bridge moved to another pc or got a new IP: look for it again (same bridge id), unless the IP is fixed
     local fixed = (parent.preferences or {}).ipAddress
     if (fixed == nil or fixed == "" or fixed == "auto") and st and st.fails >= 2 then maybe_rescan(driver, parent) end
-    set_conn(parent, false)
+    set_conn(parent, false, "poll failed: " .. tostring(err))
     parent:offline()
     for _, child in pairs(children_by_key(driver, parent)) do child:offline() end
     return
