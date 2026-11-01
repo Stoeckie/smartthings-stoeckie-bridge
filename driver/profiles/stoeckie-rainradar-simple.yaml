@@ -1,0 +1,21 @@
+name: stoeckie-rainradar-simple
+components:
+  - id: main
+    capabilities:
+      - id: rainSensor
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: RainSensor
+preferences:
+  - name: rainMode
+    title: Show
+    description: "Detail: rain now (mm/h), minutes until rain, how long it rains and a summary, usable in routines. Simple: only rain or dry."
+    required: false
+    preferenceType: enumeration
+    definition:
+      options:
+        detail: "Detail"
+        simple: "Rain or dry only"
+      default: "detail"

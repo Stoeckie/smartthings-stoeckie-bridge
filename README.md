@@ -8,6 +8,7 @@ One small bridge brings cloud-only appliances into SmartThings:
 | **Fujitsu FGLair** air conditioners | on/off, mode, setpoint, fan, swing, room and outdoor temperature | [smartthings-fujitsu-fglair](https://github.com/Stoeckie/smartthings-fujitsu-fglair) |
 | **Škoda** cars (official MyŠkoda public API) | battery, charging on/off and power, charging cable, climate, at home, doors | [smartthings-skoda-bridge](https://github.com/Stoeckie/smartthings-skoda-bridge) |
 | **VELUX ACTIVE** departure mode (optional) | lock and unlock (departure mode: all windows and blinds blocked); rain sensor as its own device | windows: [VELUX ACTIVE (HomeKit local)](https://github.com/Stoeckie/smartthings-velux-active-local) |
+| **Buienradar** (optional) | rain now and the next 2 hours for a location in NL/BE with a radius: rain or dry, mm/h, minutes until rain, how long it rains | |
 | **iRobot** favorites (optional) | favorite names and rooms for the [iRobot Roomba (local)](https://github.com/Stoeckie/smartthings-irobot-roomba-local) driver | |
 
 **This repository is the only place with the code.** The brand pages above explain one brand each and point here. Use only what you need: a source you do not set up is skipped.
@@ -15,7 +16,7 @@ One small bridge brings cloud-only appliances into SmartThings:
 SmartThings Edge drivers can not reach the internet, so there are two parts:
 
 ```
-Electrolux / FGLair / Škoda / iRobot / VELUX cloud <-- bridge (Windows pc or Docker, port 8787) <--LAN-- Edge driver on the hub
+Electrolux / FGLair / Škoda / iRobot / VELUX / Buienradar <-- bridge (Windows pc or Docker, port 8787) <--LAN-- Edge driver on the hub
 ```
 
 * `bridge/`: small Python service for a pc that is always on: Windows (installer) or any Docker host (Linux, NAS, Raspberry Pi)
@@ -34,10 +35,10 @@ Set the Windows network to **Private** and give the pc a fixed IP (DHCP reservat
 
 **Install or move to another Windows pc over the LAN:**
 
-1. On the target pc, once: right click `prep-remote.bat` > Run as administrator (network to Private, PowerShell remoting on).
+1. On the target pc, once: right click `prep-remote.bat` > Run as administrator (network to Private, PowerShell remoting on). The installer limits remoting on the target to the own network.
 2. On the pc where the bridge runs now: `install-remote.bat`. It asks for the target IP and an administrator login of the target (not stored), installs Python, the bridge and the packages in `C:\StoeckieBridge`, copies `config.json`, opens port 8787, registers a task that starts the bridge at boot as SYSTEM (no logon needed), checks the target over the LAN and then switches the bridge off here. On any error the bridge here starts again.
 3. SmartThings needs nothing: the bridge id moves with `config.json`, so the driver finds the same bridge on the new IP by itself within a few minutes (or Add device > Scan nearby). Give the target a DHCP reservation.
-4. **Update later:** put the new files in the bridge folder here and run `install-remote.bat` again; answer **n** when it asks to overwrite `config.json` on the target (the target has the current tokens). Afterwards it copies the target's `config.json` back here, so the copy here stays a current backup. On the target the bridge runs as SYSTEM, so `restart.bat` there needs "Run as administrator".
+4. **Update later:** put the new files in the bridge folder here and run `update-remote.bat`. The first `install-remote.bat` run asks whether to save the login: it is stored in `remote-cred.xml`, encrypted with Windows DPAPI for your Windows account on this pc (no other account or pc can read it). Admin rights on this pc are only needed once (WinRM client service on, target IP trusted; this pc gets no remoting listener), so `update-remote.bat` runs without prompts. It never overwrites `config.json` on the target. Delete `remote-cred.xml` to forget the login. Or run `install-remote.bat` again and answer **n** when it asks to overwrite `config.json` (the target has the current tokens). Afterwards it copies the target's `config.json` back here, so the copy here stays a current backup. On the target the bridge runs as SYSTEM, so `restart.bat` there needs "Run as administrator".
 
 Never run two bridges with the same `config.json`: Electrolux refresh tokens rotate and Škoda allows 20 requests per hour.
 
@@ -58,6 +59,20 @@ docker compose up -d --build
 1. Enroll your hub in the channel: https://bestow-regional.api.smartthings.com/invite/qWjBdybRNG2y (Stoeckie Edge Drivers) and install **Stoeckie Bridge (local)**.
 2. SmartThings app: **Add device → Scan nearby**. The driver scans the hub's subnet on port 8787 and creates a "Stoeckie Bridge" device; your appliances and cars appear at the next poll.
 
+## Buienradar rain radar
+
+Rain for one spot in the Netherlands or Belgium, now and the next two hours (5 minute steps, refreshed every 5 minutes).
+
+1. Set the location (latitude, longitude, e.g. `52.35, 5.62`: right click the spot in Google Maps) and a radius in km: in the settings of the **Stoeckie Bridge** device in SmartThings, or in the Buienradar section of the setup page. The last change wins.
+2. A **Buienradar** device appears. With a radius the bridge also reads 8 points on a ring at that distance (and 8 at half of it) and takes the heaviest rain per 5 minutes, so "rain" means rain anywhere within the radius.
+
+The device setting **Show** chooses:
+
+* **Detail** (default): `rainSensor` (rain detected or not), `precipitationSensor` (none, possible, light, moderate, heavy, violent) and the custom capability `silvervalley08660.rainForecast`: rain now (mm/h), rain starts in (minutes, 999 = no rain in the next 2 hours), rain lasts (minutes) and a short summary. All usable in routines, e.g. *rain starts in less than 15 minutes → close the windows*.
+* **Rain or dry only**: just `rainSensor`.
+
+Rain counts from 0.1 mm/h. Data: [Buienradar](https://www.buienradar.nl), free for personal use.
+
 ## Battery history graph (car)
 
 SmartThings draws no graph for battery %. The car's setting **Battery history graph** repeats the battery level as a reading that does get a graph:
@@ -75,13 +90,13 @@ The windows and blinds run locally on the hub with the [VELUX ACTIVE (HomeKit lo
 1. Setup page, section VELUX: e-mail and password of the VELUX ACTIVE app. Locking works right away.
 2. Unlocking must be signed with a key from the gateway. Once: fill in the gateway IP, click **Gateway koppelen**, wait until the gateway light flashes and press the gateway button within 3 minutes. The key stays in `config.json`.
 
-The gateway's rain sensor becomes its own device, **VELUX regensensor** (water sensor: wet = raining).
+The gateway's rain sensor becomes its own device, **VELUX regensensor** (rain sensor: detected = raining).
 
 ## Security and privacy
 
 * Credentials only live in `config.json` on the bridge pc (in `.gitignore`), never in the code or the driver.
 * The setup page only answers on the pc itself (or `STBRIDGE_SETUP_ALLOW`), only when opened by IP or `localhost`, and refuses forms posted from other websites.
-* The LAN API only answers private and local addresses: `GET /stbridge/info`, `GET /stbridge/devices`, `POST /stbridge/devices/<id>/command` with `{"cmd": ..., "value": ...}`, `GET /stbridge/irobot/<blid>`.
+* The LAN API only answers private and local addresses: `GET /stbridge/info`, `GET /stbridge/devices`, `POST /stbridge/devices/<id>/command` with `{"cmd": ..., "value": ...}`, `GET /stbridge/irobot/<blid>`, `POST /stbridge/buienradar` (location and radius).
 
 ## Unofficial parts
 
@@ -97,8 +112,8 @@ pip install -r bridge/requirements.txt pytest lupa
 python -m pytest bridge/tests driver/tests
 ```
 
-Tests run without real accounts: a fake Ayla cloud (FGLair), a fake Škoda API, a fake iRobot account, a fake VELUX cloud and gateway pairing port, and the Edge driver (`driver/src/init.lua`) with a mocked SmartThings runtime against the bridge in `--demo` mode.
+Tests run without real accounts: a fake Ayla cloud (FGLair), a fake Škoda API, a fake iRobot account, a fake VELUX cloud and gateway pairing port, a fake Buienradar, and the Edge driver (`driver/src/init.lua`) with a mocked SmartThings runtime against the bridge in `--demo` mode.
 
 ## License
 
-Apache 2.0, see LICENSE. Not affiliated with AB Electrolux, AEG, Fujitsu General, Ayla Networks, Škoda Auto, iRobot, VELUX, Netatmo or Samsung SmartThings.
+Apache 2.0, see LICENSE. Not affiliated with AB Electrolux, AEG, Fujitsu General, Ayla Networks, Škoda Auto, iRobot, VELUX, Netatmo, Buienradar or Samsung SmartThings.

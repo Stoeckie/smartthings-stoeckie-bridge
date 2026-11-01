@@ -12,3 +12,8 @@ bridge/install-log.txt
 bridge/restart-log.txt
 bridge/check.txt
 bridge/venv/
+bridge/remote-cred.xml
+bridge/remote-target.json
+bridge/remote-target.txt
+bridge/remote-ready.txt
+bridge/*-log.txt

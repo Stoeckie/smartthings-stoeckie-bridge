@@ -32,3 +32,20 @@ preferences:
       minimum: 3
       maximum: 600
       default: 10
+  - name: rainLocation
+    title: Buienradar location
+    description: "Optional rain radar (NL/BE): latitude, longitude, e.g. 52.35, 5.62 (right click the spot in Google Maps). A Buienradar device appears."
+    required: false
+    preferenceType: string
+    definition:
+      stringType: text
+      default: ""
+  - name: rainRadius
+    title: Buienradar radius (km)
+    description: Rain anywhere within this distance counts. 0 = only the location itself. Max 25.
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 0
+      maximum: 25
+      default: 0

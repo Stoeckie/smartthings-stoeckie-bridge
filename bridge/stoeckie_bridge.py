@@ -9,6 +9,7 @@ Sources
     plug, doors, climate; start/stop charging and climate. Polled every 10 minutes (the API allows 20 calls/hour).
   * iRobot account (optional): favorite names and rooms for the "iRobot Roomba (local)" Edge driver
     (library roombapy-prime). Only read, twice a day; the robot itself is controlled locally by the hub.
+  * Buienradar (optional): rain now and the next 2 hours for a location (NL/BE) with a radius, every 5 minutes.
   * VELUX ACTIVE (optional): departure mode lock/unlock via the VELUX/Netatmo cloud. Unlock is signed with a key
     the gateway hands out locally once (button press). The windows stay local (HomeKit driver on the hub).
 
@@ -24,6 +25,8 @@ LAN API (default port 8787, no auth, LAN only)
       car:     on | off (charging) | climate_on | climate_off | limit (percent) | refresh
       velux_lock: lock | unlock | refresh
       rain:    refresh (VELUX gateway rain sensor)
+      rainradar: refresh (Buienradar: raining, rainRate mm/h, minutesUntilRain, minutesOfRain, intensity, summary)
+  POST /stbridge/buienradar               body {"location": "52.35, 5.62", "radius": 5} (from the bridge device)
   GET  /stbridge/irobot/<blid>[?refresh=1] -> {"name", "favorites": [{name, id, command, params}], "updated"}
 
 Usage
@@ -52,7 +55,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-10-31b"
+VERSION = "2026-11-01a"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -1031,6 +1034,180 @@ class VeluxCloud:
 VELUX: dict[str, Any] = {"source": None, "error": None}
 
 
+# ---------------------------------------------------------------- Buienradar (rain radar forecast, NL and BE)
+# Two hours ahead in 5 minute steps for a point. For a radius the bridge also reads points on a ring around it
+# (and a half ring) and takes the heaviest rain per time step. Data: Buienradar (gpsgadget raintext).
+
+BUIENRADAR_URL = "https://gpsgadget.buienradar.nl/data/raintext"
+RAIN_THRESHOLD = 0.1  # mm/h counts as rain
+
+
+def buienradar_configured(b: dict[str, Any]) -> bool:
+    return b.get("lat") is not None and b.get("lon") is not None
+
+
+def parse_location(text: Any) -> tuple[float, float] | None:
+    """'52.35, 5.62' or '52.35 5.62' -> (52.35, 5.62); None when not a valid location."""
+    import re
+    nums = re.findall(r"-?\d+(?:[.,]\d+)?", str(text or ""))
+    if len(nums) != 2:
+        return None
+    lat, lon = (float(n.replace(",", ".")) for n in nums)
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return None
+    return lat, lon
+
+
+def buienradar_settings(location: Any, radius: Any, current: dict[str, Any]) -> dict[str, Any]:
+    out = {k: current.get(k) for k in ("lat", "lon")}
+    out["radius_km"] = current.get("radius_km", 0)
+    loc = parse_location(location) if location not in (None, "") else None
+    if loc:
+        out["lat"], out["lon"] = round(loc[0], 4), round(loc[1], 4)
+    try:
+        if radius not in (None, ""):
+            out["radius_km"] = max(0, min(25, int(float(str(radius).replace(",", ".")))))
+    except ValueError:
+        pass
+    return out
+
+
+def rain_points(lat: float, lon: float, radius_km: float) -> list[tuple[float, float]]:
+    """Center plus rings at the radius (and half of it): 8 directions each, rounded like Buienradar (2 decimals)."""
+    import math
+    pts = [(round(lat, 2), round(lon, 2))]
+    rings = [radius_km] + ([radius_km / 2] if radius_km >= 3 else []) if radius_km > 0 else []
+    for r in rings:
+        for k in range(8):
+            a = math.radians(45 * k)
+            dlat = r * math.cos(a) / 111.32
+            dlon = r * math.sin(a) / (111.32 * math.cos(math.radians(lat)))
+            p = (round(lat + dlat, 2), round(lon + dlon, 2))
+            if p not in pts:
+                pts.append(p)
+    return pts
+
+
+def parse_raintext(text: str) -> list[float]:
+    """Buienradar raintext ('077|10:35' per line) -> mm/h per 5 minutes."""
+    out = []
+    for line in text.splitlines():
+        v = line.split("|")[0].strip()
+        if not v.isdigit():
+            continue
+        n = int(v)
+        out.append(0.0 if n == 0 else round(10 ** ((n - 109) / 32), 2))
+    return out
+
+
+def rain_summary(rates: list[float], threshold: float = RAIN_THRESHOLD) -> dict[str, Any]:
+    """Now, minutes until rain, how long it rains, intensity class and a short Dutch summary."""
+    if not rates:
+        return {}
+    wet = [r >= threshold for r in rates]
+    horizon = len(rates) * 5
+    now = rates[0]
+    if wet[0]:
+        until = 0
+        start = 0
+    else:
+        start = next((i for i, w in enumerate(wet) if w), None)
+        until = 999 if start is None else start * 5
+    lasts = 0
+    if start is not None:
+        end = next((i for i in range(start, len(wet)) if not wet[i]), len(wet))
+        lasts = (end - start) * 5
+    peak = max(rates[start:start + lasts // 5] or [0]) if start is not None else 0.0
+    total = round(sum(rates) / 12, 1)  # mm in the next two hours
+
+    def level(r: float) -> str:
+        if r < threshold:
+            return "none"
+        if r < 2.5:
+            return "light"
+        if r < 10:
+            return "moderate"
+        if r < 50:
+            return "heavy"
+        return "violent"
+    intensity = level(now)
+    if intensity == "none" and until <= 15:
+        intensity = "possiblePrecipitation"
+    more = "+" if start is not None and start * 5 + lasts >= horizon else ""
+    if wet[0]:
+        text = f"Regent nu ({now:g} mm/u), nog {lasts}{more} min"
+    elif start is not None:
+        text = f"Regen over {until} min, {lasts}{more} min lang, max {peak:g} mm/u"
+    else:
+        text = f"Droog, geen regen verwacht ({horizon // 60} uur)"
+    return {"raining": bool(wet[0]), "rainRate": round(now, 2), "minutesUntilRain": until, "minutesOfRain": lasts,
+            "peakRate": round(peak, 2), "totalMm": total, "intensity": intensity, "summary": text,
+            "horizonMinutes": horizon}
+
+
+class Buienradar:
+    POLL = 300  # Buienradar refreshes every 5 minutes
+
+    def __init__(self, cfg: dict[str, Any]) -> None:
+        self.b = cfg.get("buienradar") or {}
+        self.session = None
+        self.wake = asyncio.Event()
+
+    async def _fetch(self, lat: float, lon: float) -> list[float]:
+        async with self.session.get(BUIENRADAR_URL, params={"lat": f"{lat:.2f}", "lon": f"{lon:.2f}"},
+                                    headers={"User-Agent": "stoeckie-bridge (SmartThings)"}) as r:
+            if r.status != 200:
+                raise RuntimeError(f"HTTP {r.status}")
+            return parse_raintext(await r.text())
+
+    async def _refresh(self) -> None:
+        lat, lon = float(self.b["lat"]), float(self.b["lon"])
+        radius = float(self.b.get("radius_km") or 0)
+        pts = rain_points(lat, lon, radius)
+        sem = asyncio.Semaphore(4)
+
+        async def one(p):
+            async with sem:
+                return await self._fetch(*p)
+        series = [s for s in await asyncio.gather(*(one(p) for p in pts), return_exceptions=True)
+                  if isinstance(s, list) and s]
+        if not series:
+            raise RuntimeError("no data from Buienradar")
+        n = min(len(s) for s in series)
+        rates = [max(s[i] for s in series) for i in range(n)]  # heaviest rain anywhere in the radius
+        state = rain_summary(rates, float(self.b.get("threshold") or RAIN_THRESHOLD))
+        state.update(lat=lat, lon=lon, radiusKm=radius, points=len(series))
+        REG.upsert("buienradar", "rainradar", "Buienradar", state, True, self._command())
+        log.info("[buienradar] %s (%d point(s), radius %g km)", state["summary"], len(series), radius)
+
+    def _command(self):
+        async def handler(cmd: str, value: Any) -> None:
+            if cmd == "refresh":
+                self.wake.set()
+                return
+            raise ValueError(f"unsupported command {cmd}")
+        return handler
+
+    async def run(self) -> None:
+        if not buienradar_configured(self.b):
+            log.info("[buienradar] not configured (optional: set a location)")
+            return
+        import aiohttp
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
+            self.session = session
+            while True:
+                try:
+                    await self._refresh()
+                except Exception as ex:  # noqa: BLE001
+                    log.warning("[buienradar] update failed: %s", ex)
+                    REG.set_online("buienradar", False)
+                self.wake.clear()
+                try:
+                    await asyncio.wait_for(self.wake.wait(), timeout=self.POLL)
+                except asyncio.TimeoutError:
+                    pass
+
+
 # ---------------------------------------------------------------- LAN HTTP API
 
 SETUP_HTML = """<!doctype html><html lang="nl"><head><meta charset="utf-8">
@@ -1078,6 +1255,13 @@ twee keer per dag, voor de Roomba driver op de hub. De robot zelf wordt lokaal b
 <label>Wachtwoord</label><input name="password" type="password" autocomplete="off" required>
 <label>Land (2 letters)</label><input name="country" value="NL" maxlength="2" required>
 <button type="submit">iRobot opslaan en verbinden</button></form>
+<h3>Buienradar (optioneel)</h3>
+<p>Regen nu en de komende 2 uur op een plek in Nederland of België, met straal. Breedtegraad en lengtegraad vind je in
+Google Maps (rechtsklik op de plek). Ook in te stellen bij het Stoeckie Bridge apparaat in SmartThings.</p>
+<form method="post"><input type="hidden" name="section" value="buienradar">
+<label>Locatie (breedtegraad, lengtegraad)</label><input name="location" value="{rain_loc}" placeholder="52.35, 5.62" required>
+<label>Straal (km, 0 = alleen dit punt, max 25)</label><input name="radius_km" type="number" min="0" max="25" value="{rain_radius}" required>
+<button type="submit">Buienradar opslaan</button></form>
 <h3>VELUX ACTIVE vertrekstand (optioneel)</h3>
 <p>Voor vergrendelen en ontgrendelen (vertrekstand: alle ramen en zonwering geblokkeerd) vanuit SmartThings.
 De ramen zelf blijven lokaal via HomeKit lopen. E-mail en wachtwoord van de VELUX ACTIVE app.</p>
@@ -1164,6 +1348,11 @@ def make_app(bridge_id: str, on_setup=None) -> web.Application:
                     for d in cars))
             else:
                 lines.append("Škoda ingesteld, nog geen gegevens (zie bridge.log).")
+        b = cfg.get("buienradar") or {}
+        if buienradar_configured(b):
+            rd = REG.devices.get("buienradar")
+            lines.append("Buienradar: " + (rd["state"].get("summary", "") if rd else "bezig met ophalen")
+                         + f" ({b['lat']}, {b['lon']}, straal {b.get('radius_km', 0)} km)")
         v = cfg.get("velux") or {}
         if velux_configured(v):
             locks = [d for d in REG.devices.values() if d["type"] == "velux_lock"]
@@ -1195,6 +1384,10 @@ def make_app(bridge_id: str, on_setup=None) -> web.Application:
                 lines.append("iRobot ingesteld, bezig met ophalen.")
         return "<br>".join(html.escape(x) for x in lines)
 
+    def rain_loc() -> str:
+        b = load_config().get("buienradar") or {}
+        return f"{b['lat']}, {b['lon']}" if buienradar_configured(b) else ""
+
     async def setup_get(req):
         if not local_only(req):
             return web.Response(status=403, text="setup alleen op deze pc (localhost)")
@@ -1202,6 +1395,8 @@ def make_app(bridge_id: str, on_setup=None) -> web.Application:
         page = (SETUP_HTML.replace("{status}", status_text())
                 .replace("{skoda_poll}", html.escape(str(k.get("poll_minutes", 10))))
                 .replace("{skoda_temp}", html.escape(str(k.get("climate_temp", 21))))
+                .replace("{rain_loc}", html.escape(rain_loc()))
+                .replace("{rain_radius}", html.escape(str((load_config().get("buienradar") or {}).get("radius_km", 0))))
                 .replace("{velux_ip}", html.escape(str((load_config().get("velux") or {}).get("gateway_ip", "")))))
         return web.Response(text=page, content_type="text/html")
 
@@ -1230,6 +1425,13 @@ def make_app(bridge_id: str, on_setup=None) -> web.Application:
             r["country"] = str(form.get("country", "NL")).strip().upper()[:2] or "NL"
             save_config(cfg)
             log.info("[setup] iRobot login saved")
+        elif section == "buienradar":
+            b = cfg.setdefault("buienradar", {})
+            if parse_location(form.get("location")) is None:
+                return web.Response(status=400, text="geen geldige locatie, bijvoorbeeld 52.35, 5.62")
+            b.update(buienradar_settings(form.get("location"), form.get("radius_km"), b))
+            save_config(cfg)
+            log.info("[setup] Buienradar: %s, %s radius %s km", b["lat"], b["lon"], b["radius_km"])
         elif section == "velux":
             v = cfg.setdefault("velux", {})
             v["username"] = str(form.get("username", "")).strip()
@@ -1287,6 +1489,26 @@ def make_app(bridge_id: str, on_setup=None) -> web.Application:
         return web.json_response({"name": robot["name"], "favorites": robot["favorites"],
                                   "updated": IROBOT["updated"]})
 
+    async def buienradar_set(req):
+        """Location and radius from the SmartThings bridge device settings ({"location": "52.35, 5.62", "radius": 5})."""
+        try:
+            body = await req.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        cfg = load_config()
+        b = cfg.setdefault("buienradar", {})
+        if body.get("location") not in (None, "") and parse_location(body.get("location")) is None:
+            return web.json_response({"error": "invalid location"}, status=400)
+        new = buienradar_settings(body.get("location"), body.get("radius"), b)
+        if new != {k: b.get(k) for k in ("lat", "lon", "radius_km")}:
+            b.update(new)
+            save_config(cfg)
+            log.info("[buienradar] settings from SmartThings: %s, %s radius %s km", b.get("lat"), b.get("lon"),
+                     b.get("radius_km"))
+            if on_setup and buienradar_configured(b):
+                on_setup("buienradar")
+        return web.json_response({"ok": True, "buienradar": {k: b.get(k) for k in ("lat", "lon", "radius_km")}})
+
     async def command(req):
         dev_id = req.match_info["dev_id"]
         handler = REG.handlers.get(dev_id)
@@ -1314,6 +1536,7 @@ def make_app(bridge_id: str, on_setup=None) -> web.Application:
     app.router.add_get("/stbridge/devices", devices)
     app.router.add_post("/stbridge/devices/{dev_id}/command", command)
     app.router.add_get("/stbridge/irobot/{blid}", irobot)
+    app.router.add_post("/stbridge/buienradar", buienradar_set)
     return app
 
 
@@ -1376,6 +1599,8 @@ async def demo_devices() -> None:
         REG.upsert("demo-velux", "velux_lock", "Demo VELUX vertrekstand", velux, True, demo_velux)
 
     await demo_velux("refresh", None)
+    rain = rain_summary([0.0] * 4 + [0.5, 1.2, 0.8] + [0.0] * 17)
+    REG.upsert("demo-rainradar", "rainradar", "Demo Buienradar", rain, True, dry)
     t0 = time.time()
     while True:
         el = int(time.time() - t0) % 180
@@ -1412,7 +1637,8 @@ async def serve(args) -> None:
         bridge_id = cfg["bridge_id"] = uuid.uuid4().hex[:12]
         save_config(cfg)
     port = int(cfg.get("port", 8787))
-    sources = {"aeg": Electrolux, "fglair": FGLair, "skoda": Skoda, "irobot": IRobotCloud, "velux": VeluxCloud}
+    sources = {"aeg": Electrolux, "fglair": FGLair, "skoda": Skoda, "irobot": IRobotCloud, "velux": VeluxCloud,
+               "buienradar": Buienradar}
     tasks: dict[str, asyncio.Task] = {}
 
     def start(section: str) -> None:

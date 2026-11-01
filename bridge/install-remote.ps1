@@ -3,22 +3,30 @@
 # The target needs PowerShell remoting once: run prep-remote.bat on the target as administrator.
 #
 # What it does:
-#  - asks for the target IP and an administrator login of the target (nothing is stored)
+#  - asks for the target IP and an administrator login of the target; the login can be saved here, encrypted for your
+#    Windows account (remote-cred.xml, Windows DPAPI), so later updates run without questions: update-remote.bat
 #  - installs Python 3.12 on the target when missing, copies the bridge to C:\StoeckieBridge, venv + packages
 #  - stops the bridge here and copies config.json (keys + bridge id, so SmartThings keeps the same devices)
 #  - firewall rule 8787, scheduled task at startup as SYSTEM (runs without anyone logged on), starts it
 #  - checks from here that the target answers on port 8787; then disables the bridge here (or restarts it on failure)
 #  - copies the target's config.json back here, so the copy here stays a current backup
-param([string]$Target)
+param([string]$Target, [switch]$Unattended)
 $ErrorActionPreference = "Stop"
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $remoteDir = "C:\StoeckieBridge"
 $taskName = "Stoeckie Bridge"
 
+$credFile = Join-Path $dir "remote-cred.xml"      # saved login, encrypted for this Windows user (DPAPI)
+$prefsFile = Join-Path $dir "remote-target.json"   # target IP and the answers of the last run
+$readyFile = Join-Path $dir "remote-ready.txt"     # the WinRM client on this pc is set up (needs admin once)
+
+# admin is only needed the first time, to set up the WinRM client on this pc (service, trusted target IP)
 $me = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+$isAdmin = $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin -and -not (Test-Path $readyFile)) {
     $a = "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`""
     if ($Target) { $a += " -Target $Target" }
+    if ($Unattended) { $a += " -Unattended" }
     Start-Process powershell -Verb RunAs -ArgumentList $a
     exit
 }
@@ -31,50 +39,67 @@ function Stop-LocalBridge {
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 function Ask-Yes([string]$q, [bool]$default = $true) {
+    if ($Unattended) { return $default }
     $hint = if ($default) { "[J/n]" } else { "[j/N]" }
     $r = Read-Host "$q $hint"
     if (-not $r) { return $default }
     return $r -match "^[jJyY]"
 }
 
-$winrmWasStopped = $false
-$winrmStartType = $null
-$oldTrusted = $null
 $session = $null
+$saveCred = $false
 $localStopped = $false
 try {
-    # ---- target and login
-    $saved = Join-Path $dir "remote-target.txt"
-    if (-not $Target) {
-        $def = if (Test-Path $saved) { (Get-Content $saved -Raw).Trim() } else { "" }
-        $Target = Read-Host ("IP van de doel-pc" + $(if ($def) { " [$def]" } else { "" }))
-        if (-not $Target) { $Target = $def }
+    # ---- target, answers of the last run, login
+    $prefs = @{}
+    if (Test-Path $prefsFile) {
+        (Get-Content $prefsFile -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $prefs[$_.Name] = $_.Value }
+    } elseif (Test-Path (Join-Path $dir "remote-target.txt")) {
+        $prefs.target = (Get-Content (Join-Path $dir "remote-target.txt") -Raw).Trim()
     }
-    if ($Target -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { throw "Geen geldig IP adres: '$Target'" }
-    Set-Content -Path $saved -Value $Target
-
-    Write-Host ""
-    Write-Host "Log in met een beheerder van $Target."
-    Write-Host "Gebruiker: PCNAAM\gebruikersnaam, of het e-mailadres van het Microsoft account (wachtwoord, geen pincode)."
-    $cred = Get-Credential -Message "Beheerder op $Target"
-    if (-not $cred) { throw "Geen inloggegevens opgegeven." }
-
-    # ---- WinRM client on this pc (temporarily trust the target IP)
-    # (the WinRM service is often disabled on laptops: enable it for this run, restore it afterwards)
-    $svc = Get-Service WinRM
-    if ($svc.Status -ne "Running") {
-        $winrmWasStopped = $true
-        $winrmStartType = $svc.StartType
-        if ($svc.StartType -eq "Disabled") { Set-Service WinRM -StartupType Manual }
-        try { Start-Service WinRM } catch {
-            $d = Get-CimInstance Win32_Service -Filter "Name='WinRM'"
-            throw "WinRM start niet op deze pc (opstarttype $($d.StartMode), status $($d.State)): $($_.Exception.Message)"
+    if (-not $Target) {
+        $def = [string]$prefs.target
+        if ($Unattended -and $def) { $Target = $def }
+        else {
+            $Target = Read-Host ("IP van de doel-pc" + $(if ($def) { " [$def]" } else { "" }))
+            if (-not $Target) { $Target = $def }
         }
     }
-    $oldTrusted = (Get-Item WSMan:\localhost\Client\TrustedHosts).Value
-    if ($oldTrusted -ne "*" -and (($oldTrusted -split ",") -notcontains $Target)) {
-        $new = if ($oldTrusted) { "$oldTrusted,$Target" } else { $Target }
-        Set-Item WSMan:\localhost\Client\TrustedHosts -Value $new -Force
+    if ($Target -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { throw "Geen geldig IP adres: '$Target'" }
+    $prefs.target = $Target
+
+    $cred = $null
+    if (Test-Path $credFile) {
+        try { $cred = Import-Clixml $credFile; Write-Host "Opgeslagen login voor $Target gebruikt ($($cred.UserName))." }
+        catch { Write-Host "Opgeslagen login niet leesbaar, opnieuw vragen."; $cred = $null }
+    }
+    if (-not $cred) {
+        if ($Unattended) { throw "Geen opgeslagen login. Start install-remote.bat een keer en kies 'login bewaren'." }
+        Write-Host ""
+        Write-Host "Log in met een beheerder van $Target."
+        Write-Host "Gebruiker: PCNAAM\gebruikersnaam, of het e-mailadres van het Microsoft account (wachtwoord, geen pincode)."
+        $cred = Get-Credential -Message "Beheerder op $Target"
+        if (-not $cred) { throw "Geen inloggegevens opgegeven." }
+        $saveCred = Ask-Yes "Login bewaren op deze pc (versleuteld voor jouw Windows account), zodat updates zonder vragen kunnen?"
+    }
+
+    # ---- WinRM client on this pc, once (needs admin): service on, target IP trusted. No listener is opened here.
+    if ($isAdmin -and -not (Test-Path $readyFile)) {
+        $svc = Get-Service WinRM
+        if ($svc.StartType -eq "Disabled" -or $svc.StartType -eq "Manual") { Set-Service WinRM -StartupType Automatic }
+        if ($svc.Status -ne "Running") {
+            try { Start-Service WinRM } catch {
+                $d = Get-CimInstance Win32_Service -Filter "Name='WinRM'"
+                throw "WinRM start niet op deze pc (opstarttype $($d.StartMode), status $($d.State)): $($_.Exception.Message)"
+            }
+        }
+        $trusted = (Get-Item WSMan:\localhost\Client\TrustedHosts).Value
+        if ($trusted -ne "*" -and (($trusted -split ",") -notcontains $Target)) {
+            $new = if ($trusted) { "$trusted,$Target" } else { $Target }
+            Set-Item WSMan:\localhost\Client\TrustedHosts -Value $new -Force
+        }
+        Set-Content -Path $readyFile -Value "WinRM client ready for $Target ($(Get-Date -Format s))"
+        Write-Host "WinRM op deze pc ingesteld voor $Target (eenmalig)."
     }
 
     Write-Host "Verbinden met $Target..."
@@ -86,7 +111,14 @@ try {
         Write-Host "1. Kopieer prep-remote.bat naar $Target, rechtsklik > Als administrator uitvoeren."
         Write-Host "2. Controleer gebruikersnaam en wachtwoord (beheerder van $Target)."
         Write-Host "3. Start install-remote.bat opnieuw."
+        if ($_.Exception.Message -match "Access is denied|Toegang geweigerd|logon|aanmeld") {
+            Remove-Item $credFile -ErrorAction SilentlyContinue  # stored login no longer valid
+        }
         return
+    }
+    if ($saveCred) {
+        $cred | Export-Clixml -Path $credFile
+        Write-Host "Login bewaard in remote-cred.xml (alleen leesbaar voor jouw Windows account op deze pc)."
     }
     $info = Invoke-Command -Session $session {
         $p = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
@@ -143,8 +175,13 @@ try {
     $myIp = (Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -and $_.NetAdapter.Status -eq "Up" } |
              Select-Object -First 1).IPv4Address.IPAddress
     $allow = ""
-    if ($myIp -and (Ask-Yes "Setup pagina van de bridge ook vanaf deze pc ($myIp) kunnen openen?")) { $allow = "$myIp/32" }
-    $noSleep = Ask-Yes "Slaapstand uitzetten op $Target (nodig voor een bridge die altijd draait)?"
+    $allowDefault = if ($null -ne $prefs.allowSetup) { [bool]$prefs.allowSetup } else { $true }
+    $prefs.allowSetup = [bool]($myIp -and (Ask-Yes "Setup pagina van de bridge ook vanaf deze pc ($myIp) kunnen openen?" $allowDefault))
+    if ($prefs.allowSetup) { $allow = "$myIp/32" }
+    $sleepDefault = if ($null -ne $prefs.noSleep) { [bool]$prefs.noSleep } else { $true }
+    $noSleep = Ask-Yes "Slaapstand uitzetten op $Target (nodig voor een bridge die altijd draait)?" $sleepDefault
+    $prefs.noSleep = $noSleep
+    $prefs | ConvertTo-Json | Set-Content -Path $prefsFile
     $copyConfig = $true
     if ($info.HasConfig) {
         $copyConfig = Ask-Yes "Op $Target staat al een config.json. Overschrijven met die van deze pc?" $false
@@ -171,6 +208,9 @@ try {
             New-NetFirewallRule -DisplayName "Stoeckie Bridge" -Direction Inbound -Protocol TCP -LocalPort 8787 `
                 -Action Allow -Profile Private,Domain | Out-Null
         }
+        # PowerShell remoting on this pc: only from the own network (not from anywhere)
+        Get-NetFirewallRule -Name "WINRM-HTTP-In-TCP*" -ErrorAction SilentlyContinue |
+            Set-NetFirewallRule -RemoteAddress LocalSubnet -ErrorAction SilentlyContinue
         Get-NetConnectionProfile | Where-Object { $_.NetworkCategory -eq "Public" } |
             ForEach-Object { Set-NetConnectionProfile -InterfaceIndex $_.InterfaceIndex -NetworkCategory Private }
         if ($noSleep) { & powercfg /change standby-timeout-ac 0; & powercfg /change hibernate-timeout-ac 0 }
@@ -232,11 +272,6 @@ try {
     }
 } finally {
     if ($session) { Remove-PSSession $session }
-    if ($null -ne $oldTrusted) { Set-Item WSMan:\localhost\Client\TrustedHosts -Value $oldTrusted -Force }
-    if ($winrmWasStopped) {
-        Stop-Service WinRM -ErrorAction SilentlyContinue
-        if ($winrmStartType -eq "Disabled") { Set-Service WinRM -StartupType Disabled -ErrorAction SilentlyContinue }
-    }
     Stop-Transcript | Out-Null
-    Read-Host "Druk op Enter om te sluiten"
+    if (-not $Unattended) { Read-Host "Druk op Enter om te sluiten" }
 }

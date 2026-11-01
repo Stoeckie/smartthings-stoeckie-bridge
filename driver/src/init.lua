@@ -7,14 +7,16 @@
 --   aircon (Fujitsu via FGLair)       -> switch, airConditionerMode, setpoint, fan, swing, indoor/outdoor temp
 --   car    (Škoda public API)         -> battery, charging switch + power, at home, plug, climate, doors
 --   velux_lock (VELUX departure mode) -> lock (locked = away: all windows and blinds blocked)
---   rain   (VELUX gateway rain sensor) -> waterSensor (wet = raining)
+--   rain   (VELUX gateway rain sensor) -> rainSensor (detected = raining)
+--   rainradar (Buienradar)           -> rainSensor; detail: precipitationSensor + rainForecast (mm/h, minutes until
+--                                       rain, minutes of rain, summary)
 local Driver = require "st.driver"
 local capabilities = require "st.capabilities"
 local log = require "log"
 local cosock = require "cosock"
 local api = require "bridge_api"
 
-local BUILD = "2026-11-01b"
+local BUILD = "2026-11-01c"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -32,7 +34,8 @@ local coolSetpoint = capabilities.thermostatCoolingSetpoint
 
 local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor = "stoeckie-climate",
                   aircon = "stoeckie-aircon", car = "stoeckie-car-v2",
-                  velux_lock = "stoeckie-velux-lock", rain = "stoeckie-rain-v3" }
+                  velux_lock = "stoeckie-velux-lock", rain = "stoeckie-rain-v4",
+                  rainradar = "stoeckie-rainradar" }
 local MANUFACTURER = { dryer = "AEG", aircon = "Fujitsu", car = "Skoda" }
 
 -- bridge value <-> SmartThings value
@@ -240,12 +243,38 @@ end
 
 local function emit_rain(dev, s)
   if s.raining ~= nil then
-    try_emit(dev, function() return s.raining and capabilities.waterSensor.water.wet() or capabilities.waterSensor.water.dry() end)
+    try_emit(dev, function() return s.raining and capabilities.rainSensor.rain.detected() or capabilities.rainSensor.rain.undetected() end)
+  end
+end
+
+-- Buienradar: custom capability (namespace of the driver author) with rain rate and timing
+local rainForecast = capabilities["silvervalley08660.rainForecast"]
+
+local function rain_simple(dev) return (dev.preferences or {}).rainMode == "simple" end
+
+local function emit_rainradar(dev, s)
+  if s.raining ~= nil then
+    try_emit(dev, function() return s.raining and capabilities.rainSensor.rain.detected() or capabilities.rainSensor.rain.undetected() end)
+  end
+  if rain_simple(dev) then return end
+  if s.intensity then
+    try_emit(dev, function() return capabilities.precipitationSensor.precipitationIntensity(s.intensity) end)
+  end
+  if rainForecast then
+    if s.rainRate then try_emit(dev, function() return rainForecast.rainRate({ value = tonumber(s.rainRate), unit = "mm/h" }) end) end
+    if s.minutesUntilRain then
+      try_emit(dev, function() return rainForecast.minutesUntilRain({ value = math.floor(tonumber(s.minutesUntilRain)), unit = "min" }) end)
+    end
+    if s.minutesOfRain then
+      try_emit(dev, function() return rainForecast.minutesOfRain({ value = math.floor(tonumber(s.minutesOfRain)), unit = "min" }) end)
+    end
+    if s.summary then try_emit(dev, function() return rainForecast.summary(tostring(s.summary)) end) end
   end
 end
 
 local EMIT = { dryer = emit_dryer, window = emit_window, sensor = emit_sensor, aircon = emit_aircon, car = emit_car,
-               velux_lock = emit_velux_lock, rain = emit_rain }
+               velux_lock = emit_velux_lock, rain = emit_rain,
+               rainradar = emit_rainradar }
 
 -- polling -------------------------------------------------------------------------
 
@@ -254,6 +283,9 @@ local function child_profile(key, device)
   if key:match("^velux%-rain%-") or key == "demo-rain" then return PROFILE.rain end
   if key:match("^velux%-") or key == "demo-velux" then return PROFILE.velux_lock end
   if key:match("^skoda%-") or key == "demo-car" then return PROFILE.car .. CAR_GRAPH[graph_mode(device)] end
+  if key == "buienradar" or key == "demo-rainradar" then
+    return PROFILE.rainradar .. (rain_simple(device) and "-simple" or "")
+  end
 end
 
 local function sync_profile(device)
@@ -454,6 +486,16 @@ end
 
 local function info_changed(driver, device, event, args)
   if is_parent(device) then
+    -- Buienradar location / radius: pass them to the bridge (it starts the rain radar)
+    local old = args and args.old_st_store and args.old_st_store.preferences or {}
+    local p = device.preferences or {}
+    if (p.rainLocation or "") ~= (old.rainLocation or "") or p.rainRadius ~= old.rainRadius then
+      if (p.rainLocation or "") ~= "" then
+        local ip, port = bridge_addr(device)
+        local res, err = api.buienradar(ip, port, p.rainLocation, p.rainRadius)
+        if not res then log.error("[stbridge] Buienradar settings: " .. tostring(err)) end
+      end
+    end
     schedule_poll(driver, device)
     return
   end

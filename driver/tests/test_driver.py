@@ -33,7 +33,7 @@ local caps = capmock("cap")
 for _, id in ipairs({ "windowShade", "windowShadeLevel", "refresh", "dryerOperatingState", "switch", "battery",
                       "powerMeter", "presenceSensor", "contactSensor",
                       "airConditionerMode", "airConditionerFanMode", "fanOscillationMode",
-                      "thermostatCoolingSetpoint", "lock", "waterSensor", "relativeHumidityMeasurement" }) do caps[id].ID = id end
+                      "thermostatCoolingSetpoint", "lock", "waterSensor", "relativeHumidityMeasurement", "rainSensor", "precipitationSensor" }) do caps[id].ID = id end
 package.loaded["st.capabilities"] = caps
 package.loaded["st.driver"] = function(name, tmpl) DRIVER = tmpl; return { run = function() end } end
 package.loaded["log"] = { info = function(m) print("I " .. m) end, warn = function(m) print("W " .. m) end,
@@ -245,7 +245,7 @@ def test_velux_lock_flow(bridge):
     assert "main:cap.lock.lock.locked" in paths
     lua.execute('for _, d in ipairs(DEVICES) do if d.parent_assigned_child_key == "demo-rain" then RAIN = d end end')
     rain = lua.eval("RAIN")
-    assert rain is not None and rain.events[1].path == "cap.waterSensor.water.dry"
+    assert rain is not None and rain.events[1].path == "cap.rainSensor.rain.undetected"
 
     def state():
         with urllib.request.urlopen(f"http://127.0.0.1:{bridge}/stbridge/devices") as r:
@@ -288,3 +288,37 @@ def test_car_battery_graph(bridge):
     assert car.new_profile == "stoeckie-car-v2-pow"
     ev = {f"{car.events[i].comp}:{car.events[i].path}": car.events[i].arg for i in range(1, len(car.events) + 1)}
     assert ev["graph:cap.powerMeter.power"]["value"] == 64
+
+
+def test_rainradar(bridge):
+    lua = lua53.LuaRuntime(unpack_returned_tuples=True)
+    lua.execute(f'package.path = "{SRC}/?.lua;{HERE}/?.lua;" .. package.path')
+    lua.globals().py_http = py_http
+    lua.execute(HARNESS)
+    lua.execute(f'dofile("{SRC}/init.lua")')
+    lua.execute(f'''
+      PARENT = NEW_DEVICE({{ id = "p1", label = "Bridge", device_network_id = "stbridge-test1",
+                            preferences = {{ ipAddress = "127.0.0.1", port = "{bridge}" }} }})
+      DRIVER.lifecycle_handlers.init(DRIVER_OBJ, PARENT)
+      DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
+      DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
+      for _, d in ipairs(DEVICES) do if d.parent_assigned_child_key == "demo-rainradar" then RR = d end end
+    ''')
+    rr = lua.eval("RR")
+    ev = {f"{rr.events[i].comp}:{rr.events[i].path}": rr.events[i].arg for i in range(1, len(rr.events) + 1)}
+    assert "main:cap.rainSensor.rain.undetected" in ev
+    assert ev["main:cap.precipitationSensor.precipitationIntensity"] == "none"
+    assert ev["main:cap.silvervalley08660.rainForecast.minutesUntilRain"]["value"] == 20
+    assert ev["main:cap.silvervalley08660.rainForecast.minutesOfRain"]["value"] == 15
+    assert ev["main:cap.silvervalley08660.rainForecast.summary"].startswith("Regen over 20 min")
+    # simple mode: other profile, only rain or dry
+    lua.execute('''
+      RR.preferences = { rainMode = "simple" }
+      DRIVER.lifecycle_handlers.infoChanged(DRIVER_OBJ, RR, "infoChanged", { old_st_store = { preferences = {} } })
+      RR.events = {}
+      DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
+    ''')
+    rr = lua.eval("RR")
+    assert rr.new_profile == "stoeckie-rainradar-simple"
+    paths = [rr.events[i].path for i in range(1, len(rr.events) + 1)]
+    assert paths == ["cap.rainSensor.rain.undetected"]

@@ -1,8 +1,8 @@
-name: stoeckie-rain-v3
+name: stoeckie-rain-v4
 components:
   - id: main
     capabilities:
-      - id: waterSensor
+      - id: rainSensor
         version: 1
       - id: refresh
         version: 1
