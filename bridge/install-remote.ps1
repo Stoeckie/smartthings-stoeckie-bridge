@@ -165,6 +165,8 @@ try {
         param($d)
         New-Item -ItemType Directory -Force -Path $d | Out-Null
         & icacls $d /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" /Q 2>&1 | Out-Null
+        # files the bridge (SYSTEM) made, e.g. bridge.log: Administrators become owner so the ACL can be reset
+        & icacls "$d\*" /setowner "*S-1-5-32-544" /T /C /Q 2>&1 | Out-Null
         & icacls "$d\*" /reset /T /C /Q 2>&1 | Out-Null
     }
     $files = @("stoeckie_bridge.py", "requirements.txt", "config.example.json", "restart.ps1", "restart.bat", "setup.bat", "check.bat") |
