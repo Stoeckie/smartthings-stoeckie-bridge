@@ -23,3 +23,44 @@ preferences:
         detail: "Detail"
         simple: "Rain or dry only"
       default: "detail"
+  - name: postcode
+    title: Postcode
+    description: Dutch postcode, e.g. 1234AB. Together with the house number this sets the location.
+    required: false
+    preferenceType: string
+    definition:
+      stringType: text
+      default: ""
+  - name: houseNumber
+    title: House number
+    required: false
+    preferenceType: string
+    definition:
+      stringType: text
+      default: ""
+  - name: location
+    title: Or latitude, longitude
+    description: "Instead of a postcode (e.g. in Belgium): 50.85, 4.35. Wins over the postcode. Leave empty to use the postcode."
+    required: false
+    preferenceType: string
+    definition:
+      stringType: text
+      default: ""
+  - name: radiusMeters
+    title: Radius (meters)
+    description: Rain anywhere within this distance counts. 0 = only the address. Max 25000.
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 0
+      maximum: 25000
+      default: 0
+  - name: rainThreshold
+    title: Rain from (mm/h)
+    description: Less than this counts as dry. Default 0.1.
+    required: false
+    preferenceType: number
+    definition:
+      minimum: 0.05
+      maximum: 5
+      default: 0.1

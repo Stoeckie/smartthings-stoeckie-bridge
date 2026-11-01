@@ -25,8 +25,9 @@ LAN API (default port 8787, no auth, LAN only)
       car:     on | off (charging) | climate_on | climate_off | limit (percent) | refresh
       velux_lock: lock | unlock | refresh
       rain:    refresh (VELUX gateway rain sensor)
-      rainradar: refresh (Buienradar: raining, rainRate mm/h, minutesUntilRain, minutesOfRain, intensity, summary)
-  POST /stbridge/buienradar               body {"location": "52.35, 5.62", "radius": 5} (from the bridge device)
+      rainradar: refresh | settings {postcode, housenumber, location, radius_m, threshold}
+               (state: raining, rainRate mm/h, minutesUntilRain, minutesOfRain, intensity, summary)
+  POST /stbridge/buienradar               body {"enabled": true} (from the bridge device)
   GET  /stbridge/irobot/<blid>[?refresh=1] -> {"name", "favorites": [{name, id, command, params}], "updated"}
 
 Usage
@@ -1042,8 +1043,27 @@ BUIENRADAR_URL = "https://gpsgadget.buienradar.nl/data/raintext"
 RAIN_THRESHOLD = 0.1  # mm/h counts as rain
 
 
+PDOK_URL = "https://api.pdok.nl/bzk/locatieserver/search/v3_1/free"  # Dutch addresses (Kadaster, free)
+
+
+def buienradar_enabled(b: dict[str, Any]) -> bool:
+    return bool(b.get("enabled")) or b.get("lat") is not None
+
+
 def buienradar_configured(b: dict[str, Any]) -> bool:
     return b.get("lat") is not None and b.get("lon") is not None
+
+
+def normalize_postcode(pc: Any) -> str | None:
+    import re
+    t = re.sub(r"\s+", "", str(pc or "")).upper()
+    return t if re.fullmatch(r"\d{4}[A-Z]{2}", t) else None
+
+
+def house_number(n: Any) -> int | None:
+    import re
+    m = re.match(r"\s*(\d+)", str(n or ""))
+    return int(m.group(1)) if m else None
 
 
 def parse_location(text: Any) -> tuple[float, float] | None:
@@ -1058,24 +1078,58 @@ def parse_location(text: Any) -> tuple[float, float] | None:
     return lat, lon
 
 
-def buienradar_settings(location: Any, radius: Any, current: dict[str, Any]) -> dict[str, Any]:
-    out = {k: current.get(k) for k in ("lat", "lon")}
-    out["radius_km"] = current.get("radius_km", 0)
-    loc = parse_location(location) if location not in (None, "") else None
+def buienradar_settings(v: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+    """Validated settings from the device or the setup page. Keys in v: postcode, housenumber, location ('lat, lon',
+    wins over the postcode, also for Belgium), radius_m (0..25000), threshold (mm/h). Missing keys keep the current
+    value; an empty location clears it. Returns the new settings; lat/lon are filled in later from the postcode."""
+    out = {k: current.get(k) for k in ("postcode", "housenumber", "location", "lat", "lon", "place")}
+    out["radius_m"] = current.get("radius_m", int(float(current.get("radius_km") or 0) * 1000))
+    out["threshold"] = current.get("threshold", RAIN_THRESHOLD)
+    if "postcode" in v:
+        out["postcode"] = normalize_postcode(v.get("postcode"))
+    if "housenumber" in v:
+        out["housenumber"] = house_number(v.get("housenumber"))
+    if "location" in v:
+        loc = parse_location(v.get("location"))
+        out["location"] = f"{loc[0]}, {loc[1]}" if loc else None
+    for key, lo, hi, cast in (("radius_m", 0, 25000, int), ("threshold", 0.05, 5.0, float)):
+        try:
+            if v.get(key) not in (None, ""):
+                out[key] = max(lo, min(hi, cast(float(str(v[key]).replace(",", ".")))))
+        except ValueError:
+            pass
+    loc = parse_location(out["location"]) if out["location"] else None
     if loc:
-        out["lat"], out["lon"] = round(loc[0], 4), round(loc[1], 4)
-    try:
-        if radius not in (None, ""):
-            out["radius_km"] = max(0, min(25, int(float(str(radius).replace(",", ".")))))
-    except ValueError:
-        pass
+        out["lat"], out["lon"], out["place"] = round(loc[0], 4), round(loc[1], 4), out["location"]
+    elif (not (out["postcode"] and out["housenumber"]) or current.get("location")
+          or (out["postcode"], out["housenumber"]) != (current.get("postcode"), current.get("housenumber"))):
+        out["lat"] = out["lon"] = out["place"] = None  # look the address up again
     return out
 
 
-def rain_points(lat: float, lon: float, radius_km: float) -> list[tuple[float, float]]:
+async def geocode_nl(session, postcode: str, number: int) -> tuple[float, float, str] | None:
+    """Dutch postcode + house number -> (lat, lon, address) via the PDOK Locatieserver."""
+    params = [("q", "*"), ("fq", f"postcode:{postcode}"), ("fq", f"huisnummer:{number}"), ("fq", "type:adres"),
+              ("rows", "1"), ("fl", "weergavenaam,centroide_ll")]
+    async with session.get(PDOK_URL, params=params) as r:
+        if r.status != 200:
+            raise RuntimeError(f"PDOK HTTP {r.status}")
+        data = await r.json(content_type=None)
+    docs = (data.get("response") or {}).get("docs") or []
+    if not docs:
+        return None
+    import re
+    m = re.match(r"POINT\(([-\d.]+) ([-\d.]+)\)", docs[0].get("centroide_ll") or "")
+    if not m:
+        return None
+    return round(float(m.group(2)), 5), round(float(m.group(1)), 5), docs[0].get("weergavenaam") or postcode
+
+
+def rain_points(lat: float, lon: float, radius_m: float) -> list[tuple[float, float]]:
     """Center plus rings at the radius (and half of it): 8 directions each, rounded like Buienradar (2 decimals)."""
     import math
     pts = [(round(lat, 2), round(lon, 2))]
+    radius_km = radius_m / 1000
     rings = [radius_km] + ([radius_km / 2] if radius_km >= 3 else []) if radius_km > 0 else []
     for r in rings:
         for k in range(8):
@@ -1152,6 +1206,7 @@ class Buienradar:
         self.b = cfg.get("buienradar") or {}
         self.session = None
         self.wake = asyncio.Event()
+        self.error: str | None = None
 
     async def _fetch(self, lat: float, lon: float) -> list[float]:
         async with self.session.get(BUIENRADAR_URL, params={"lat": f"{lat:.2f}", "lon": f"{lon:.2f}"},
@@ -1160,9 +1215,37 @@ class Buienradar:
                 raise RuntimeError(f"HTTP {r.status}")
             return parse_raintext(await r.text())
 
+    def _settings_state(self) -> dict[str, Any]:
+        b = self.b
+        return {"postcode": b.get("postcode"), "housenumber": b.get("housenumber"), "place": b.get("place"),
+                "lat": b.get("lat"), "lon": b.get("lon"), "radiusM": b.get("radius_m", 0),
+                "threshold": b.get("threshold", RAIN_THRESHOLD)}
+
+    async def _locate(self) -> None:
+        """Postcode + house number -> lat/lon (once, stored in config.json)."""
+        b = self.b
+        if buienradar_configured(b) or not (b.get("postcode") and b.get("housenumber")):
+            return
+        found = await geocode_nl(self.session, b["postcode"], int(b["housenumber"]))
+        if not found:
+            self.error = f"Adres {b['postcode']} {b['housenumber']} niet gevonden"
+            return
+        b["lat"], b["lon"], b["place"] = found
+        cfg = load_config()
+        cfg.setdefault("buienradar", {}).update({k: b[k] for k in ("lat", "lon", "place")})
+        save_config(cfg)
+        log.info("[buienradar] location from postcode: %s", b["place"])
+
     async def _refresh(self) -> None:
+        self.error = None
+        await self._locate()
+        if not buienradar_configured(self.b):
+            summary = self.error or "Geen locatie: vul postcode en huisnummer in (instellingen van dit apparaat)"
+            REG.upsert("buienradar", "rainradar", "Buienradar", {"summary": summary, **self._settings_state()}, True,
+                       self._command())
+            return
         lat, lon = float(self.b["lat"]), float(self.b["lon"])
-        radius = float(self.b.get("radius_km") or 0)
+        radius = float(self.b.get("radius_m") or 0)
         pts = rain_points(lat, lon, radius)
         sem = asyncio.Semaphore(4)
 
@@ -1176,23 +1259,46 @@ class Buienradar:
         n = min(len(s) for s in series)
         rates = [max(s[i] for s in series) for i in range(n)]  # heaviest rain anywhere in the radius
         state = rain_summary(rates, float(self.b.get("threshold") or RAIN_THRESHOLD))
-        state.update(lat=lat, lon=lon, radiusKm=radius, points=len(series))
+        state.update(points=len(series), **self._settings_state())
         REG.upsert("buienradar", "rainradar", "Buienradar", state, True, self._command())
-        log.info("[buienradar] %s (%d point(s), radius %g km)", state["summary"], len(series), radius)
+        log.info("[buienradar] %s (%d point(s), radius %g m)", state["summary"], len(series), radius)
+
+    def apply_settings(self, v: dict[str, Any]) -> bool:
+        """Store new settings; True when something changed (then the location is looked up again)."""
+        cfg = load_config()
+        cur = cfg.setdefault("buienradar", {})
+        new = buienradar_settings(v, cur)
+        changed = any(cur.get(k) != new.get(k) for k in new)
+        if changed:
+            cur.update(new)
+            cur["enabled"] = True
+            cur.pop("radius_km", None)
+            save_config(cfg)
+            self.b = dict(cur)
+            log.info("[buienradar] settings: %s %s / %s, radius %s m, from %s mm/h", new.get("postcode"),
+                     new.get("housenumber"), new.get("location"), new.get("radius_m"), new.get("threshold"))
+        return changed
 
     def _command(self):
         async def handler(cmd: str, value: Any) -> None:
             if cmd == "refresh":
                 self.wake.set()
                 return
+            if cmd == "settings":  # from the SmartThings device settings
+                if self.apply_settings(value if isinstance(value, dict) else {}):
+                    self.wake.set()
+                return
             raise ValueError(f"unsupported command {cmd}")
         return handler
 
     async def run(self) -> None:
-        if not buienradar_configured(self.b):
-            log.info("[buienradar] not configured (optional: set a location)")
+        if not buienradar_enabled(self.b):
+            log.info("[buienradar] off (optional: switch it on in the Stoeckie Bridge device or on the setup page)")
             return
+        if "radius_m" not in self.b and self.b.get("radius_km") is not None:
+            self.b["radius_m"] = int(float(self.b["radius_km"]) * 1000)
         import aiohttp
+        BUIENRADAR["source"] = self
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
             self.session = session
             while True:
@@ -1206,6 +1312,9 @@ class Buienradar:
                     await asyncio.wait_for(self.wake.wait(), timeout=self.POLL)
                 except asyncio.TimeoutError:
                     pass
+
+
+BUIENRADAR: dict[str, Any] = {"source": None}
 
 
 # ---------------------------------------------------------------- LAN HTTP API
@@ -1256,11 +1365,14 @@ twee keer per dag, voor de Roomba driver op de hub. De robot zelf wordt lokaal b
 <label>Land (2 letters)</label><input name="country" value="NL" maxlength="2" required>
 <button type="submit">iRobot opslaan en verbinden</button></form>
 <h3>Buienradar (optioneel)</h3>
-<p>Regen nu en de komende 2 uur op een plek in Nederland of België, met straal. Breedtegraad en lengtegraad vind je in
-Google Maps (rechtsklik op de plek). Ook in te stellen bij het Stoeckie Bridge apparaat in SmartThings.</p>
+<p>Regen nu en de komende 2 uur bij je huis, met straal. Ook in te stellen bij het Buienradar apparaat in SmartThings
+(aanzetten: instelling Buienradar bij het Stoeckie Bridge apparaat). Laatste wijziging telt.</p>
 <form method="post"><input type="hidden" name="section" value="buienradar">
-<label>Locatie (breedtegraad, lengtegraad)</label><input name="location" value="{rain_loc}" placeholder="52.35, 5.62" required>
-<label>Straal (km, 0 = alleen dit punt, max 25)</label><input name="radius_km" type="number" min="0" max="25" value="{rain_radius}" required>
+<label>Postcode</label><input name="postcode" value="{rain_pc}" placeholder="1234AB">
+<label>Huisnummer</label><input name="housenumber" value="{rain_nr}" placeholder="12">
+<label>Of breedtegraad, lengtegraad (bijvoorbeeld in België)</label><input name="location" value="{rain_loc}" placeholder="52.35, 5.62">
+<label>Straal in meters (0 = alleen dit adres, max 25000)</label><input name="radius_m" type="number" min="0" max="25000" value="{rain_radius}">
+<label>Regen vanaf (mm/u)</label><input name="threshold" value="{rain_thr}">
 <button type="submit">Buienradar opslaan</button></form>
 <h3>VELUX ACTIVE vertrekstand (optioneel)</h3>
 <p>Voor vergrendelen en ontgrendelen (vertrekstand: alle ramen en zonwering geblokkeerd) vanuit SmartThings.
@@ -1349,10 +1461,10 @@ def make_app(bridge_id: str, on_setup=None) -> web.Application:
             else:
                 lines.append("Škoda ingesteld, nog geen gegevens (zie bridge.log).")
         b = cfg.get("buienradar") or {}
-        if buienradar_configured(b):
+        if buienradar_enabled(b):
             rd = REG.devices.get("buienradar")
             lines.append("Buienradar: " + (rd["state"].get("summary", "") if rd else "bezig met ophalen")
-                         + f" ({b['lat']}, {b['lon']}, straal {b.get('radius_km', 0)} km)")
+                         + f" ({b.get('place') or 'geen locatie'}, straal {b.get('radius_m', 0)} m)")
         v = cfg.get("velux") or {}
         if velux_configured(v):
             locks = [d for d in REG.devices.values() if d["type"] == "velux_lock"]
@@ -1384,19 +1496,19 @@ def make_app(bridge_id: str, on_setup=None) -> web.Application:
                 lines.append("iRobot ingesteld, bezig met ophalen.")
         return "<br>".join(html.escape(x) for x in lines)
 
-    def rain_loc() -> str:
-        b = load_config().get("buienradar") or {}
-        return f"{b['lat']}, {b['lon']}" if buienradar_configured(b) else ""
-
     async def setup_get(req):
         if not local_only(req):
             return web.Response(status=403, text="setup alleen op deze pc (localhost)")
         k = load_config().get("skoda") or {}
+        rb = load_config().get("buienradar") or {}
         page = (SETUP_HTML.replace("{status}", status_text())
                 .replace("{skoda_poll}", html.escape(str(k.get("poll_minutes", 10))))
                 .replace("{skoda_temp}", html.escape(str(k.get("climate_temp", 21))))
-                .replace("{rain_loc}", html.escape(rain_loc()))
-                .replace("{rain_radius}", html.escape(str((load_config().get("buienradar") or {}).get("radius_km", 0))))
+                .replace("{rain_pc}", html.escape(str(rb.get("postcode") or "")))
+                .replace("{rain_nr}", html.escape(str(rb.get("housenumber") or "")))
+                .replace("{rain_loc}", html.escape(str(rb.get("location") or "")))
+                .replace("{rain_radius}", html.escape(str(rb.get("radius_m", int(float(rb.get("radius_km") or 0) * 1000)))))
+                .replace("{rain_thr}", html.escape(str(rb.get("threshold", RAIN_THRESHOLD))))
                 .replace("{velux_ip}", html.escape(str((load_config().get("velux") or {}).get("gateway_ip", "")))))
         return web.Response(text=page, content_type="text/html")
 
@@ -1427,11 +1539,16 @@ def make_app(bridge_id: str, on_setup=None) -> web.Application:
             log.info("[setup] iRobot login saved")
         elif section == "buienradar":
             b = cfg.setdefault("buienradar", {})
-            if parse_location(form.get("location")) is None:
-                return web.Response(status=400, text="geen geldige locatie, bijvoorbeeld 52.35, 5.62")
-            b.update(buienradar_settings(form.get("location"), form.get("radius_km"), b))
+            v = {k: form.get(k, "") for k in ("postcode", "housenumber", "location", "radius_m", "threshold")}
+            new = buienradar_settings(v, b)
+            if not (new.get("location") or (new.get("postcode") and new.get("housenumber"))):
+                return web.Response(status=400, text="vul postcode en huisnummer in, of breedtegraad, lengtegraad")
+            b.update(new)
+            b["enabled"] = True
+            b.pop("radius_km", None)
             save_config(cfg)
-            log.info("[setup] Buienradar: %s, %s radius %s km", b["lat"], b["lon"], b["radius_km"])
+            log.info("[setup] Buienradar: %s %s / %s, radius %s m", b.get("postcode"), b.get("housenumber"),
+                     b.get("location"), b.get("radius_m"))
         elif section == "velux":
             v = cfg.setdefault("velux", {})
             v["username"] = str(form.get("username", "")).strip()
@@ -1490,24 +1607,35 @@ def make_app(bridge_id: str, on_setup=None) -> web.Application:
                                   "updated": IROBOT["updated"]})
 
     async def buienradar_set(req):
-        """Location and radius from the SmartThings bridge device settings ({"location": "52.35, 5.62", "radius": 5})."""
+        """Switch the rain radar on/off from the SmartThings bridge device ({"enabled": true}); optional settings."""
         try:
             body = await req.json()
         except Exception:  # noqa: BLE001
             body = {}
         cfg = load_config()
         b = cfg.setdefault("buienradar", {})
-        if body.get("location") not in (None, "") and parse_location(body.get("location")) is None:
-            return web.json_response({"error": "invalid location"}, status=400)
-        new = buienradar_settings(body.get("location"), body.get("radius"), b)
-        if new != {k: b.get(k) for k in ("lat", "lon", "radius_km")}:
-            b.update(new)
+        changed = False
+        if "enabled" in body and bool(body["enabled"]) != bool(b.get("enabled")):
+            b["enabled"] = bool(body["enabled"])
+            changed = True
+        settings = {k: body[k] for k in ("postcode", "housenumber", "location", "radius_m", "threshold") if k in body}
+        if settings:
+            new = buienradar_settings(settings, b)
+            if any(b.get(k) != new.get(k) for k in new):
+                b.update(new)
+                b.pop("radius_km", None)
+                changed = True
+        if changed:
+            if not b.get("enabled"):
+                b.pop("lat", None)  # off means off, also when a location was set before
+                b.pop("lon", None)
             save_config(cfg)
-            log.info("[buienradar] settings from SmartThings: %s, %s radius %s km", b.get("lat"), b.get("lon"),
-                     b.get("radius_km"))
-            if on_setup and buienradar_configured(b):
+            log.info("[buienradar] %s from SmartThings", "on" if b.get("enabled") else "off")
+            if on_setup:
                 on_setup("buienradar")
-        return web.json_response({"ok": True, "buienradar": {k: b.get(k) for k in ("lat", "lon", "radius_km")}})
+            if not b.get("enabled"):
+                REG.devices.pop("buienradar", None)
+        return web.json_response({"ok": True, "enabled": bool(b.get("enabled"))})
 
     async def command(req):
         dev_id = req.match_info["dev_id"]

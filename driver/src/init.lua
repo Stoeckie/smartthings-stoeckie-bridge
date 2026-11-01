@@ -16,7 +16,7 @@ local log = require "log"
 local cosock = require "cosock"
 local api = require "bridge_api"
 
-local BUILD = "2026-11-01c"
+local BUILD = "2026-11-01d"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -486,15 +486,13 @@ end
 
 local function info_changed(driver, device, event, args)
   if is_parent(device) then
-    -- Buienradar location / radius: pass them to the bridge (it starts the rain radar)
+    -- Buienradar on/off: the bridge starts or stops the rain radar (settings are on the Buienradar device)
     local old = args and args.old_st_store and args.old_st_store.preferences or {}
     local p = device.preferences or {}
-    if (p.rainLocation or "") ~= (old.rainLocation or "") or p.rainRadius ~= old.rainRadius then
-      if (p.rainLocation or "") ~= "" then
-        local ip, port = bridge_addr(device)
-        local res, err = api.buienradar(ip, port, p.rainLocation, p.rainRadius)
-        if not res then log.error("[stbridge] Buienradar settings: " .. tostring(err)) end
-      end
+    if p.rainRadar ~= nil and p.rainRadar ~= old.rainRadar then
+      local ip, port = bridge_addr(device)
+      local res, err = api.buienradar(ip, port, p.rainRadar)
+      if not res then log.error("[stbridge] Buienradar on/off: " .. tostring(err)) end
     end
     schedule_poll(driver, device)
     return
@@ -505,6 +503,14 @@ local function info_changed(driver, device, event, args)
   local p = device.preferences or {}
   if p.pollMinutes ~= nil and (p.pollMinutes ~= old.pollMinutes or p.climateTemp ~= old.climateTemp) then
     send(driver, device, "settings", { poll_minutes = p.pollMinutes, climate_temp = p.climateTemp })
+  end
+  -- Buienradar settings: pass them to the bridge (it looks up the postcode)
+  local rkeys = { "postcode", "houseNumber", "location", "radiusMeters", "rainThreshold" }
+  local rchanged = false
+  for _, k in ipairs(rkeys) do if p[k] ~= nil and p[k] ~= old[k] then rchanged = true end end
+  if rchanged then
+    send(driver, device, "settings", { postcode = p.postcode or "", housenumber = p.houseNumber or "",
+      location = p.location or "", radius_m = p.radiusMeters, threshold = p.rainThreshold })
   end
 end
 

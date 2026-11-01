@@ -61,17 +61,17 @@ docker compose up -d --build
 
 ## Buienradar rain radar
 
-Rain for one spot in the Netherlands or Belgium, now and the next two hours (5 minute steps, refreshed every 5 minutes).
+Rain at your address in the Netherlands or Belgium, now and the next two hours (5 minute steps, refreshed every 5 minutes).
 
-1. Set the location (latitude, longitude, e.g. `52.35, 5.62`: right click the spot in Google Maps) and a radius in km: in the settings of the **Stoeckie Bridge** device in SmartThings, or in the Buienradar section of the setup page. The last change wins.
-2. A **Buienradar** device appears. With a radius the bridge also reads 8 points on a ring at that distance (and 8 at half of it) and takes the heaviest rain per 5 minutes, so "rain" means rain anywhere within the radius.
+1. Switch it on: setting **Buienradar (rain radar)** of the **Stoeckie Bridge** device in SmartThings (or fill in the Buienradar section of the setup page). A **Buienradar** device appears.
+2. In the settings of the **Buienradar** device:
+   * **Postcode** and **House number**: the bridge looks up the location once (PDOK Locatieserver, Dutch addresses).
+   * **Or latitude, longitude** (e.g. in Belgium): wins over the postcode.
+   * **Radius (meters)**: 0 to 25000. With a radius the bridge also reads 8 points on a ring at that distance (and 8 at half of it, from 3 km) and takes the heaviest rain per 5 minutes, so "rain" means rain anywhere within the radius.
+   * **Rain from (mm/h)**: default 0.1.
+   * **Show**: **Detail** (default): `rainSensor` (rain detected or not), `precipitationSensor` (none, possible, light, moderate, heavy, violent) and the custom capability `silvervalley08660.rainForecast`: rain now (mm/h), rain starts in (minutes, 999 = no rain in the next 2 hours), rain lasts (minutes) and a short summary, all usable in routines, e.g. *rain starts in less than 15 minutes → close the windows*. **Rain or dry only**: just `rainSensor`.
 
-The device setting **Show** chooses:
-
-* **Detail** (default): `rainSensor` (rain detected or not), `precipitationSensor` (none, possible, light, moderate, heavy, violent) and the custom capability `silvervalley08660.rainForecast`: rain now (mm/h), rain starts in (minutes, 999 = no rain in the next 2 hours), rain lasts (minutes) and a short summary. All usable in routines, e.g. *rain starts in less than 15 minutes → close the windows*.
-* **Rain or dry only**: just `rainSensor`.
-
-Rain counts from 0.1 mm/h. Data: [Buienradar](https://www.buienradar.nl), free for personal use.
+The setup page has the same fields; the last change wins. Data: [Buienradar](https://www.buienradar.nl), free for personal use; addresses: [PDOK Locatieserver](https://www.pdok.nl).
 
 ## Battery history graph (car)
 
@@ -96,7 +96,7 @@ The gateway's rain sensor becomes its own device, **VELUX regensensor** (rain se
 
 * Credentials only live in `config.json` on the bridge pc (in `.gitignore`), never in the code or the driver.
 * The setup page only answers on the pc itself (or `STBRIDGE_SETUP_ALLOW`), only when opened by IP or `localhost`, and refuses forms posted from other websites.
-* The LAN API only answers private and local addresses: `GET /stbridge/info`, `GET /stbridge/devices`, `POST /stbridge/devices/<id>/command` with `{"cmd": ..., "value": ...}`, `GET /stbridge/irobot/<blid>`, `POST /stbridge/buienradar` (location and radius).
+* The LAN API only answers private and local addresses: `GET /stbridge/info`, `GET /stbridge/devices`, `POST /stbridge/devices/<id>/command` with `{"cmd": ..., "value": ...}`, `GET /stbridge/irobot/<blid>`, `POST /stbridge/buienradar` (rain radar on/off).
 
 ## Unofficial parts
 

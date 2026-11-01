@@ -56,9 +56,9 @@ function M.command(ip, port, dev_id, cmd, value)
   return request("POST", ip, port, path, { cmd = cmd, value = value }, 15)
 end
 
---- Buienradar location and radius from the bridge device settings.
-function M.buienradar(ip, port, location, radius)
-  return request("POST", ip, port, "/stbridge/buienradar", { location = location, radius = radius }, 10)
+--- Buienradar on/off from the bridge device settings.
+function M.buienradar(ip, port, enabled)
+  return request("POST", ip, port, "/stbridge/buienradar", { enabled = enabled and true or false }, 10)
 end
 
 return M
