@@ -58,6 +58,8 @@ try {
     } elseif (Test-Path (Join-Path $dir "remote-target.txt")) {
         $prefs.target = (Get-Content (Join-Path $dir "remote-target.txt") -Raw).Trim()
     }
+    # saved login and saved answers: never ask again (delete remote-target.json to get the questions back)
+    if ((Test-Path $credFile) -and $null -ne $prefs.allowSetup) { $Unattended = $true }
     if (-not $Target) {
         $def = [string]$prefs.target
         if ($Unattended -and $def) { $Target = $def }
