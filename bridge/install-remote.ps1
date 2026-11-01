@@ -160,11 +160,10 @@ try {
     Write-Host "Python: $py"
 
     # ---- folder: keys and tokens live here, so only SYSTEM and administrators may use it.
-    # The folder gets that ACL with inheritance; everything inside inherits it (owner: Administrators).
+    # The folder gets that ACL with inheritance; everything inside inherits it.
     Invoke-Command -Session $session -ArgumentList $remoteDir {
         param($d)
         New-Item -ItemType Directory -Force -Path $d | Out-Null
-        & takeown /F $d /R /A /D Y 2>&1 | Out-Null
         & icacls $d /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" /Q 2>&1 | Out-Null
         & icacls "$d\*" /reset /T /C /Q 2>&1 | Out-Null
     }
