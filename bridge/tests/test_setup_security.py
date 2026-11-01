@@ -39,3 +39,26 @@ def test_setup_guards():
         assert r.status == 200
         await c.close()
     run(main())
+
+
+def test_poll_settings_from_setup_page():
+    async def main():
+        sb.save_config({})
+        c = await _client()
+        port = c.server.port
+        for section, value, want in (("fglair_settings", "5", 30), ("velux_settings", "120", 120)):
+            r = await c.post("/setup", data={"section": section, "poll_seconds": value},
+                             headers={"Origin": f"http://127.0.0.1:{port}"}, allow_redirects=False)
+            assert r.status == 302
+            assert sb.load_config()[section.split("_")[0]]["poll_seconds"] == want
+        await c.close()
+    run(main())
+
+
+def test_https_certificate():
+    d = Path(tempfile.mkdtemp())
+    ctx, fp = sb.setup_tls(d)
+    assert ctx is not None and len(fp) == 95  # SHA-256 fingerprint AA:BB:...
+    assert (d / "setup-cert.pem").exists() and (d / "setup-key.pem").exists()
+    ctx2, fp2 = sb.setup_tls(d)  # reused, not regenerated
+    assert fp2 == fp

@@ -16,7 +16,7 @@ local log = require "log"
 local cosock = require "cosock"
 local api = require "bridge_api"
 
-local BUILD = "2026-11-01d"
+local BUILD = "2026-11-01e"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -503,6 +503,10 @@ local function info_changed(driver, device, event, args)
   local p = device.preferences or {}
   if p.pollMinutes ~= nil and (p.pollMinutes ~= old.pollMinutes or p.climateTemp ~= old.climateTemp) then
     send(driver, device, "settings", { poll_minutes = p.pollMinutes, climate_temp = p.climateTemp })
+  end
+  -- update interval of the FGLair and VELUX sources
+  if p.pollSeconds ~= nil and p.pollSeconds ~= old.pollSeconds then
+    send(driver, device, "settings", { poll_seconds = p.pollSeconds })
   end
   -- Buienradar settings: pass them to the bridge (it looks up the postcode)
   local rkeys = { "postcode", "houseNumber", "location", "radiusMeters", "rainThreshold" }

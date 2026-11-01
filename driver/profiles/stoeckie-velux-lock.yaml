@@ -8,3 +8,13 @@ components:
         version: 1
     categories:
       - name: SmartLock
+preferences:
+  - name: pollSeconds
+    title: Update every (seconds)
+    description: "How often the bridge reads the departure mode and the rain sensor from the VELUX cloud. 30 to 600, also on the bridge setup page."
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 30
+      maximum: 600
+      default: 60

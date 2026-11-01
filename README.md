@@ -50,7 +50,7 @@ docker compose up -d --build
 ```
 
 * Host networking, so the hub finds the bridge on the host IP, port 8787. Data (config.json, log) lives in `bridge/data`.
-* Setup page: http://localhost:8787/setup on the Docker host. From another computer: set `STBRIDGE_SETUP_ALLOW: "192.168.x.0/24"` in `docker-compose.yml`.
+* Setup page: http://localhost:8787/setup on the Docker host. From another computer: set `STBRIDGE_SETUP_ALLOW: "192.168.x.0/24"` in `docker-compose.yml` and open https://<host>:8443/setup.
 * Credentials can also be passed once as environment variables (`ELECTROLUX_API_KEY`, `ELECTROLUX_ACCESS_TOKEN`, `ELECTROLUX_REFRESH_TOKEN`, `FGLAIR_USERNAME`, `FGLAIR_PASSWORD`, `FGLAIR_REGION`); after the first start `data/config.json` wins.
 * Without host networking (Docker Desktop on Windows/Mac): use `ports: ["8787:8787"]` instead of `network_mode: host`, and set `STBRIDGE_SETUP_ALLOW`.
 
@@ -58,6 +58,19 @@ docker compose up -d --build
 
 1. Enroll your hub in the channel: https://bestow-regional.api.smartthings.com/invite/qWjBdybRNG2y (Stoeckie Edge Drivers) and install **Stoeckie Bridge (local)**.
 2. SmartThings app: **Add device → Scan nearby**. The driver scans the hub's subnet on port 8787 and creates a "Stoeckie Bridge" device; your appliances and cars appear at the next poll.
+
+## Settings: setup page and SmartThings
+
+Everything that is not a secret can be set in both places; the last change wins.
+
+| Source | In SmartThings (device settings) | Setup page only |
+|---|---|---|
+| AEG / Electrolux | | API key, tokens |
+| Fujitsu FGLair | update interval (any air conditioner, applies to all) | login, region |
+| Škoda | update interval, climate temperature, battery history graph | API key, VIN |
+| VELUX | update interval (on VELUX vertrekstand) | login, gateway pairing |
+| Buienradar | on/off (Stoeckie Bridge device); postcode, house number or coordinates, radius, rain threshold, show (Buienradar device) | |
+| iRobot | | login |
 
 ## Buienradar rain radar
 
@@ -96,6 +109,9 @@ The gateway's rain sensor becomes its own device, **VELUX regensensor** (rain se
 
 * Credentials only live in `config.json` on the bridge pc (in `.gitignore`), never in the code or the driver.
 * The setup page only answers on the pc itself (or `STBRIDGE_SETUP_ALLOW`), only when opened by IP or `localhost`, and refuses forms posted from other websites.
+* From another computer the setup page only works over **https** (port 8443; plain http redirects there and refuses forms). The certificate is self-signed and made once on the bridge pc (`setup-cert.pem`, `setup-key.pem`); the browser warns the first time, the log shows its SHA-256 fingerprint to compare. `install-remote.bat` opens port 8443 only for the pc that may use the setup page.
+* `install-remote.bat` limits the bridge folder on the target (keys, tokens, certificate) to SYSTEM and administrators.
+* Keys, tokens and passwords are only entered on the setup page, never in SmartThings: SmartThings settings are stored in the Samsung cloud and the LAN API has no login.
 * The LAN API only answers private and local addresses: `GET /stbridge/info`, `GET /stbridge/devices`, `POST /stbridge/devices/<id>/command` with `{"cmd": ..., "value": ...}`, `GET /stbridge/irobot/<blid>`, `POST /stbridge/buienradar` (rain radar on/off).
 
 ## Unofficial parts

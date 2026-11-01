@@ -213,6 +213,14 @@ try {
             New-NetFirewallRule -DisplayName "Stoeckie Bridge" -Direction Inbound -Protocol TCP -LocalPort 8787 `
                 -Action Allow -Profile Private,Domain | Out-Null
         }
+        # setup page over https (8443): only from the pc that may open it, otherwise closed
+        Get-NetFirewallRule -DisplayName "Stoeckie Bridge setup (https)" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+        if ($allow) {
+            New-NetFirewallRule -DisplayName "Stoeckie Bridge setup (https)" -Direction Inbound -Protocol TCP `
+                -LocalPort 8443 -RemoteAddress ($allow -replace "/32$", "") -Action Allow -Profile Private,Domain | Out-Null
+        }
+        # keys and tokens in this folder: only SYSTEM and administrators may read it
+        & icacls $d /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" /T /Q | Out-Null
         # PowerShell remoting on this pc: only from the own network (not from anywhere)
         Get-NetFirewallRule -Name "WINRM-HTTP-In-TCP*" -ErrorAction SilentlyContinue |
             Set-NetFirewallRule -RemoteAddress LocalSubnet -ErrorAction SilentlyContinue
@@ -267,7 +275,9 @@ try {
     } catch {
         Write-Host "config.json terughalen lukte niet: $($_.Exception.Message)"
     }
-    if ($allow) { Write-Host "Setup pagina: http://${Target}:8787/setup" }
+    if ($allow) {
+        Write-Host "Setup pagina: https://${Target}:8443/setup (eigen certificaat: de browser waarschuwt één keer)"
+    }
     Write-Host "Geef $Target een vaste DHCP reservering in UniFi."
 } catch {
     $failed = $true

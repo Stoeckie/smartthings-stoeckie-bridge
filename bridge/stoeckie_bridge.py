@@ -21,9 +21,9 @@ LAN API (default port 8787, no auth, LAN only)
   POST /stbridge/devices/<id>/command    body {"cmd": "...", "value": ...}
       dryer:   run | pause | resume | stop | refresh
       aircon:  on | off | mode (auto cool dry fan heat) | setpoint (C) | fan (quiet low medium high auto)
-               | swing (off vertical horizontal both) | refresh
+               | swing (off vertical horizontal both) | refresh | settings {poll_seconds}
       car:     on | off (charging) | climate_on | climate_off | limit (percent) | refresh
-      velux_lock: lock | unlock | refresh
+      velux_lock: lock | unlock | refresh | settings {poll_seconds}
       rain:    refresh (VELUX gateway rain sensor)
       rainradar: refresh | settings {postcode, housenumber, location, radius_m, threshold}
                (state: raining, rainRate mm/h, minutesUntilRain, minutesOfRain, intensity, summary)
@@ -56,7 +56,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-01b"
+VERSION = "2026-11-01c"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -367,6 +367,12 @@ class FGLair:
     def _command(self, dsn: str):
         async def handler(cmd: str, value: Any) -> None:
             from ayla_iot_unofficial.fujitsu_consts import FanSpeed, OpMode
+            if cmd == "settings":  # from the SmartThings device settings (all air conditioners share it)
+                sec = poll_seconds((value or {}).get("poll_seconds"), int(self.f.get("poll_seconds", 60)))
+                self.f["poll_seconds"] = sec
+                save_poll_seconds("fglair", sec)
+                log.info("[fglair] settings from SmartThings: every %s s", sec)
+                return
             dev = self.devices[dsn]
             async with self.lock:
                 await self._auth()
@@ -422,6 +428,21 @@ class FGLair:
                     log.warning("[fglair] poll failed: %s", ex)
                     REG.set_online("fglair-", False)
                 await asyncio.sleep(int(self.f.get("poll_seconds", 60)))
+
+
+def poll_seconds(value: Any, default: int = 60) -> int:
+    """Update interval from SmartThings or the setup page: 30..600 seconds."""
+    try:
+        return max(30, min(600, int(float(str(value).replace(",", ".")))))
+    except (TypeError, ValueError):
+        return default
+
+
+def save_poll_seconds(section: str, seconds: int) -> None:
+    cfg = load_config()
+    if cfg.setdefault(section, {}).get("poll_seconds") != seconds:
+        cfg[section]["poll_seconds"] = seconds
+        save_config(cfg)
 
 
 # ---------------------------------------------------------------- Škoda (official MyŠkoda public API)
@@ -848,7 +869,7 @@ def velux_retrieve_key(host: str, timeout: float = 180.0, port: int = 25050) -> 
 
 
 class VeluxCloud:
-    POLL = 60
+    POLL = 60  # default, "poll_seconds" in config.json (setup page or SmartThings)
 
     def __init__(self, cfg: dict[str, Any]) -> None:
         self.v = cfg.get("velux") or {}
@@ -956,6 +977,12 @@ class VeluxCloud:
 
     def _command(self):
         async def handler(cmd: str, value: Any) -> None:
+            if cmd == "settings":  # from the SmartThings device settings
+                sec = poll_seconds((value or {}).get("poll_seconds"), int(self.v.get("poll_seconds") or 60))
+                self.v["poll_seconds"] = sec
+                save_poll_seconds("velux", sec)
+                log.info("[velux] settings from SmartThings: every %s s", sec)
+                return
             if cmd == "refresh":
                 self.wake.set()
                 return
@@ -1024,7 +1051,7 @@ class VeluxCloud:
                     log.warning("[velux] update failed: %s", ex)
                     self.home = None if "no VELUX gateway" in str(ex) else self.home
                 self.wake.clear()
-                wait = 5 if self.fast > 0 else self.POLL
+                wait = 5 if self.fast > 0 else int(self.v.get("poll_seconds") or self.POLL)
                 self.fast = max(0, self.fast - 1)
                 try:
                     await asyncio.wait_for(self.wake.wait(), timeout=wait)
@@ -1317,6 +1344,59 @@ class Buienradar:
 BUIENRADAR: dict[str, Any] = {"source": None}
 
 
+# ---------------------------------------------------------------- HTTPS for the setup page (self-signed)
+
+def _local_ips() -> list[str]:
+    ips = {"127.0.0.1"}
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("192.0.2.1", 9))  # no packet is sent; picks the LAN interface
+        ips.add(s.getsockname()[0])
+        s.close()
+    except OSError:
+        pass
+    try:
+        ips.update(a for a in socket.gethostbyname_ex(socket.gethostname())[2] if not a.startswith("169.254."))
+    except OSError:
+        pass
+    return sorted(ips)
+
+
+def setup_tls(data_dir: Path):
+    """SSL context for the setup page with a self-signed certificate (made once, kept in the data folder).
+    Returns (context, SHA-256 fingerprint) or (None, error)."""
+    import ssl
+    cert, key = data_dir / "setup-cert.pem", data_dir / "setup-key.pem"
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.x509.oid import NameOID
+        if not (cert.exists() and key.exists()):
+            k = ec.generate_private_key(ec.SECP256R1())
+            name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Stoeckie Bridge " + socket.gethostname())])
+            alt = [x509.DNSName("localhost")] + [x509.IPAddress(ipaddress.ip_address(i)) for i in _local_ips()]
+            now = dt.datetime.now(dt.timezone.utc)
+            c = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(k.public_key())
+                 .serial_number(x509.random_serial_number()).not_valid_before(now - dt.timedelta(days=1))
+                 .not_valid_after(now + dt.timedelta(days=3650))
+                 .add_extension(x509.SubjectAlternativeName(alt), critical=False)
+                 .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+                 .sign(k, hashes.SHA256()))
+            key.write_bytes(k.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                            serialization.NoEncryption()))
+            cert.write_bytes(c.public_bytes(serialization.Encoding.PEM))
+            log.info("[https] new self-signed certificate for %s", ", ".join(_local_ips()))
+        c = x509.load_pem_x509_certificate(cert.read_bytes())
+        fp = c.fingerprint(hashes.SHA256()).hex(":").upper()
+        ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.load_cert_chain(str(cert), str(key))
+        return ctx, fp
+    except Exception as ex:  # noqa: BLE001
+        return None, str(ex)
+
+
 # ---------------------------------------------------------------- LAN HTTP API
 
 SETUP_HTML = """<!doctype html><html lang="nl"><head><meta charset="utf-8">
@@ -1343,6 +1423,11 @@ een access token en refresh token.</p>
 <label>Regio</label><select name="region"><option value="eu">Europa</option><option value="default">Overig</option>
 <option value="cn">China</option></select>
 <button type="submit">FGLair opslaan en verbinden</button></form>
+<form method="post"><input type="hidden" name="section" value="fglair_settings">
+<label>Airco's bijwerken elke (seconden, 30 tot 600)</label>
+<input name="poll_seconds" type="number" min="30" max="600" value="{fglair_poll}" required>
+<button type="submit">Instelling opslaan</button></form>
+<p>Ook in te stellen bij elke airco in de SmartThings app (Instellingen).</p>
 <h3>Škoda</h3>
 <p>Maak in de MyŠkoda app (8.16 of nieuwer) een API key aan: <b>Instellingen, Smart Home, API-sleutels</b>, en kies je auto.
 Het VIN (17 tekens) staat in de app bij de auto en op het kentekenbewijs.</p>
@@ -1385,10 +1470,15 @@ De ramen zelf blijven lokaal via HomeKit lopen. E-mail en wachtwoord van de VELU
 klik op koppelen, wacht tot het lampje op de gateway knippert en druk dan binnen 3 minuten op de knop van de gateway.</p>
 <form method="post"><input type="hidden" name="section" value="velux_pair">
 <label>IP van de VELUX gateway</label><input name="gateway_ip" value="{velux_ip}" required>
-<button type="submit">Gateway koppelen</button></form></body></html>"""
+<button type="submit">Gateway koppelen</button></form>
+<form method="post"><input type="hidden" name="section" value="velux_settings">
+<label>Vertrekstand en regensensor bijwerken elke (seconden, 30 tot 600)</label>
+<input name="poll_seconds" type="number" min="30" max="600" value="{velux_poll}" required>
+<button type="submit">Instelling opslaan</button></form>
+<p>Ook in te stellen bij VELUX vertrekstand in de SmartThings app (Instellingen).</p></body></html>"""
 
 
-def make_app(bridge_id: str, on_setup=None) -> web.Application:
+def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> web.Application:
     app = web.Application(middlewares=[])
 
     def local_only(req) -> bool:
@@ -1496,14 +1586,27 @@ def make_app(bridge_id: str, on_setup=None) -> web.Application:
                 lines.append("iRobot ingesteld, bezig met ophalen.")
         return "<br>".join(html.escape(x) for x in lines)
 
+    def plain_from_lan(req) -> bool:
+        """Setup page over plain http from another computer: credentials would cross the LAN unencrypted."""
+        try:
+            loop = ipaddress.ip_address(req.remote or "").is_loopback
+        except ValueError:
+            loop = False
+        return https_port is not None and not req.secure and not loop
+
     async def setup_get(req):
         if not local_only(req):
             return web.Response(status=403, text="setup alleen op deze pc (localhost)")
+        if plain_from_lan(req):
+            host = (req.host or "").rsplit(":", 1)[0]
+            raise web.HTTPFound(f"https://{host}:{https_port}/setup")
         k = load_config().get("skoda") or {}
         rb = load_config().get("buienradar") or {}
         page = (SETUP_HTML.replace("{status}", status_text())
                 .replace("{skoda_poll}", html.escape(str(k.get("poll_minutes", 10))))
                 .replace("{skoda_temp}", html.escape(str(k.get("climate_temp", 21))))
+                .replace("{fglair_poll}", html.escape(str((load_config().get("fglair") or {}).get("poll_seconds", 60))))
+                .replace("{velux_poll}", html.escape(str((load_config().get("velux") or {}).get("poll_seconds", 60))))
                 .replace("{rain_pc}", html.escape(str(rb.get("postcode") or "")))
                 .replace("{rain_nr}", html.escape(str(rb.get("housenumber") or "")))
                 .replace("{rain_loc}", html.escape(str(rb.get("location") or "")))
@@ -1515,6 +1618,8 @@ def make_app(bridge_id: str, on_setup=None) -> web.Application:
     async def setup_post(req):
         if not local_only(req):
             return web.Response(status=403, text="setup alleen op deze pc (localhost)")
+        if plain_from_lan(req):
+            return web.Response(status=403, text="gebruik https voor de setup pagina")
         form = await req.post()
         cfg = load_config()
         section = str(form.get("section", "aeg"))
@@ -1537,6 +1642,13 @@ def make_app(bridge_id: str, on_setup=None) -> web.Application:
             r["country"] = str(form.get("country", "NL")).strip().upper()[:2] or "NL"
             save_config(cfg)
             log.info("[setup] iRobot login saved")
+        elif section in ("fglair_settings", "velux_settings"):
+            name = section.split("_")[0]
+            sec = poll_seconds(form.get("poll_seconds"), 60)
+            save_poll_seconds(name, sec)
+            log.info("[setup] %s: every %s s", name, sec)
+            # the running source picks it up at its next update; restart it so it applies now
+            section = name
         elif section == "buienradar":
             b = cfg.setdefault("buienradar", {})
             v = {k: form.get(k, "") for k in ("postcode", "housenumber", "location", "radius_m", "threshold")}
@@ -1779,10 +1891,18 @@ async def serve(args) -> None:
             REG.handlers.pop(dev_id, None)
         tasks[section] = asyncio.create_task(guarded(section, sources[section](load_config()).run))
 
-    runner = web.AppRunner(make_app(bridge_id, None if args.demo else start), access_log=None)
+    https_port = int(cfg.get("https_port", 8443))
+    tls, fp = (None, "demo") if args.demo else setup_tls(DATA)
+    runner = web.AppRunner(make_app(bridge_id, None if args.demo else start, https_port if tls else None),
+                           access_log=None)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", port).start()
     log.info("Stoeckie Bridge %s listening on port %d (id %s)", VERSION, port, bridge_id)
+    if tls:
+        await web.TCPSite(runner, "0.0.0.0", https_port, ssl_context=tls).start()
+        log.info("[https] setup page on https://<this pc>:%d/setup, certificate SHA-256 %s", https_port, fp)
+    elif not args.demo:
+        log.warning("[https] not available (%s); setup page only on http", fp)
 
     async def guarded(name, coro):
         while True:
