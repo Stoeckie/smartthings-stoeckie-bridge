@@ -159,8 +159,15 @@ try {
     }
     Write-Host "Python: $py"
 
-    # ---- code + packages (the bridge here keeps running meanwhile)
-    Invoke-Command -Session $session -ArgumentList $remoteDir { param($d) New-Item -ItemType Directory -Force -Path $d | Out-Null }
+    # ---- folder: keys and tokens live here, so only SYSTEM and administrators may use it.
+    # The folder gets that ACL with inheritance; everything inside inherits it (owner: Administrators).
+    Invoke-Command -Session $session -ArgumentList $remoteDir {
+        param($d)
+        New-Item -ItemType Directory -Force -Path $d | Out-Null
+        & takeown /F $d /R /A /D Y 2>&1 | Out-Null
+        & icacls $d /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" /Q 2>&1 | Out-Null
+        & icacls "$d\*" /reset /T /C /Q 2>&1 | Out-Null
+    }
     $files = @("stoeckie_bridge.py", "requirements.txt", "config.example.json", "restart.ps1", "restart.bat", "setup.bat", "check.bat") |
         ForEach-Object { Join-Path $dir $_ } | Where-Object { Test-Path $_ }
     Copy-Item -Path $files -Destination $remoteDir -ToSession $session -Force
@@ -219,8 +226,7 @@ try {
             New-NetFirewallRule -DisplayName "Stoeckie Bridge setup (https)" -Direction Inbound -Protocol TCP `
                 -LocalPort 8443 -RemoteAddress ($allow -replace "/32$", "") -Action Allow -Profile Private,Domain | Out-Null
         }
-        # keys and tokens in this folder: only SYSTEM and administrators may read it
-        & icacls $d /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" /T /Q | Out-Null
+
         # PowerShell remoting on this pc: only from the own network (not from anywhere)
         Get-NetFirewallRule -Name "WINRM-HTTP-In-TCP*" -ErrorAction SilentlyContinue |
             Set-NetFirewallRule -RemoteAddress LocalSubnet -ErrorAction SilentlyContinue
