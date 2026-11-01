@@ -116,6 +116,7 @@ try {
         if ($_.Exception.Message -match "Access is denied|Toegang geweigerd|logon|aanmeld") {
             Remove-Item $credFile -ErrorAction SilentlyContinue  # stored login no longer valid
         }
+        $failed = $true
         return
     }
     if ($saveCred) {
@@ -245,6 +246,7 @@ try {
         Write-Host "De bridge op $Target antwoordt niet over het netwerk. Laatste regels van bridge.log daar:"
         Invoke-Command -Session $session -ArgumentList $remoteDir { param($d) Get-Content "$d\bridge.log" -Tail 15 -ErrorAction SilentlyContinue } | Write-Host
         if ($localStopped -and $localTask) { Start-ScheduledTask -TaskName $taskName; Write-Host "Bridge op deze pc weer gestart." }
+        $failed = $true
         return
     }
     $devices = @((Invoke-RestMethod "http://${Target}:8787/stbridge/devices" -TimeoutSec 5).devices)
