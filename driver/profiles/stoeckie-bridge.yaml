@@ -43,3 +43,10 @@ preferences:
     preferenceType: boolean
     definition:
       default: false
+  - name: forgetPairing
+    title: Forget pairing
+    description: "Only after a bridge reset or new install: switch on, press Koppelen on the bridge setup page, the hub pairs again within a minute. Switch off afterwards."
+    required: false
+    preferenceType: boolean
+    definition:
+      default: false

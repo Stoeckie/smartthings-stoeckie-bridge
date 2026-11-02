@@ -43,10 +43,13 @@ import argparse
 import asyncio
 import base64
 import datetime as dt
+import hashlib
+import hmac
 import html
 import ipaddress
 import json
 import os
+import secrets
 import logging
 import logging.handlers
 import socket
@@ -58,7 +61,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-02a"
+VERSION = "2026-11-02b"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -738,6 +741,59 @@ VELUX_SYNC = "https://app.velux-active.com/syncapi/v1/"
 VELUX_CLIENT = {"client_id": "5931426da127d981e76bdd3f", "client_secret": "6ae2d89d15e767ae5c56b456b452d319"}
 VELUX_APP_VERSION = "791302006"
 VELUX_PAIR: dict[str, Any] = {"state": None, "error": None, "start": None}
+
+# --- LAN API authentication -------------------------------------------------------------------------
+# After pairing, every request from the hub carries an HMAC-SHA512 signature made with a shared token
+# (X-Stbridge-Time, X-Stbridge-Sig) and every answer is signed back. The token itself never crosses the
+# LAN again after pairing, a replayed request is refused, and a device pretending to be the bridge cannot
+# produce a valid answer. Until a hub is paired the API stays open (old drivers keep working).
+PAIRING: dict[str, Any] = {"until": 0.0}
+PAIR_WINDOW = 300          # seconds the "Koppelen" button keeps pairing open
+SIG_MAX_AGE = 300          # seconds a signed request stays valid (hub and pc clocks use NTP)
+_SEEN_SIGS: dict[str, float] = {}
+
+
+def api_token(cfg: dict[str, Any] | None = None) -> str:
+    """The shared secret for hub requests; created on first use and kept in config.json."""
+    cfg = cfg if cfg is not None else load_config()
+    tok = cfg.get("api_token")
+    if not tok:
+        tok = cfg["api_token"] = secrets.token_hex(32)
+        save_config(cfg)
+    return tok
+
+
+def api_paired(cfg: dict[str, Any] | None = None) -> bool:
+    cfg = cfg if cfg is not None else load_config()
+    return bool(cfg.get("api_paired") and cfg.get("api_token"))
+
+
+def sign(token: str, msg: bytes | str) -> str:
+    return hmac.new(token.encode(), msg if isinstance(msg, bytes) else msg.encode(), hashlib.sha512).hexdigest()
+
+
+def request_message(method: str, path: str, ts: str, body: bytes) -> bytes:
+    return f"{method}\n{path}\n{ts}\n".encode() + body
+
+
+def check_request_sig(token: str, method: str, path: str, ts: str, sig: str, body: bytes,
+                      now: float | None = None) -> str | None:
+    """None when the signature is valid and fresh, else the reason."""
+    now = time.time() if now is None else now
+    try:
+        age = abs(now - float(ts))
+    except (TypeError, ValueError):
+        return "bad time"
+    if age > SIG_MAX_AGE:
+        return "request too old (check the clock)"
+    if not hmac.compare_digest(sign(token, request_message(method, path, ts, body)), str(sig).lower()):
+        return "bad signature"
+    for k in [k for k, t in _SEEN_SIGS.items() if now - t > SIG_MAX_AGE * 2]:
+        del _SEEN_SIGS[k]
+    if sig in _SEEN_SIGS:
+        return "replayed request"
+    _SEEN_SIGS[sig] = now
+    return None
 
 
 def velux_configured(v: dict[str, Any]) -> bool:
@@ -1495,6 +1551,13 @@ font:13px ui-monospace,monospace}textarea{height:90px}button{margin-top:18px;pad
 .st{padding:10px;border-radius:6px;background:#f2f2f2;margin:12px 0}h3{margin-top:36px}</style></head><body>
 <h2>Stoeckie Bridge</h2><div class="st">{status}</div>
 <p>Alles wat je hier invult wordt alleen lokaal in config.json op deze pc opgeslagen.</p>
+<h3>SmartThings hub koppelen</h3>
+<p>Na koppelen accepteert de bridge alleen nog ondertekende verzoeken van de gekoppelde hub. Druk op Koppelen;
+de hub koppelt binnen 5 minuten vanzelf (bij de driver Stoeckie Bridge vanaf versie 2026-11-02b).</p>
+<form method="post"><input type="hidden" name="section" value="api_pair">
+<button type="submit">Koppelen (5 minuten open)</button></form>
+<form method="post"><input type="hidden" name="section" value="api_new_token">
+<button type="submit">Nieuw token (alle hubs opnieuw koppelen)</button></form>
 <h3>AEG / Electrolux</h3>
 <p>Maak op <b>developer.electrolux.one</b> (inloggen met je AEG account) een API key aan en genereer
 een access token en refresh token.</p>
@@ -1597,16 +1660,53 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             return False
         return True
 
+    def lan_api_refusal(req) -> web.Response | None:
+        """The LAN API is only for the hub: a private address, addressed by IP (no DNS rebinding), never from a
+        web page (browsers send Origin) and only JSON (a cross-site form or text/plain post is refused)."""
+        try:
+            ip = ipaddress.ip_address(req.remote or "")
+        except ValueError:
+            ip = None
+        if ip is None or not (ip.is_private or ip.is_loopback or ip.is_link_local):
+            return web.json_response({"error": "forbidden"}, status=403)
+        host = (req.host or "").rsplit(":", 1)[0].strip("[]").lower()
+        if host != "localhost":
+            try:
+                ipaddress.ip_address(host)
+            except ValueError:
+                return web.json_response({"error": "address the bridge by IP"}, status=403)
+        if "Origin" in req.headers or req.headers.get("Sec-Fetch-Site") not in (None, "none", "same-origin"):
+            return web.json_response({"error": "no browser requests"}, status=403)
+        if req.method == "POST" and req.content_type != "application/json":
+            return web.json_response({"error": "JSON only"}, status=415)
+        return None
+
     @web.middleware
     async def guard(req, handler):
-        # the LAN API is meant for the hub: refuse anything that is not from a private or local address
         if req.path.startswith("/stbridge/"):
-            try:
-                ip = ipaddress.ip_address(req.remote or "")
-            except ValueError:
-                ip = None
-            if ip is None or not (ip.is_private or ip.is_loopback or ip.is_link_local):
-                return web.json_response({"error": "forbidden"}, status=403)
+            refusal = lan_api_refusal(req)
+            if refusal is not None:
+                return refusal
+            cfg = load_config()
+            token = cfg.get("api_token") if api_paired(cfg) else None
+            sig = req.headers.get("X-Stbridge-Sig")
+            if token and sig:
+                body = await req.read()
+                why = check_request_sig(token, req.method, req.raw_path, req.headers.get("X-Stbridge-Time", ""),
+                                        sig, body)
+                if why:
+                    log.warning("[api] refused %s %s from %s: %s", req.method, req.path, req.remote, why)
+                    return web.json_response({"error": why}, status=401)
+                resp = await handler(req)
+                if isinstance(resp, web.Response) and isinstance(resp.body, (bytes, bytearray)):
+                    resp.headers["X-Stbridge-Sig"] = sign(token, sig.lower().encode() + b"\n" + bytes(resp.body))
+                return resp
+            # open even after pairing: discovery info, the pairing call itself, and the read-only iRobot favorites
+            # that the Roomba driver (another driver, no token) fetches
+            open_paths = req.path in ("/stbridge/info", "/stbridge/pair") or (
+                req.method == "GET" and req.path.startswith("/stbridge/irobot/"))
+            if token and not open_paths:
+                return web.json_response({"error": "pairing required"}, status=401)
         resp = await handler(req)
         if req.path.startswith("/setup"):
             resp.headers["Cache-Control"] = "no-store"
@@ -1676,6 +1776,14 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
                     f"{v.get('name') or k}: {len(v['favorites'])} favoriet(en)" for k, v in IROBOT["robots"].items()))
             else:
                 lines.append("iRobot ingesteld, bezig met ophalen.")
+        if PAIRING["until"] > time.time():
+            lines.append(f"SmartThings koppelen staat open (nog {int(PAIRING['until'] - time.time())} s): "
+                         "de hub koppelt bij zijn volgende poll.")
+        elif api_paired(cfg):
+            lines.append("SmartThings hub gekoppeld: de LAN API vraagt een ondertekend verzoek.")
+        else:
+            lines.append("LET OP: nog geen SmartThings hub gekoppeld, de LAN API is open voor het hele LAN. "
+                         "Druk hieronder op Koppelen.")
         return "<br>".join(html.escape(x) for x in lines)
 
     def plain_from_lan(req) -> bool:
@@ -1766,6 +1874,20 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             save_config(cfg)
             VELUX["error"] = None
             log.info("[setup] VELUX login saved")
+        elif section == "api_pair":
+            api_token(cfg)
+            PAIRING["until"] = time.time() + PAIR_WINDOW
+            log.info("[setup] pairing with SmartThings open for %d s", PAIR_WINDOW)
+            raise web.HTTPFound("/setup")
+        elif section == "api_new_token":
+            if cfg.get("api_token"):
+                cfg["api_token_prev"] = cfg["api_token"]
+            cfg["api_token"] = secrets.token_hex(32)
+            cfg["api_paired"] = True
+            save_config(cfg)
+            PAIRING["until"] = time.time() + PAIR_WINDOW
+            log.info("[setup] new API token, pairing open for %d s", PAIR_WINDOW)
+            raise web.HTTPFound("/setup")
         elif section == "velux_pair":
             ip = str(form.get("gateway_ip", "")).strip()
             try:
@@ -1799,7 +1921,23 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
 
     async def info(_req):
         return web.json_response({"service": "stoeckie-bridge", "id": bridge_id, "version": VERSION,
-                                  "name": socket.gethostname()})
+                                  "name": socket.gethostname(), "paired": api_paired()})
+
+    async def pair(req):
+        """Hand the token to a hub, only while "Koppelen" on the setup page is open (5 minutes, one hub)."""
+        if time.time() > PAIRING["until"]:
+            return web.json_response({"error": "pairing closed: press Koppelen on the bridge setup page"},
+                                     status=403)
+        cfg = load_config()
+        tok = api_token(cfg)
+        cfg["api_paired"] = True
+        save_config(cfg)
+        PAIRING["until"] = 0.0
+        log.info("[api] hub %s paired", req.remote)
+        # a hub that already has a (previous) token only accepts the new one with this proof, so a device on the
+        # LAN that pretends to be the bridge cannot slip it a token of its own
+        proof = sign(cfg.get("api_token_prev") or tok, tok.encode())
+        return web.json_response({"token": tok, "id": bridge_id, "proof": proof})
 
     async def devices(_req):
         return web.json_response({"devices": list(REG.devices.values()), "time": int(time.time())})
@@ -1871,6 +2009,7 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
 
     app.router.add_get("/", root)
     app.router.add_get("/stbridge/info", info)
+    app.router.add_post("/stbridge/pair", pair)
     app.router.add_get("/stbridge/devices", devices)
     app.router.add_post("/stbridge/devices/{dev_id}/command", command)
     app.router.add_get("/stbridge/irobot/{blid}", irobot)

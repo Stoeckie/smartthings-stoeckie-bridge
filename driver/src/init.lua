@@ -63,8 +63,9 @@ end
 local log = require "log"
 local cosock = require "cosock"
 local api = require "bridge_api"
+local sha = require "sha512"
 
-local BUILD = "2026-11-02a"
+local BUILD = "2026-11-02b"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -104,6 +105,7 @@ local function bridge_addr(parent)
   local ip = p.ipAddress
   if ip == nil or ip == "" or ip == "auto" then ip = parent:get_field("ip") end
   local port = tonumber(p.port) or parent:get_field("port") or DEFAULT_PORT
+  api.set_token(ip, port, parent:get_field("api_token"))
   return ip, port
 end
 
@@ -378,6 +380,42 @@ end
 
 local rescan -- forward declaration
 
+-- pairing: the bridge hands out its token only while "Koppelen" is open on its setup page. A hub that already
+-- has a token only accepts a new one with a proof made with the old token (or after "Forget pairing").
+local function try_pair(parent, ip, port, err)
+  local st = state[parent.id]
+  if not st or not ip then return end
+  local tok = parent:get_field("api_token")
+  local forget = (parent.preferences or {}).forgetPairing == true
+  local why = tostring(err or "")
+  local asked = why:find("pairing required") or why:find("bad signature") or why:find("not signed")
+  if tok and not forget and not asked then return end
+  if tok and os.time() - (st.last_pair or 0) < 30 then return end
+  st.last_pair = os.time()
+  local res = api.pair(ip, port)
+  if not (res and type(res.token) == "string" and #res.token >= 32) then
+    if asked and os.time() - (st.pair_hint or 0) > 600 then
+      st.pair_hint = os.time()
+      if why:find("not signed") then
+        log.warn("[stbridge] " .. parent.label .. ": the bridge at " .. ip .. " does not sign its answers. After a "
+          .. "bridge reset: switch on Forget pairing in this device's settings and press Koppelen on the bridge setup page")
+      else
+        log.warn("[stbridge] " .. parent.label .. ": the bridge asks for pairing: press Koppelen on its setup page "
+          .. "(https://" .. ip .. ":8443/setup)")
+      end
+    end
+    return
+  end
+  if tok and not forget and res.token ~= tok
+      and tostring(res.proof or ""):lower() ~= sha.hex(sha.hmac(tok, res.token)) then
+    log.warn("[stbridge] " .. parent.label .. ": ignored a pairing answer from " .. ip .. " without proof of the old token")
+    return
+  end
+  parent:set_field("api_token", res.token, { persist = true })
+  api.set_token(ip, port, res.token)
+  log.info("[stbridge] " .. parent.label .. ": paired with the bridge, requests are signed from now on")
+end
+
 local function maybe_rescan(driver, parent)
   local st = state[parent.id]
   if st and not st.scanning and os.time() - (st.last_scan or 0) > 120 then
@@ -395,6 +433,7 @@ local function poll(driver, parent)
   local devices, err = api.devices(ip, port)
   local st = state[parent.id]
   if st then st.fails = devices and 0 or (st.fails or 0) + 1 end
+  try_pair(parent, ip, port, err)
   if not devices then
     log.warn(string.format("[stbridge] %s: poll failed: %s", parent.label, tostring(err)))
     -- bridge moved to another pc or got a new IP: look for it again (same bridge id), unless the IP is fixed
@@ -554,6 +593,12 @@ local function info_changed(driver, device, event, args)
     -- Buienradar on/off: the bridge starts or stops the rain radar (settings are on the Buienradar device)
     local old = args and args.old_st_store and args.old_st_store.preferences or {}
     local p = device.preferences or {}
+    if p.forgetPairing == true and old.forgetPairing ~= true then
+      device:set_field("api_token", nil, { persist = true })
+      local ip, port = bridge_addr(device)
+      api.set_token(ip, port, nil)
+      log.info("[stbridge] " .. device.label .. ": pairing forgotten; press Koppelen on the bridge setup page")
+    end
     if p.rainRadar ~= nil and p.rainRadar ~= old.rainRadar then
       local ip, port = bridge_addr(device)
       local res, err = api.buienradar(ip, port, p.rainRadar)
@@ -603,6 +648,16 @@ local function handle_found(driver, ip, port, info)
   discovered[dni] = { ip = ip, port = port, info = info }
   local dev = existing_parent(driver, dni)
   if dev then
+    local tok = dev:get_field("api_token")
+    if tok and dev:get_field("ip") ~= ip then
+      -- paired: only follow the bridge to a new address when it proves it has our token (signed answer)
+      api.set_token(ip, port, tok)
+      local ok_info, verr = api.info(ip, port, 3)
+      if not ok_info then
+        log.warn(string.format("[stbridge] ignored %s at %s: %s", info.id, ip, tostring(verr)))
+        return
+      end
+    end
     if dev:get_field("ip") ~= ip then
       dev:set_field("ip", ip, { persist = true })
       log.info(string.format("[stbridge] %s moved to %s", dev.label, ip))

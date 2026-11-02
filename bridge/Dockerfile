@@ -2,7 +2,7 @@ ARG BASE=python:3.12-slim
 FROM ${BASE}
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 COPY stoeckie_bridge.py config.example.json ./
 ENV STBRIDGE_DATA=/data PYTHONUNBUFFERED=1
 VOLUME /data

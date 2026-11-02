@@ -7,7 +7,7 @@
 #    Windows account (remote-cred.xml, Windows DPAPI), so later updates run without questions: update-remote.bat
 #  - installs Python 3.12 on the target when missing, copies the bridge to C:\StoeckieBridge, venv + packages
 #  - stops the bridge here and copies config.json (keys + bridge id, so SmartThings keeps the same devices)
-#  - firewall rule 8787, scheduled task at startup as SYSTEM (runs without anyone logged on), starts it
+#  - firewall rule 8787, scheduled task at startup as LOCAL SERVICE (no admin rights, runs without anyone logged on)
 #  - checks from here that the target answers on port 8787; then disables the bridge here (or restarts it on failure)
 #  - copies the target's config.json back here, so the copy here stays a current backup
 param([string]$Target, [switch]$Unattended)
@@ -159,18 +159,18 @@ try {
     }
     Write-Host "Python: $py"
 
-    # ---- folder: keys and tokens live here, so only SYSTEM and administrators may use it.
-    # The folder gets that ACL with inheritance; everything inside inherits it.
+    # ---- folder: keys and tokens live here, so only SYSTEM, administrators and the bridge account (LOCAL SERVICE)
+    # may use it. The folder gets that ACL with inheritance; everything inside inherits it.
     Invoke-Command -Session $session -ArgumentList $remoteDir {
         param($d)
         New-Item -ItemType Directory -Force -Path $d | Out-Null
-        & icacls $d /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" /Q 2>&1 | Out-Null
+        & icacls $d /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-19:(OI)(CI)M" /Q 2>&1 | Out-Null
         # files the bridge (SYSTEM) made, e.g. bridge.log, may lack access for us: take ownership one by one
         # (takeown per file: no localized Y/N prompt), then let everything inherit the folder ACL
         Get-ChildItem $d -File -Force | ForEach-Object { & takeown /F $_.FullName /A 2>&1 | Out-Null }
         & icacls "$d\*" /reset /T /C /Q 2>&1 | Out-Null
     }
-    $files = @("stoeckie_bridge.py", "requirements.txt", "config.example.json", "restart.ps1", "restart.bat", "setup.bat", "check.bat") |
+    $files = @("stoeckie_bridge.py", "requirements.txt", "requirements.in", "config.example.json", "restart.ps1", "restart.bat", "setup.bat", "check.bat") |
         ForEach-Object { Join-Path $dir $_ } | Where-Object { Test-Path $_ }
     Copy-Item -Path $files -Destination $remoteDir -ToSession $session -Force
     Write-Host "Packages installeren op $Target (paar minuten)..."
@@ -180,8 +180,8 @@ try {
         $vpy = "$d\venv\Scripts\python.exe"
         if (-not (Test-Path $vpy)) { & $py -m venv "$d\venv" 2>&1 | Out-Null }
         if (-not (Test-Path $vpy)) { throw "venv aanmaken mislukt" }
-        & $vpy -m pip install --upgrade pip --quiet 2>&1 | Out-Null
-        $o = & $vpy -m pip install --upgrade -r "$d\requirements.txt" --quiet 2>&1 | Out-String
+        # exact versions with hashes: a changed or tampered package is refused
+        $o = & $vpy -m pip install --require-hashes -r "$d\requirements.txt" --quiet 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) { throw "pip install mislukt: $o" }
     }
 
@@ -215,8 +215,8 @@ try {
     }
 
     Write-Host "Firewall, taak en bridge instellen op $Target..."
-    Invoke-Command -Session $session -ArgumentList $remoteDir, $taskName, $allow, $noSleep {
-        param($d, $taskName, $allow, $noSleep)
+    Invoke-Command -Session $session -ArgumentList $remoteDir, $taskName, $allow, $noSleep, $myIp {
+        param($d, $taskName, $allow, $noSleep, $myIp)
         if (-not (Test-Path "$d\config.json")) { Copy-Item "$d\config.example.json" "$d\config.json" }
         if (-not (Get-NetFirewallRule -DisplayName "Stoeckie Bridge" -ErrorAction SilentlyContinue)) {
             New-NetFirewallRule -DisplayName "Stoeckie Bridge" -Direction Inbound -Protocol TCP -LocalPort 8787 `
@@ -229,9 +229,10 @@ try {
                 -LocalPort 8443 -RemoteAddress ($allow -replace "/32$", "") -Action Allow -Profile Private,Domain | Out-Null
         }
 
-        # PowerShell remoting on this pc: only from the own network (not from anywhere)
+        # PowerShell remoting on this pc: only from the pc that manages it (else the own network, never anywhere)
+        $winrmFrom = if ($myIp) { $myIp } else { "LocalSubnet" }
         Get-NetFirewallRule -Name "WINRM-HTTP-In-TCP*" -ErrorAction SilentlyContinue |
-            Set-NetFirewallRule -RemoteAddress LocalSubnet -ErrorAction SilentlyContinue
+            Set-NetFirewallRule -RemoteAddress $winrmFrom -ErrorAction SilentlyContinue
         Get-NetConnectionProfile | Where-Object { $_.NetworkCategory -eq "Public" } |
             ForEach-Object { Set-NetConnectionProfile -InterfaceIndex $_.InterfaceIndex -NetworkCategory Private }
         if ($noSleep) { & powercfg /change standby-timeout-ac 0; & powercfg /change hibernate-timeout-ac 0 }
@@ -241,10 +242,18 @@ try {
         Set-Content -Path "$d\run.cmd" -Value $run -Encoding ASCII
         $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"$d\run.cmd`"" -WorkingDirectory $d
         $trigger = New-ScheduledTaskTrigger -AtStartup
-        $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+        # the bridge runs as LOCAL SERVICE (S-1-5-19): no admin rights, so a flaw in the bridge or a package does
+        # not hand over this pc. It only needs its own folder (see the ACL above) and outgoing network.
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
             -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable
-        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+        try {
+            $principal = New-ScheduledTaskPrincipal -UserId "S-1-5-19" -LogonType ServiceAccount -RunLevel Limited
+            Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
+        } catch {
+            Write-Warning "Taak als LOCAL SERVICE lukt niet ($($_.Exception.Message)), dan als SYSTEM"
+            $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+            Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+        }
         Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
         Get-CimInstance Win32_Process -Filter "Name like 'python%'" |
             Where-Object { $_.CommandLine -like "*stoeckie_bridge.py*" } |

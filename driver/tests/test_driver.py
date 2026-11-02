@@ -12,6 +12,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 
 import pytest
@@ -43,9 +45,9 @@ package.loaded["ltn12"] = {
   source = { string = function(s) return s end },
   sink = { table = function(t) return t end } }
 local http = { request = function(req)
-  local code, body = py_http(req.method, req.url, req.source)
+  local code, body, rh = py_http(req.method, req.url, req.source, package.loaded["st.json"].encode(req.headers or {}))
   req.sink[#req.sink + 1] = body
-  return 1, code
+  return 1, code, package.loaded["st.json"].decode(rh)
 end }
 package.loaded["cosock"] = { socket = { sleep = function() end }, asyncify = function() return http end,
   spawn = function(fn) fn() end }
@@ -86,8 +88,7 @@ def free_port():
     return p
 
 
-@pytest.fixture(scope="module")
-def bridge():
+def start_bridge():
     data = tempfile.mkdtemp()
     port = free_port()
     pathlib.Path(data, "config.json").write_text(json.dumps({"port": port, "bridge_id": "test1"}))
@@ -100,21 +101,33 @@ def bridge():
             break
         except OSError:
             time.sleep(0.2)
+    return port, p
+
+
+@pytest.fixture(scope="module")
+def bridge():
+    port, p = start_bridge()
     yield port
     p.terminate()
     p.wait()
 
 
-def py_http(method, url, body):
+def py_http(method, url, body, headers=None):
     method = method.decode() if isinstance(method, bytes) else method
     url = url.decode() if isinstance(url, bytes) else url
     data = body.encode() if isinstance(body, str) else body
-    req = urllib.request.Request(url, data=data, method=method, headers={"Content-Type": "application/json"})
+    hdrs = {"Content-Type": "application/json"}
+    if headers:
+        h = json.loads(headers.decode() if isinstance(headers, bytes) else headers)
+        if isinstance(h, dict):
+            hdrs.update({k: str(v) for k, v in h.items()})
+    hdrs.pop("Content-Length", None)
+    req = urllib.request.Request(url, data=data, method=method, headers=hdrs)
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
-            return r.status, r.read().decode()
+            return r.status, r.read().decode(), json.dumps(dict(r.headers))
     except urllib.error.HTTPError as e:
-        return e.code, e.read().decode()
+        return e.code, e.read().decode(), json.dumps(dict(e.headers))
 
 
 def test_aircon_flow(bridge):
@@ -341,3 +354,53 @@ def test_dryer_no_completion_time_spam(bridge):
     dryer = lua.eval("DRYER")
     paths = [dryer.events[i].path for i in range(1, len(dryer.events) + 1)]
     assert sum("completionTime" in p for p in paths) == 1
+
+
+def test_pairing_signed_api():
+    """Koppelen on the setup page, the driver pairs at its next poll and signs from then on; a forged token fails."""
+    port, proc = start_bridge()
+    try:
+        lua = lua53.LuaRuntime(unpack_returned_tuples=True)
+        lua.execute(f'package.path = "{SRC}/?.lua;{HERE}/?.lua;" .. package.path')
+        lua.globals().py_http = py_http
+        lua.execute(HARNESS)
+        lua.execute(f'dofile("{SRC}/init.lua")')
+        lua.execute(f'''
+          PARENT = NEW_DEVICE({{ id = "p1", label = "Bridge", device_network_id = "stbridge-test1",
+                                preferences = {{ ipAddress = "127.0.0.1", port = "{port}" }} }})
+          DRIVER.lifecycle_handlers.init(DRIVER_OBJ, PARENT)
+          DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
+        ''')
+        assert lua.eval("PARENT.fields.api_token") is None
+        # press Koppelen (the setup page accepts localhost)
+        form = urllib.parse.urlencode({"section": "api_pair"}).encode()
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/setup", data=form, method="POST")
+        try:
+            urllib.request.urlopen(req, timeout=5)
+        except urllib.error.HTTPError:
+            pass
+        lua.execute('''
+          for _, d in ipairs(DEVICES) do d.events = {} end
+          DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
+        ''')
+        token = lua.eval("PARENT.fields.api_token")
+        assert token and len(token) == 64
+        # unsigned requests are refused now, signed ones work (children get their state)
+        assert py_http("GET", f"http://127.0.0.1:{port}/stbridge/devices", None)[0] == 401
+        lua.execute('''
+          for _, d in ipairs(DEVICES) do d.events = {} end
+          DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
+          N = 0
+          for _, d in ipairs(DEVICES) do N = N + #d.events end
+        ''')
+        assert lua.eval("N") > 0 and lua.eval("PARENT.state") == "online"
+        # a wrong token: the bridge refuses and the hub does not accept an unproven new token
+        lua.execute('''
+          PARENT.fields.api_token = string.rep("0", 64)
+          DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
+        ''')
+        assert lua.eval("PARENT.state") == "offline"
+        assert lua.eval("PARENT.fields.api_token") == "0" * 64
+    finally:
+        proc.terminate()
+        proc.wait()

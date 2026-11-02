@@ -1,0 +1,7 @@
+# Direct dependencies. requirements.txt is generated from this file with exact versions and hashes:
+#   uv pip compile requirements.in --universal --python-version 3.12 --generate-hashes -o requirements.txt
+aiohttp>=3.9
+electrolux-group-developer-sdk>=0.7
+ayla-iot-unofficial>=1.4
+roombapy-prime>=0.8.2
+cryptography>=42
