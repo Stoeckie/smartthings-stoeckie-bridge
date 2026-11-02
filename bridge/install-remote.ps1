@@ -276,7 +276,22 @@ try {
         $failed = $true
         return
     }
-    $devices = @((Invoke-RestMethod "http://${Target}:8787/stbridge/devices" -TimeoutSec 5).devices)
+    # count the devices on the bridge pc itself: after pairing the LAN API only answers signed requests
+    $devices = @(Invoke-Command -Session $session -ArgumentList $remoteDir {
+        param($d)
+        try {
+            $tok = (Get-Content "$d\config.json" -Raw | ConvertFrom-Json).api_token
+            $h = @{}
+            if ($tok) {
+                $ts = [string][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                $mac = New-Object System.Security.Cryptography.HMACSHA512 (,[Text.Encoding]::UTF8.GetBytes($tok))
+                $sig = -join ($mac.ComputeHash([Text.Encoding]::UTF8.GetBytes("GET`n/stbridge/devices`n$ts`n")) |
+                    ForEach-Object { $_.ToString("x2") })
+                $h = @{ "X-Stbridge-Time" = $ts; "X-Stbridge-Sig" = $sig }
+            }
+            (Invoke-RestMethod "http://127.0.0.1:8787/stbridge/devices" -Headers $h -TimeoutSec 5).devices
+        } catch { }
+    })
     Write-Host ""
     Write-Host "Bridge draait op $Target : versie $($ok.version), id $($ok.id), $($devices.Count) apparaten."
     if ($localId -and $ok.id -ne $localId) { Write-Host "LET OP: ander bridge id dan hier ($localId)." }
