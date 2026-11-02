@@ -64,7 +64,7 @@ local log = require "log"
 local cosock = require "cosock"
 local api = require "bridge_api"
 
-local BUILD = "2026-11-01i"
+local BUILD = "2026-11-02a"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -125,6 +125,13 @@ local function try_emit(dev, make)
   if not ok then log.warn("[stbridge] " .. dev.label .. ": " .. tostring(err)) end
 end
 
+local function iso_secs(v)
+  local y, mo, d, h, mi, se = tostring(v):match("^(%d+)-(%d+)-(%d+)T(%d+):(%d+):(%d+)")
+  if not y then return nil end
+  return os.time({ year = tonumber(y), month = tonumber(mo), day = tonumber(d),
+    hour = tonumber(h), min = tonumber(mi), sec = tonumber(se) })
+end
+
 local function dryer_job(s)
   local a, ph = s.applianceState or "OFF", (s.cyclePhase or ""):upper()
   if a == "END_OF_CYCLE" then return "stop", "finished" end
@@ -143,8 +150,16 @@ local function emit_dryer(dev, s)
   local machine, job = dryer_job(s)
   try_emit(dev, function() return dryerOp.machineState[machine]() end)
   try_emit(dev, function() return dryerOp.dryerJobState[job]() end)
-  local ct = s.completionTime or os.date("!%Y-%m-%dT%H:%M:%SZ")
-  try_emit(dev, function() return dryerOp.completionTime(ct) end)
+  -- completion time only while a program runs, and only when it moves 2+ minutes:
+  -- before, every poll sent "now" (idle) or a time a few seconds off, a history entry each minute
+  if s.completionTime then
+    local new = iso_secs(s.completionTime)
+    local old = dev:get_field("ct_secs")
+    if not (new and old and math.abs(new - old) < 120) then
+      try_emit(dev, function() return dryerOp.completionTime(s.completionTime) end)
+      dev:set_field("ct_secs", new)
+    end
+  end
   local rc = tostring(s.remoteControl or ""):upper()
   local enabled = (rc:find("ENABLED") and not rc:find("DISABLED")) and "true" or "false"
   try_emit(dev, function() return remoteControl.remoteControlEnabled(enabled) end)

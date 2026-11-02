@@ -58,7 +58,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-01d"
+VERSION = "2026-11-02a"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -123,7 +123,8 @@ def aeg_configured(e: dict[str, Any]) -> bool:
 def _iso_in(seconds: float | None) -> str | None:
     if seconds is None or seconds < 0:
         return None
-    t = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=int(seconds))
+    # whole minutes: the end time then stays the same between polls
+    t = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=int(seconds) + 30)).replace(second=0, microsecond=0)
     return t.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 

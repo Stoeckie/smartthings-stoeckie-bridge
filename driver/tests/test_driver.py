@@ -322,3 +322,22 @@ def test_rainradar(bridge):
     assert rr.new_profile == "stoeckie-rainradar-simple"
     paths = [rr.events[i].path for i in range(1, len(rr.events) + 1)]
     assert paths == ["cap.rainSensor.rain.undetected"]
+
+
+def test_dryer_no_completion_time_spam(bridge):
+    """The demo dryer runs: its end time is emitted once, not again on every poll."""
+    lua = lua53.LuaRuntime(unpack_returned_tuples=True)
+    lua.execute(f'package.path = "{SRC}/?.lua;{HERE}/?.lua;" .. package.path')
+    lua.globals().py_http = py_http
+    lua.execute(HARNESS)
+    lua.execute(f'dofile("{SRC}/init.lua")')
+    lua.execute(f'''
+      PARENT = NEW_DEVICE({{ id = "p1", label = "Bridge", device_network_id = "stbridge-test1",
+                            preferences = {{ ipAddress = "127.0.0.1", port = "{bridge}" }} }})
+      DRIVER.lifecycle_handlers.init(DRIVER_OBJ, PARENT)
+      for i = 1, 4 do DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT) end
+      for _, d in ipairs(DEVICES) do if d.parent_assigned_child_key == "demo-dryer" then DRYER = d end end
+    ''')
+    dryer = lua.eval("DRYER")
+    paths = [dryer.events[i].path for i in range(1, len(dryer.events) + 1)]
+    assert sum("completionTime" in p for p in paths) == 1
