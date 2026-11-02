@@ -126,9 +126,27 @@ Every drop is remembered. When the connection is back, the device shows **Last d
 * Credentials only live in `config.json` on the bridge pc (in `.gitignore`), never in the code or the driver.
 * The setup page only answers on the pc itself (or `STBRIDGE_SETUP_ALLOW`), only when opened by IP or `localhost`, and refuses forms posted from other websites.
 * From another computer the setup page only works over **https** (port 8443; plain http redirects there and refuses forms). The certificate is self-signed and made once on the bridge pc (`setup-cert.pem`, `setup-key.pem`); the browser warns the first time, the log shows its SHA-256 fingerprint to compare. `install-remote.bat` opens port 8443 only for the pc that may use the setup page.
-* `install-remote.bat` limits the bridge folder on the target (keys, tokens, certificate) to SYSTEM and administrators.
-* Keys, tokens and passwords are only entered on the setup page, never in SmartThings: SmartThings settings are stored in the Samsung cloud and the LAN API has no login.
-* The LAN API only answers private and local addresses: `GET /stbridge/info`, `GET /stbridge/devices`, `POST /stbridge/devices/<id>/command` with `{"cmd": ..., "value": ...}`, `GET /stbridge/irobot/<blid>`, `POST /stbridge/buienradar` (rain radar on/off).
+* `install-remote.bat` limits the bridge folder on the target (keys, tokens, certificate) to SYSTEM, administrators and LOCAL SERVICE. The bridge itself runs as **LOCAL SERVICE**, without admin rights: a flaw in the bridge or a package does not hand over the pc. PowerShell remoting on the target only accepts the pc that manages it.
+* Python packages are pinned to exact versions with hashes (`requirements.txt`, made from `requirements.in` with `uv pip compile --universal --generate-hashes`); a changed package is refused.
+* Keys, tokens and passwords are only entered on the setup page, never in SmartThings: SmartThings settings are stored in the Samsung cloud.
+
+### LAN API and pairing
+
+The LAN API only answers private and local addresses, only when addressed by IP (no DNS rebinding), never a request from a web page (`Origin` header) and only JSON bodies (no cross-site form or text/plain posts).
+
+**Pairing** (bridge and driver from 2026-11-02b): press **Koppelen** on the setup page; the bridge then hands its token to the first hub that asks within 5 minutes, the hub stores it and pairing closes. From then on:
+
+* every request from the hub is signed with HMAC-SHA512 over method, path, time and body (`X-Stbridge-Time`, `X-Stbridge-Sig`); unsigned, changed, old (> 5 min) or replayed requests are refused;
+* every answer is signed back, so a device that takes over the bridge's address or pretends to be the bridge cannot feed the hub false states; when the bridge moves, the driver only follows a bridge that proves it has the token;
+* the token itself never crosses the LAN again. **Nieuw token** on the setup page makes a new one; a hub only accepts it with a proof made with the old token. After a bridge reinstall without the old config, switch on **Forget pairing** on the bridge device in SmartThings and press Koppelen.
+
+Not paired yet: the API stays open as before, the setup page warns about it.
+
+Endpoints: `GET /stbridge/info`, `POST /stbridge/pair`, `GET /stbridge/devices`, `POST /stbridge/devices/<id>/command` with `{"cmd": ..., "value": ...}`, `POST /stbridge/buienradar` (rain radar on/off), and the read-only `GET /stbridge/irobot/<blid>` (iRobot favorites for the Roomba driver, open without signature).
+
+### Network advice
+
+Put the bridge pc in the same network (VLAN) as the hub and the other IoT devices, and allow from your own pcs only the setup page (8443) and, for `update-remote.bat`, WinRM (5985) to the bridge pc. When the bridge gets an address outside the hub's /24, set its IP in the bridge device settings (the automatic search only scans the hub's own /24).
 
 ## Unofficial parts
 
