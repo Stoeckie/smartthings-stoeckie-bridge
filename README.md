@@ -150,7 +150,7 @@ Put the bridge pc in the same network (VLAN) as the hub and the other IoT device
 
 ## Unofficial parts
 
-* FGLair uses [ayla-iot-unofficial](https://pypi.org/project/ayla-iot-unofficial/) (the library of the Home Assistant FGLair integration).
+* FGLair uses [ayla-iot-unofficial](https://pypi.org/project/ayla-iot-unofficial/) (the library of the Home Assistant FGLair integration). Each poll only reads the cloud values; the bridge asks the wifi adapter for a fresh room temperature (the library's "refresh" write) at most every 15 minutes, because doing that every minute kept the adapter busy and the FGLair app then could not change the unit.
 * iRobot favorites use [roombapy-prime](https://github.com/johnnyh1975/roombapy-prime); iRobot limits logins per account.
 * VELUX departure mode uses the VELUX ACTIVE app login, as documented by [ha-velux-active](https://github.com/Niek/ha-velux-active) (MIT).
 * Electrolux and Škoda use the manufacturers' official APIs.
