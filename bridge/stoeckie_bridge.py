@@ -61,7 +61,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-02b"
+VERSION = "2026-11-02c"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -307,6 +307,13 @@ class FGLair:
         self.devices: dict[str, Any] = {}  # dsn -> FujitsuHVAC
         self.skipped: set[str] = set()
         self.lock = asyncio.Lock()
+        self.last_sense: dict[str, float] = {}  # dsn -> time of the last "refresh" write to the adapter
+
+    # The library writes "refresh" = 1 to the adapter on every update so it reads the room temperature again
+    # from the indoor unit. Every minute that keeps the adapter busy (the FGLair app then shows "information
+    # acquisition not completed"), so the bridge only does that every REFRESH_EVERY seconds and otherwise just
+    # reads the cloud values.
+    REFRESH_EVERY = 900
 
     def _new_api(self, session):
         from ayla_iot_unofficial import new_ayla_api
@@ -342,7 +349,11 @@ class FGLair:
     async def _refresh(self, dsn: str) -> None:
         dev = self.devices[dsn]
         if dev.is_online():
-            await dev.async_update()
+            from ayla_iot_unofficial.fujitsu_hvac import FujitsuHVAC
+            await super(FujitsuHVAC, dev).async_update()  # read only, no write to the adapter
+            if time.time() - self.last_sense.get(dsn, 0) >= self.REFRESH_EVERY:
+                self.last_sense[dsn] = time.time()
+                await dev.refresh_sensed_temp()
         self._publish(dsn)
 
     async def _sync(self) -> None:

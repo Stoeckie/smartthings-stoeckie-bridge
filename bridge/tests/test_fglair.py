@@ -145,6 +145,26 @@ def test_state_and_commands(fake, monkeypatch):
     asyncio.run(main())
 
 
+def test_no_refresh_write_every_poll(fake, monkeypatch):
+    """Polling reads the cloud; the adapter only gets a "refresh" write once per REFRESH_EVERY."""
+    async def main():
+        runner, base = await start(fake)
+        patch_urls(monkeypatch, base)
+        monkeypatch.setattr(sb.asyncio, "sleep", _fast_sleep)
+        sb.REG.devices.clear()
+        fg = sb.FGLair({"fglair": {"username": "a@b.nl", "password": "goed", "region": "eu"}})
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            fg.api = fg._new_api(session)
+            await fg.api.async_sign_in()
+            for _ in range(5):
+                await fg._sync()
+            assert sum(1 for n, _ in fake.sets if n == "refresh") <= 1
+            assert sb.REG.devices["fglair-AC000W000000001"]["state"]["setpoint"] == 16.0
+        await runner.cleanup()
+    asyncio.run(main())
+
+
 def test_wrong_password(fake, monkeypatch):
     async def main():
         runner, base = await start(fake)
