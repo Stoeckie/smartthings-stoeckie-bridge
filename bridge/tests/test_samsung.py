@@ -143,7 +143,7 @@ def test_tv_helpers():
     h, body = sb.tv_soap("SetVolume", "<DesiredVolume>12</DesiredVolume>")
     assert "RenderingControl:1#SetVolume" in h["SOAPACTION"] and "<DesiredVolume>12</DesiredVolume>" in body
     assert sb.tv_xml_value("<a><CurrentVolume>17</CurrentVolume></a>", "CurrentVolume") == "17"
-    assert sb.wol_packet("B8:B4:09:62:0B:54") == b"\xff" * 6 + bytes.fromhex("b8b409620b54") * 16
+    assert sb.wol_packet("AA:BB:CC:DD:EE:FF") == b"\xff" * 6 + bytes.fromhex("aabbccddeeff") * 16
     tv = sb.SamsungTV({"samsungtv": {"tvs": [{"host": "192.168.1.30", "type": "tv"}]}})
     assert [t["host"] for t in tv.tvs] == ["192.168.1.30"] and tv.dev_id("192.168.1.30") == "samsungtv-192-168-1-30"
     ss = sb.Samsung({"samsung": {"appliances": [{"host": "192.168.1.30", "type": "tv"}, {"host": "192.168.1.9"}]}})

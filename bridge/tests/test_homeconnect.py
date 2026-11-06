@@ -18,14 +18,14 @@ def make_zip(path, ha_id, typ, brand="SIEMENS", conn="TLS", iv=None):
 
 
 def test_profiles_and_hosts(tmp_path):
-    make_zip(tmp_path / "dish.zip", "015100394724004530", "Dishwasher")
+    make_zip(tmp_path / "dish.zip", "012345678901234567", "Dishwasher")
     make_zip(tmp_path / "oven.zip", "SIEMENS-CM676G0S6-68A40E6EC669", "Oven", conn="AES", iv="iv")
     (tmp_path / "junk.zip").write_bytes(b"not a zip")
     profs = sb.homeconnect_profiles(tmp_path)
     assert sorted(p["type"] for p in profs) == ["Dishwasher", "Oven"]
     assert all(p["xml"][0] == "<device/>" for p in profs)
     hosts = {p["type"]: sb.hc_default_host(p) for p in profs}
-    assert hosts == {"Dishwasher": "siemens-dishwasher-015100394724004530.local",
+    assert hosts == {"Dishwasher": "siemens-dishwasher-012345678901234567.local",
                      "Oven": "SIEMENS-CM676G0S6-68A40E6EC669.local"}
     assert sb.homeconnect_profiles(tmp_path / "missing") == []
 
