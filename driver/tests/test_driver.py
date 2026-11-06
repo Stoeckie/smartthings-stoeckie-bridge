@@ -37,7 +37,8 @@ for _, id in ipairs({ "windowShade", "windowShadeLevel", "refresh", "dryerOperat
                       "airConditionerMode", "airConditionerFanMode", "fanOscillationMode",
                       "thermostatCoolingSetpoint", "lock", "waterSensor", "relativeHumidityMeasurement", "rainSensor", "precipitationSensor",
                       "silvervalley08660.airconMode", "silvervalley08660.targetTemperature",
-                      "silvervalley08660.airflowDirection" }) do caps[id].ID = id end
+                      "silvervalley08660.airflowDirection", "dishwasherOperatingState", "ovenOperatingState",
+                      "ovenSetpoint", "temperatureMeasurement", "remoteControlStatus" }) do caps[id].ID = id end
 package.loaded["st.capabilities"] = caps
 package.loaded["st.driver"] = function(name, tmpl) DRIVER = tmpl; return { run = function() end } end
 package.loaded["log"] = { info = function(m) print("I " .. m) end, warn = function(m) print("W " .. m) end,
@@ -425,3 +426,34 @@ def test_pairing_signed_api():
     finally:
         proc.terminate()
         proc.wait()
+
+
+def test_homeconnect_appliances(bridge):
+    """Demo dishwasher and oven (Home Connect via the bridge): states, profiles and commands."""
+    lua = lua53.LuaRuntime(unpack_returned_tuples=True)
+    lua.execute(f'package.path = "{SRC}/?.lua;{HERE}/?.lua;" .. package.path')
+    lua.globals().py_http = py_http
+    lua.execute(HARNESS)
+    lua.execute(f'dofile("{SRC}/init.lua")')
+    lua.execute(f'''
+      PARENT = NEW_DEVICE({{ id = "p1", label = "Bridge", device_network_id = "stbridge-test1",
+                            preferences = {{ ipAddress = "127.0.0.1", port = "{bridge}" }} }})
+      DRIVER.lifecycle_handlers.init(DRIVER_OBJ, PARENT)
+      for i = 1, 3 do DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT) end
+      for _, d in ipairs(DEVICES) do
+        if d.parent_assigned_child_key == "demo-dishwasher" then DISH = d end
+        if d.parent_assigned_child_key == "demo-oven" then OVEN = d end
+      end
+    ''')
+    dish, oven = lua.eval("DISH"), lua.eval("OVEN")
+    assert dish is not None and oven is not None
+    dpaths = [dish.events[i].path for i in range(1, len(dish.events) + 1)]
+    opaths = [oven.events[i].path for i in range(1, len(oven.events) + 1)]
+    assert "cap.dishwasherOperatingState.machineState.run" in dpaths
+    assert "cap.ovenOperatingState.machineState.running" in opaths
+    assert "cap.ovenSetpoint.ovenSetpoint" in opaths and "cap.temperatureMeasurement.temperature" in opaths
+    lua.execute('DRIVER.capability_handlers.ovenOperatingState.stop(DRIVER_OBJ, OVEN, {})')
+    lua.execute('DRIVER.capability_handlers.switch.off(DRIVER_OBJ, DISH, {})')
+    st = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{bridge}/stbridge/devices", timeout=5).read())
+    by = {d["id"]: d["state"] for d in st["devices"]}
+    assert by["demo-oven"]["operation"] == "inactive" and by["demo-dishwasher"]["power"] == "off"

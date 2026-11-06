@@ -2,6 +2,8 @@
 -- One parent device per bridge (a pc in the LAN running stoeckie_bridge.py). The parent polls
 -- GET /stbridge/devices and creates/updates one child device per bridge device:
 --   dryer  (AEG via Electrolux API)  -> dryerOperatingState, remoteControlStatus, contactSensor (door)
+--   dishwasher / oven (Home Connect, local) -> switch, dishwasher/ovenOperatingState, contactSensor (door),
+--                                        remoteControlStatus, oven temperature + setpoint
 --   window (VELUX ACTIVE via HomeKit) -> windowShade, windowShadeLevel
 --   sensor (VELUX climate sensor)     -> temperature, humidity, CO2
 --   aircon (Fujitsu via FGLair)       -> switch, airConditionerMode (plus minHeat on units that have it, like the
@@ -66,7 +68,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-06f"
+local BUILD = "2026-11-06g"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -75,6 +77,9 @@ local DEFAULT_PORT = 8787
 local windowShade = capabilities.windowShade
 local windowShadeLevel = capabilities.windowShadeLevel
 local dryerOp = capabilities.dryerOperatingState
+local dishOp = capabilities.dishwasherOperatingState
+local ovenOp = capabilities.ovenOperatingState
+local ovenSetpoint = capabilities.ovenSetpoint
 local remoteControl = capabilities.remoteControlStatus
 local contact = capabilities.contactSensor
 local acMode = capabilities.airConditionerMode
@@ -90,8 +95,8 @@ local airflowDir = capabilities["silvervalley08660.airflowDirection"]  -- louver
 local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor = "stoeckie-climate",
                   aircon = "stoeckie-aircon-v3", car = "stoeckie-car-v2",
                   velux_lock = "stoeckie-velux-lock", rain = "stoeckie-rain-v4",
-                  rainradar = "stoeckie-rainradar" }
-local MANUFACTURER = { dryer = "AEG", aircon = "Fujitsu", car = "Skoda" }
+                  rainradar = "stoeckie-rainradar", dishwasher = "stoeckie-dishwasher", oven = "stoeckie-oven" }
+local MANUFACTURER = { dryer = "AEG", aircon = "Fujitsu", car = "Skoda", dishwasher = "Home Connect", oven = "Home Connect" }
 
 -- bridge value <-> SmartThings value
 local AC_MODE_TO_ST = { auto = "auto", cool = "cool", dry = "dry", fan = "fanOnly", heat = "heat", minheat = "minHeat" }
@@ -359,9 +364,55 @@ local function emit_rainradar(dev, s)
   end
 end
 
+-- Home Connect (Bosch / Siemens) dishwasher and oven, local via the bridge
+local function hc_common(dev, s)
+  try_emit(dev, function() return s.power == "on" and capabilities.switch.switch.on() or capabilities.switch.switch.off() end)
+  try_emit(dev, function() return remoteControl.remoteControlEnabled(s.remoteStartAllowed and "true" or "false") end)
+  if s.door then
+    try_emit(dev, function() return s.door == "open" and contact.contact.open() or contact.contact.closed() end)
+  end
+end
+
+local function hc_completion(dev, s, cap)
+  if not s.completionTime then return end
+  local new = iso_secs(s.completionTime)
+  local old = dev:get_field("ct_secs")
+  if not (new and old and math.abs(new - old) < 120) then
+    try_emit(dev, function() return cap.completionTime(s.completionTime) end)
+    dev:set_field("ct_secs", new)
+  end
+end
+
+local function emit_dishwasher(dev, s)
+  hc_common(dev, s)
+  local op = s.operation or "inactive"
+  local machine = (op == "run" or op == "delayedStart") and "run" or (op == "pause" and "pause" or "stop")
+  local job = op == "finished" and "finish" or ((machine == "run" and op ~= "delayedStart") and "wash" or "unknown")
+  try_emit(dev, function() return dishOp.machineState[machine]() end)
+  try_emit(dev, function() return dishOp.dishwasherJobState[job]() end)
+  if s.progress then try_emit(dev, function() return dishOp.progress(math.floor(s.progress)) end) end
+  hc_completion(dev, s, dishOp)
+end
+
+local function emit_oven(dev, s)
+  hc_common(dev, s)
+  local op = s.operation or "inactive"
+  local machine = (op == "run" or op == "delayedStart") and "running" or (op == "pause" and "paused" or "ready")
+  local job = op == "finished" and "finished" or (op == "delayedStart" and "scheduledStart" or
+    (machine == "running" and "cooking" or "ready"))
+  try_emit(dev, function() return ovenOp.machineState[machine]() end)
+  try_emit(dev, function() return ovenOp.ovenJobState[job]() end)
+  if s.progress then try_emit(dev, function() return ovenOp.progress(math.floor(s.progress)) end) end
+  hc_completion(dev, s, ovenOp)
+  if s.temperature then
+    try_emit(dev, function() return capabilities.temperatureMeasurement.temperature({ value = s.temperature, unit = "C" }) end)
+  end
+  if s.setpoint then try_emit(dev, function() return ovenSetpoint.ovenSetpoint(math.floor(s.setpoint)) end) end
+end
+
 local EMIT = { dryer = emit_dryer, window = emit_window, sensor = emit_sensor, aircon = emit_aircon, car = emit_car,
                velux_lock = emit_velux_lock, rain = emit_rain,
-               rainradar = emit_rainradar }
+               rainradar = emit_rainradar, dishwasher = emit_dishwasher, oven = emit_oven }
 
 -- polling -------------------------------------------------------------------------
 
@@ -554,6 +605,13 @@ local function handle_machine_state(driver, device, cmd)
   end
 end
 
+local function handle_hc_machine(driver, device, cmd)
+  local want = cmd.args.state or cmd.args.machineState
+  if want == "stop" or want == "ready" then send(driver, device, "stop")
+  elseif want == "pause" or want == "paused" then send(driver, device, "pause")
+  elseif want == "run" or want == "running" then send(driver, device, "resume") end
+end
+
 local function handle_switch_on(driver, device, cmd)
   local c = cmd and cmd.component
   send(driver, device, c == "climate" and "climate_on" or "on")
@@ -606,6 +664,12 @@ local function device_init(driver, device)
   local key = device.parent_assigned_child_key or ""
   if device:supports_capability(windowShade) then
     device:emit_event(windowShade.supportedWindowShadeCommands({ "open", "close", "pause" }, { visibility = { displayed = false } }))
+  end
+  if device:supports_capability(dishOp) then
+    device:emit_event(dishOp.supportedMachineStates({ "stop" }, { visibility = { displayed = false } }))
+  end
+  if device:supports_capability(ovenOp) then
+    device:emit_event(ovenOp.supportedMachineStates({ "ready", "paused" }, { visibility = { displayed = false } }))
   end
   if device:supports_capability(dryerOp) then
     device:emit_event(dryerOp.supportedMachineStates({ "run", "pause", "stop" }, { visibility = { displayed = false } }))
@@ -784,6 +848,13 @@ local driver = Driver("stoeckie-bridge-local", {
     },
     [windowShadeLevel.ID] = {
       [windowShadeLevel.commands.setShadeLevel.NAME] = handle_level,
+    },
+    [dishOp.ID] = {
+      [dishOp.commands.setMachineState.NAME] = handle_hc_machine,
+    },
+    [ovenOp.ID] = {
+      [ovenOp.commands.setMachineState.NAME] = handle_hc_machine,
+      [ovenOp.commands.stop.NAME] = function(driver, device) send(driver, device, "stop") end,
     },
     [dryerOp.ID] = {
       [dryerOp.commands.setMachineState.NAME] = handle_machine_state,

@@ -1,4 +1,4 @@
-ARG BASE=python:3.12-slim
+ARG BASE=python:3.13-slim
 FROM ${BASE}
 WORKDIR /app
 COPY requirements.txt .

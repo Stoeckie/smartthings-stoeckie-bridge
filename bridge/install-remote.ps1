@@ -5,7 +5,7 @@
 # What it does:
 #  - asks for the target IP and an administrator login of the target; the login can be saved here, encrypted for your
 #    Windows account (remote-cred.xml, Windows DPAPI), so later updates run without questions: update-remote.bat
-#  - installs Python 3.12 on the target when missing, copies the bridge to C:\StoeckieBridge, venv + packages
+#  - installs Python 3.13 on the target when missing (Home Connect needs 3.13 or newer), copies the bridge to C:\StoeckieBridge, venv + packages
 #  - stops the bridge here and copies config.json (keys + bridge id, so SmartThings keeps the same devices)
 #  - firewall rule 8787, scheduled task at startup as LOCAL SERVICE (no admin rights, runs without anyone logged on)
 #  - checks from here that the target answers on port 8787; then disables the bridge here (or restarts it on failure)
@@ -139,19 +139,19 @@ try {
     $py = Invoke-Command -Session $session -ArgumentList $info.Arch {
         param($arch)
         $ErrorActionPreference = "Continue"
-        $full = Join-Path $env:ProgramFiles "Python312\python.exe"
+        $full = Join-Path $env:ProgramFiles "Python313\python.exe"
         if (Test-Path $full) { return $full }
         $probe = "import sys; print(sys.version_info[1] if sys.version_info[0] == 3 else 0); print(sys.executable)"
         foreach ($c in @("py", "python")) {
             try {
                 if ($c -eq "py") { $r = & py -3 -c $probe 2>$null } else { $r = & python -c $probe 2>$null }
-                if ($LASTEXITCODE -eq 0 -and @($r).Count -ge 2 -and [int]$r[0] -ge 10) { return "$($r[1])".Trim() }
+                if ($LASTEXITCODE -eq 0 -and @($r).Count -ge 2 -and [int]$r[0] -ge 13) { return "$($r[1])".Trim() }
             } catch {}
         }
         $kind = if ($arch -eq "ARM64") { "arm64" } else { "amd64" }
-        $exe = Join-Path $env:TEMP "python-3.12.10-$kind.exe"
+        $exe = Join-Path $env:TEMP "python-3.13.17-$kind.exe"
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest "https://www.python.org/ftp/python/3.12.10/python-3.12.10-$kind.exe" -OutFile $exe -UseBasicParsing
+        Invoke-WebRequest "https://www.python.org/ftp/python/3.13.17/python-3.13.17-$kind.exe" -OutFile $exe -UseBasicParsing
         $p = Start-Process $exe -ArgumentList "/quiet InstallAllUsers=1 PrependPath=1 Include_test=0" -Wait -PassThru
         Remove-Item $exe -ErrorAction SilentlyContinue
         if ($p.ExitCode -ne 0 -or -not (Test-Path $full)) { throw "Python installatie mislukt (code $($p.ExitCode))" }
@@ -173,11 +173,32 @@ try {
     $files = @("stoeckie_bridge.py", "requirements.txt", "requirements.in", "config.example.json", "restart.ps1", "restart.bat", "setup.bat", "check.bat") |
         ForEach-Object { Join-Path $dir $_ } | Where-Object { Test-Path $_ }
     Copy-Item -Path $files -Destination $remoteDir -ToSession $session -Force
+    # Home Connect profiles (zips with the appliance keys) from the homeconnect folder here, if any
+    $hc = @(Get-ChildItem (Join-Path $dir "homeconnect") -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -in ".zip", ".json" })
+    if ($hc.Count -gt 0) {
+        Invoke-Command -Session $session -ArgumentList "$remoteDir\homeconnect" { param($p) New-Item -ItemType Directory -Force -Path $p | Out-Null }
+        Copy-Item -Path ($hc | ForEach-Object { $_.FullName }) -Destination "$remoteDir\homeconnect" -ToSession $session -Force
+        Write-Host "Home Connect profielen gekopieerd: $($hc.Count)"
+    }
     Write-Host "Packages installeren op $Target (paar minuten)..."
-    Invoke-Command -Session $session -ArgumentList $remoteDir, $py {
-        param($d, $py)
+    Invoke-Command -Session $session -ArgumentList $remoteDir, $py, $taskName {
+        param($d, $py, $task)
         $ErrorActionPreference = "Continue"
         $vpy = "$d\venv\Scripts\python.exe"
+        # a venv from an older Python (3.12) is made again with the new one; stop the bridge first (files in use)
+        if (Test-Path $vpy) {
+            $vv = & $vpy -c "import sys; print(sys.version_info[1])" 2>$null
+            if ([int]$vv -lt 13) {
+                Stop-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
+                Get-CimInstance Win32_Process -Filter "Name like 'python%'" |
+                    Where-Object { $_.CommandLine -like "*stoeckie_bridge.py*" } |
+                    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+                Start-Sleep 2
+                Remove-Item -Recurse -Force "$d\venv"
+                if (Test-Path "$d\venv") { throw "oude venv kon niet weg (bestanden in gebruik)" }
+            }
+        }
         if (-not (Test-Path $vpy)) { & $py -m venv "$d\venv" 2>&1 | Out-Null }
         if (-not (Test-Path $vpy)) { throw "venv aanmaken mislukt" }
         # exact versions with hashes: a changed or tampered package is refused

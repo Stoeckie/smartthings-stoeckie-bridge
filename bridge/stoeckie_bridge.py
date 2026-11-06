@@ -12,6 +12,9 @@ Sources
   * Rain radar (optional): rain now and the next 2 hours for an address with a radius, every 5 minutes. Buienradar in
     the Netherlands and Belgium (5 minute steps), Open-Meteo elsewhere (15 minute steps). Addresses: PDOK (NL
     postcode) or OpenStreetMap Nominatim (anywhere).
+  * Home Connect (optional, local): Bosch / Siemens / Neff dishwashers, ovens and more over their own local
+    websocket (library homeconnect-websocket, Python 3.13+). Keys and descriptions come once from the Home Connect
+    cloud with the Home Connect Profile Downloader; put its zips in the homeconnect folder next to config.json.
   * VELUX ACTIVE (optional): departure mode lock/unlock via the VELUX/Netatmo cloud. Unlock is signed with a key
     the gateway hands out locally once (button press). The windows stay local (HomeKit driver on the hub).
 
@@ -27,6 +30,7 @@ LAN API (default port 8787, no auth, LAN only)
       car:     on | off (charging) | climate_on | climate_off | limit (percent) | refresh
       velux_lock: lock | unlock | refresh | settings {poll_seconds}
       rain:    refresh (VELUX gateway rain sensor)
+      dishwasher / oven (Home Connect): on | off | stop | pause | resume (oven) | refresh
       rainradar: refresh | settings {postcode, housenumber, address, location, radius_m, threshold, provider}
                (state: raining, rainRate mm/h, minutesUntilRain, minutesOfRain, intensity, summary)
   POST /stbridge/buienradar               body {"enabled": true} (from the bridge device)
@@ -65,7 +69,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-06f"
+VERSION = "2026-11-06g"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -1655,6 +1659,207 @@ class Buienradar:
 BUIENRADAR: dict[str, Any] = {"source": None}
 
 
+# ---------------------------------------------------------------- Home Connect (Bosch / Siemens / Neff / Gaggenau), local
+
+HC_DIR = DATA / "homeconnect"
+HC_TYPES = {"Dishwasher": "dishwasher", "Oven": "oven", "Washer": "washer", "Dryer": "hcdryer",
+            "WasherDryer": "washer", "CoffeeMaker": "coffee", "Refrigerator": "fridge", "FridgeFreezer": "fridge"}
+HC_OPERATION = {"Inactive": "inactive", "Ready": "ready", "DelayedStart": "delayedStart", "Run": "run",
+                "Pause": "pause", "ActionRequired": "actionRequired", "Finished": "finished", "Error": "error",
+                "Aborting": "aborting"}
+
+
+def homeconnect_profiles(folder: Path = HC_DIR) -> list[dict[str, Any]]:
+    """Profiles from the Home Connect Profile Downloader ("Home Assistant - Home Connect Local" zips) in folder.
+    Each: {haId, type, brand, model, connectionType, key, iv, xml: (description, feature mapping)}.
+    The zips hold the appliance keys: they stay in this folder (same protection as config.json)."""
+    import zipfile
+    out = []
+    if not folder.exists():
+        return out
+    for z in sorted(folder.glob("*.zip")):
+        try:
+            with zipfile.ZipFile(z) as zf:
+                for n in zf.namelist():
+                    if not n.endswith(".json"):
+                        continue
+                    info = json.loads(zf.read(n))
+                    if not info.get("key") or not info.get("haId"):
+                        continue
+                    info["xml"] = (zf.read(info["deviceDescriptionFileName"]).decode("utf-8"),
+                                   zf.read(info["featureMappingFileName"]).decode("utf-8"))
+                    out.append(info)
+        except Exception as ex:  # noqa: BLE001
+            log.warning("[homeconnect] %s: not a usable profile (%s)", z.name, ex)
+    return out
+
+
+def hc_default_host(prof: dict[str, Any]) -> str:
+    """mDNS name of an appliance: haId as is when it already starts with the brand, else brand-type-haId."""
+    ha_id, brand = str(prof.get("haId")), str(prof.get("brand") or "")
+    if brand and ha_id.upper().startswith(brand.upper() + "-"):
+        return f"{ha_id}.local"
+    return f"{brand}-{prof.get('type', '')}-{ha_id}.local".lower()
+
+
+def homeconnect_configured(h: dict[str, Any] | None = None) -> bool:
+    return any(HC_DIR.glob("*.zip")) if HC_DIR.exists() else False
+
+
+def _hc_val(group: dict, name: str) -> Any:
+    e = group.get(name)
+    if e is None:
+        return None
+    try:
+        return e.value
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def hc_state(app, kind: str) -> dict[str, Any]:
+    """Flatten a homeconnect_websocket HomeAppliance into what the Edge driver needs."""
+    power = _hc_val(app.settings, "BSH.Common.Setting.PowerState")
+    op = _hc_val(app.status, "BSH.Common.Status.OperationState")
+    door = _hc_val(app.status, "BSH.Common.Status.DoorState")
+    active = None
+    try:
+        ap = app.active_program
+        active = ap.name if ap else None
+    except Exception:  # noqa: BLE001
+        active = None
+    running = op in ("Run", "Pause", "DelayedStart", "ActionRequired")
+    remaining = _hc_val(app.options, "BSH.Common.Option.RemainingProgramTime") if running else None
+    progress = _hc_val(app.options, "BSH.Common.Option.ProgramProgress") if running else None
+    st = {
+        "power": "on" if power == "On" else "off",
+        "operation": HC_OPERATION.get(str(op), str(op).lower() if op else "inactive"),
+        "door": str(door).lower() if door else None,                 # open closed locked
+        "program": active.split(".")[-1] if active else None,
+        "remainingTime": int(remaining) if isinstance(remaining, (int, float)) else None,   # seconds
+        "completionTime": _iso_in(float(remaining)) if isinstance(remaining, (int, float)) and running else None,
+        "progress": int(progress) if isinstance(progress, (int, float)) else None,           # percent
+        "remoteStartAllowed": bool(_hc_val(app.status, "BSH.Common.Status.RemoteControlStartAllowed")),
+        "remoteControlActive": bool(_hc_val(app.status, "BSH.Common.Status.RemoteControlActive")),
+    }
+    if kind == "oven":
+        t = _hc_val(app.status, "Cooking.Oven.Status.CurrentCavityTemperature")
+        sp = _hc_val(app.options, "Cooking.Oven.Option.SetpointTemperature")
+        st["temperature"] = float(t) if isinstance(t, (int, float)) else None
+        st["setpoint"] = float(sp) if isinstance(sp, (int, float)) and running else None
+    return st
+
+
+class HomeConnect:
+    """Home Connect appliances over their local websocket (library homeconnect-websocket, Python 3.13+).
+    Keys and descriptions come from the Home Connect Profile Downloader zips in the homeconnect folder;
+    the appliance address from config ("homeconnect": {"hosts": {haId: ip}}), homeconnect/hosts.json or the mDNS
+    name (give the appliances a fixed IP in the router)."""
+
+    POLL = 5
+
+    def __init__(self, cfg: dict[str, Any]) -> None:
+        self.cfg = cfg
+        self.h = dict(cfg.get("homeconnect") or {})
+        # appliance addresses: config "homeconnect.hosts", or hosts.json next to the profile zips
+        hosts = dict(self.h.get("hosts") or {})
+        try:
+            hosts.update(json.loads((HC_DIR / "hosts.json").read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            pass
+        self.h["hosts"] = hosts
+        self.apps: dict[str, Any] = {}
+
+    def _app_id(self) -> str:
+        cfg = load_config()
+        h = cfg.setdefault("homeconnect", {})
+        if not h.get("app_id"):
+            h["app_id"] = secrets.token_hex(8)
+            save_config(cfg)
+        return h["app_id"]
+
+    def _command(self, ha_id: str):
+        async def handler(cmd: str, value: Any) -> None:
+            app = self.apps.get(ha_id)
+            if app is None:
+                raise ValueError("appliance not connected")
+            if cmd == "refresh":
+                return
+            if cmd in ("on", "off"):
+                e = app.settings.get("BSH.Common.Setting.PowerState")
+                if e is None:
+                    raise ValueError("no power setting")
+                values = list((e.enum or {}).values())
+                target = "On" if cmd == "on" else ("Off" if "Off" in values else "Standby")
+                await e.set_value(target)
+            elif cmd in ("stop", "pause", "resume"):
+                name = {"stop": "BSH.Common.Command.AbortProgram", "pause": "BSH.Common.Command.PauseProgram",
+                        "resume": "BSH.Common.Command.ResumeProgram"}[cmd]
+                c = app.commands.get(name)
+                if c is None:
+                    raise ValueError(f"{cmd} not supported by this appliance")
+                await c.execute(1)
+            else:
+                raise ValueError(f"unsupported command {cmd}")
+            log.info("[homeconnect] %s %s", ha_id, cmd)
+        return handler
+
+    async def _run_one(self, prof: dict[str, Any], app_id: str, session) -> None:
+        from homeconnect_websocket import HomeAppliance, parse_device_description
+        ha_id = prof["haId"]
+        kind = HC_TYPES.get(prof.get("type"), "appliance")
+        dev_id = f"homeconnect-{ha_id}"
+        name = f"{prof.get('brand', '').title()} {prof.get('type', 'Appliance')}".strip()
+        host = (self.h.get("hosts") or {}).get(ha_id) or hc_default_host(prof)
+        desc = parse_device_description(*prof["xml"])
+        state = {"connected": False}
+
+        async def on_conn(new_state) -> None:
+            up = str(new_state).lower() == "connected"
+            state["connected"] = up
+            REG.set_online(dev_id, up)
+            log.info("[homeconnect] %s (%s): %s", name, host, str(new_state).split(".")[-1].lower())
+
+        app = HomeAppliance(desc, host, "Stoeckie Bridge", app_id, prof["key"], prof.get("iv") or None,
+                            session=session, logger=log, reconect=True, connection_callback=on_conn)
+        REG.upsert(dev_id, kind, name, {"model": prof.get("vib"), "brand": prof.get("brand")}, online=False,
+                   handler=self._command(ha_id))
+        while True:
+            try:
+                await app.connect()
+                break
+            except Exception as ex:  # noqa: BLE001
+                log.warning("[homeconnect] %s (%s): connect failed: %s, retry in 60 s", name, host, ex)
+                await asyncio.sleep(60)
+        self.apps[ha_id] = app
+        last = None
+        while True:
+            try:
+                st = hc_state(app, kind)
+                if st != last:
+                    REG.upsert(dev_id, kind, name, st, online=state["connected"])
+                    last = st
+                else:
+                    REG.set_online(dev_id, state["connected"])
+            except Exception as ex:  # noqa: BLE001
+                log.debug("[homeconnect] %s: state: %s", name, ex)
+            await asyncio.sleep(self.POLL)
+
+    async def run(self) -> None:
+        profiles = homeconnect_profiles()
+        if not profiles:
+            return
+        if sys.version_info < (3, 13):
+            log.warning("[homeconnect] %d profile(s) found, but local Home Connect needs Python 3.13 or newer "
+                        "(this is %d.%d): run the installer again", len(profiles), *sys.version_info[:2])
+            return
+        import aiohttp
+        app_id = self._app_id()
+        log.info("[homeconnect] %d appliance(s): %s", len(profiles),
+                 ", ".join(f"{p.get('type')} {p.get('vib')} ({p.get('connectionType')})" for p in profiles))
+        async with aiohttp.ClientSession() as session:
+            await asyncio.gather(*(self._run_one(p, app_id, session) for p in profiles))
+
+
 # ---------------------------------------------------------------- HTTPS for the setup page (self-signed)
 
 def _local_ips() -> list[str]:
@@ -1915,6 +2120,13 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             rd = REG.devices.get("buienradar")
             lines.append("Rain radar: " + (rd["state"].get("summary", "") if rd else "fetching")
                          + f" ({b.get('place') or 'no location'}, radius {b.get('radius_m', 0)} m)")
+        hcs = [d for d in REG.devices.values() if d["id"].startswith("homeconnect-")]
+        if hcs:
+            lines.append("Home Connect (local): " + ", ".join(
+                f"{d['name']} ({'connected' if d.get('online') else 'not connected'}, {d['state'].get('operation', '?')})"
+                for d in hcs))
+        elif homeconnect_configured():
+            lines.append("Home Connect: profiles found, starting (needs Python 3.13, see bridge.log).")
         v = cfg.get("velux") or {}
         if velux_configured(v):
             locks = [d for d in REG.devices.values() if d["type"] == "velux_lock"]
@@ -2291,6 +2503,25 @@ async def demo_devices() -> None:
     await demo_velux("refresh", None)
     rain = rain_summary([0.0] * 4 + [0.5, 1.2, 0.8] + [0.0] * 17)
     REG.upsert("demo-rainradar", "rainradar", "Demo rain radar", rain, True, dry)
+    dish = {"power": "on", "operation": "run", "door": "closed", "program": "Eco50", "remainingTime": 3600,
+            "completionTime": _iso_in(3600), "progress": 40, "remoteStartAllowed": False,
+            "remoteControlActive": True}
+    oven = {"power": "on", "operation": "run", "door": "closed", "program": "HotAir", "remainingTime": 1200,
+            "completionTime": _iso_in(1200), "progress": 20, "remoteStartAllowed": False,
+            "remoteControlActive": True, "temperature": 165.0, "setpoint": 180.0}
+
+    async def demo_hc(dev, st, cmd, value):
+        if cmd in ("on", "off"):
+            st["power"] = cmd
+        elif cmd == "stop":
+            st.update(operation="inactive", remainingTime=None, completionTime=None, progress=None)
+        elif cmd in ("pause", "resume"):
+            st["operation"] = "pause" if cmd == "pause" else "run"
+        REG.upsert(dev, dev.split("-")[1], "Demo " + dev.split("-")[1], st, True,
+                   lambda c, v, d=dev, s_=st: demo_hc(d, s_, c, v))
+
+    await demo_hc("demo-dishwasher", dish, "refresh", None)
+    await demo_hc("demo-oven", oven, "refresh", None)
     t0 = time.time()
     while True:
         el = int(time.time() - t0) % 180
@@ -2328,7 +2559,7 @@ async def serve(args) -> None:
         save_config(cfg)
     port = int(cfg.get("port", 8787))
     sources = {"aeg": Electrolux, "fglair": FGLair, "skoda": Skoda, "irobot": IRobotCloud, "velux": VeluxCloud,
-               "buienradar": Buienradar}
+               "buienradar": Buienradar, "homeconnect": HomeConnect}
     tasks: dict[str, asyncio.Task] = {}
 
     def start(section: str) -> None:

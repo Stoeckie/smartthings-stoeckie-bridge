@@ -170,3 +170,14 @@ Tests run without real accounts: a fake Ayla cloud (FGLair), a fake Škoda API, 
 ## License
 
 Apache 2.0, see LICENSE. Not affiliated with AB Electrolux, AEG, Fujitsu General, Ayla Networks, Škoda Auto, iRobot, VELUX, Netatmo, Buienradar, Open-Meteo, OpenStreetMap or Samsung SmartThings.
+
+### Home Connect (Bosch / Siemens / Neff), local
+
+Dishwashers and ovens (other Home Connect appliances follow) talk to the bridge over their own local connection, no cloud after setup:
+
+1. Download the **Home Connect Profile Downloader** for your system (github.com/bruestel/homeconnect-profile-downloader, Releases), sign in with your Home Connect account, choose **Home Assistant - Home Connect Local** and save the zip(s).
+2. Put the zips in a folder `homeconnect` next to `config.json` (Windows: `C:\StoeckieBridge\homeconnect`, Docker: the data volume). They contain the appliance keys: keep them private.
+3. Give the appliances a fixed IP in your router. Optional `homeconnect\hosts.json`: `{"<haId>": "192.168.1.50"}` (otherwise the mDNS name is used).
+4. Restart the bridge. Needs **Python 3.13** or newer (the Windows installer installs it; Docker image `python:3.13-slim`).
+
+SmartThings: dishwasher (on/off, running/finished, remaining time, progress, door, remote start allowed, stop) and oven (on/off, running/paused, cavity temperature, set temperature, remaining time, door, stop, pause/resume).

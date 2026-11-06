@@ -18,3 +18,4 @@ bridge/remote-target.txt
 bridge/remote-ready.txt
 bridge/*-log.txt
 remote-check.txt
+bridge/homeconnect/

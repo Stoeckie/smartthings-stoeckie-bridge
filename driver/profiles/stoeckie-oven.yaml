@@ -1,0 +1,20 @@
+name: stoeckie-oven
+components:
+  - id: main
+    capabilities:
+      - id: switch
+        version: 1
+      - id: ovenOperatingState
+        version: 1
+      - id: temperatureMeasurement
+        version: 1
+      - id: ovenSetpoint
+        version: 1
+      - id: contactSensor
+        version: 1
+      - id: remoteControlStatus
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: Oven
