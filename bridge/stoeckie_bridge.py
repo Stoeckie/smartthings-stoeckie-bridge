@@ -334,7 +334,29 @@ def aircon_state(dev) -> dict[str, Any]:
         "supportedSwings": [SWING_NAMES.get(x.name, "off") for x in safe(lambda: dev.supported_swing_modes, [])],
         "setpointRange": [lo, hi],
         "model": getattr(dev, "oem_model_number", None),
+        # Minimum Heat (frost protection, about 10 C): only when the unit has a min_heat property.
+        "minHeat": (bool(safe(lambda: dev.get_property_value(MIN_HEAT_PROP), 0))
+                    if MIN_HEAT_PROP in safe(lambda: dev.properties_full, {}) else None),
     }
+
+
+# Property name used by the FGLair cloud for Minimum Heat. Not in ayla-iot-unofficial (it only has the
+# capability bit OP_MIN_HEAT); the bridge logs every unit's property names once so this can be checked.
+MIN_HEAT_PROP = "min_heat"
+
+
+def describe_unit(dev) -> str:
+    """One log line per unit: property names and the min heat capability bit (no values)."""
+    try:
+        names = sorted(str(k) for k in dev.properties_full.keys())
+    except Exception:  # noqa: BLE001
+        names = []
+    try:
+        from ayla_iot_unofficial.fujitsu_consts import Capability
+        cap = "yes" if dev.has_capability(Capability.OP_MIN_HEAT) else "no"
+    except Exception:  # noqa: BLE001
+        cap = "?"
+    return f"min heat capability {cap}, properties: {', '.join(names)}"
 
 
 class FGLair:
@@ -346,6 +368,7 @@ class FGLair:
         self.skipped: set[str] = set()
         self.lock = asyncio.Lock()
         self.last_sense: dict[str, float] = {}  # dsn -> time of the last "refresh" write to the adapter
+        self.described: set[str] = set()         # units whose property names are logged already
 
     # The library writes "refresh" = 1 to the adapter on every update so it reads the room temperature again
     # from the indoor unit. Every minute that keeps the adapter busy (the FGLair app then shows "information
@@ -389,6 +412,9 @@ class FGLair:
         if dev.is_online():
             from ayla_iot_unofficial.fujitsu_hvac import FujitsuHVAC
             await super(FujitsuHVAC, dev).async_update()  # read only, no write to the adapter
+            if dsn not in self.described:
+                self.described.add(dsn)
+                log.info("[fglair] unit %s: %s", dsn, describe_unit(dev))
             if time.time() - self.last_sense.get(dsn, 0) >= self.REFRESH_EVERY:
                 self.last_sense[dsn] = time.time()
                 await dev.refresh_sensed_temp()
@@ -443,6 +469,10 @@ class FGLair:
                     await dev.async_set_set_temp(float(value))
                 elif cmd == "fan":
                     await dev.async_set_fan_speed(FanSpeed[str(value).upper()])
+                elif cmd == "minheat":
+                    if MIN_HEAT_PROP not in dev.properties_full:
+                        raise ValueError("this unit has no Minimum Heat")
+                    await dev.async_set_property_value(MIN_HEAT_PROP, 1 if str(value).lower() in ("on", "1", "true") else 0)
                 elif cmd == "swing":
                     # set each axis the unit has (the library also touches axes the unit lacks)
                     from ayla_iot_unofficial.fujitsu_consts import Capability

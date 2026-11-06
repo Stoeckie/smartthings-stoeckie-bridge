@@ -126,6 +126,9 @@ def test_state_and_commands(fake, monkeypatch):
             assert set(s["supportedModes"]) == {"auto", "cool", "dry", "fan", "heat"}
             assert "quiet" in s["supportedFans"] and "vertical" in s["supportedSwings"]
             assert s["setpointRange"] == [16.0, 30.0]
+            assert s["minHeat"] is None  # this fake unit has no min_heat property
+            with pytest.raises(Exception):
+                await sb.REG.handlers["fglair-AC000W000000001"]("minheat", "on")
 
             h = sb.REG.handlers["fglair-AC000W000000001"]
             await h("setpoint", 21.5)
@@ -191,3 +194,25 @@ _real_sleep = asyncio.sleep
 
 async def _fast_sleep(_s):
     await _real_sleep(0)
+
+
+def test_min_heat(fake, monkeypatch):
+    """A unit with a min_heat property reports it and can switch it."""
+    fake.props["min_heat"] = (0, "integer", False)
+    async def main():
+        runner, base = await start(fake)
+        patch_urls(monkeypatch, base)
+        monkeypatch.setattr(sb.asyncio, "sleep", _fast_sleep)
+        sb.REG.devices.clear()
+        fg = sb.FGLair({"fglair": {"username": "a@b.nl", "password": "goed", "region": "eu"}})
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            fg.api = fg._new_api(session)
+            await fg.api.async_sign_in()
+            await fg._sync()
+            assert sb.REG.devices["fglair-AC000W000000001"]["state"]["minHeat"] is False
+            assert "min_heat" in sb.describe_unit(fg.devices["AC000W000000001"])
+            await sb.REG.handlers["fglair-AC000W000000001"]("minheat", "on")
+            assert ("min_heat", 1) in fake.sets
+        await runner.cleanup()
+    asyncio.run(main())
