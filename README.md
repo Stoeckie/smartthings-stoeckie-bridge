@@ -9,6 +9,7 @@ One small bridge brings cloud-only appliances into SmartThings:
 | **Škoda** cars (official MyŠkoda public API) | battery, charging on/off and power, charging cable, climate, at home, doors | [smartthings-skoda-bridge](https://github.com/Stoeckie/smartthings-skoda-bridge) |
 | **VELUX ACTIVE** departure mode (optional) | lock and unlock (departure mode: all windows and blinds blocked); rain sensor as its own device | windows: [VELUX ACTIVE (HomeKit local)](https://github.com/Stoeckie/smartthings-velux-active-local) |
 | **Rain radar** (optional) | rain now and the next 2 hours at your address with a radius: rain or dry, mm/h, minutes until rain, how long it rains. Buienradar in NL/BE, Open-Meteo worldwide | |
+| **Home Connect** (Bosch, Siemens, Neff) dishwasher and oven, local (optional) | on/off, running, remaining time, progress, door, oven temperature and setpoint; stop, pause, resume. No cloud after setup | [below](#home-connect-bosch--siemens--neff-local) |
 | **iRobot** favorites (optional) | favorite names and rooms for the [iRobot Roomba (local)](https://github.com/Stoeckie/smartthings-irobot-roomba-local) driver | |
 
 **This repository is the only place with the code.** The brand pages above explain one brand each and point here. Use only what you need: a source you do not set up is skipped.
@@ -16,7 +17,7 @@ One small bridge brings cloud-only appliances into SmartThings:
 SmartThings Edge drivers can not reach the internet, so there are two parts:
 
 ```
-Electrolux / FGLair / Škoda / iRobot / VELUX / Buienradar / Open-Meteo <-- bridge (Windows pc or Docker, port 8787) <--LAN-- Edge driver on the hub
+Electrolux / FGLair / Škoda / iRobot / VELUX / Buienradar / Open-Meteo / Home Connect (LAN) <-- bridge (Windows pc or Docker, port 8787) <--LAN-- Edge driver on the hub
 ```
 
 * `bridge/`: small Python service for a pc that is always on: Windows (installer) or any Docker host (Linux, NAS, Raspberry Pi)
@@ -103,6 +104,19 @@ SmartThings draws no graph for battery %. The car's setting **Battery history gr
 
 The driver switches the device to the matching profile by itself.
 
+## Home Connect (Bosch / Siemens / Neff), local
+
+Dishwashers and ovens (other Home Connect appliances follow) talk to the bridge over their own local connection, no cloud after setup:
+
+1. Download the **Home Connect Profile Downloader** for your system (github.com/bruestel/homeconnect-profile-downloader, Releases), sign in with your Home Connect account, choose **Home Assistant - Home Connect Local** and save the zip(s).
+2. Put the zips in a folder `homeconnect` next to `config.json` (Windows: `C:\StoeckieBridge\homeconnect`, Docker: the data volume). They contain the appliance keys: keep them private.
+3. Give the appliances a fixed IP in your router. Optional `homeconnect\hosts.json`: `{"<haId>": "192.168.1.50"}` (otherwise the mDNS name is used).
+4. Restart the bridge. Needs **Python 3.13** or newer (the Windows installer installs it; Docker image `python:3.13-slim`).
+
+SmartThings: dishwasher (on/off, running/finished, remaining time, progress, door, remote start allowed, stop) and oven (on/off, running/paused, cavity temperature, set temperature, remaining time, door, stop, pause/resume).
+
+Uses the homeconnect-websocket library (github.com/chris-mc1/homeconnect_websocket). Program selection and remote start are not in SmartThings yet.
+
 ## VELUX ACTIVE departure mode
 
 The windows and blinds run locally on the hub with the [VELUX ACTIVE (HomeKit local)](https://github.com/Stoeckie/smartthings-velux-active-local) driver. The departure mode (the departure switch, or "away" in the VELUX app) blocks all of them and only exists in the VELUX cloud, so the bridge adds a **lock** device for it:
@@ -169,15 +183,4 @@ Tests run without real accounts: a fake Ayla cloud (FGLair), a fake Škoda API, 
 
 ## License
 
-Apache 2.0, see LICENSE. Not affiliated with AB Electrolux, AEG, Fujitsu General, Ayla Networks, Škoda Auto, iRobot, VELUX, Netatmo, Buienradar, Open-Meteo, OpenStreetMap or Samsung SmartThings.
-
-### Home Connect (Bosch / Siemens / Neff), local
-
-Dishwashers and ovens (other Home Connect appliances follow) talk to the bridge over their own local connection, no cloud after setup:
-
-1. Download the **Home Connect Profile Downloader** for your system (github.com/bruestel/homeconnect-profile-downloader, Releases), sign in with your Home Connect account, choose **Home Assistant - Home Connect Local** and save the zip(s).
-2. Put the zips in a folder `homeconnect` next to `config.json` (Windows: `C:\StoeckieBridge\homeconnect`, Docker: the data volume). They contain the appliance keys: keep them private.
-3. Give the appliances a fixed IP in your router. Optional `homeconnect\hosts.json`: `{"<haId>": "192.168.1.50"}` (otherwise the mDNS name is used).
-4. Restart the bridge. Needs **Python 3.13** or newer (the Windows installer installs it; Docker image `python:3.13-slim`).
-
-SmartThings: dishwasher (on/off, running/finished, remaining time, progress, door, remote start allowed, stop) and oven (on/off, running/paused, cavity temperature, set temperature, remaining time, door, stop, pause/resume).
+Apache 2.0, see LICENSE. Not affiliated with AB Electrolux, AEG, Fujitsu General, Ayla Networks, Škoda Auto, iRobot, VELUX, Netatmo, BSH Hausgeräte (Home Connect, Bosch, Siemens, Neff), Buienradar, Open-Meteo, OpenStreetMap or Samsung SmartThings.

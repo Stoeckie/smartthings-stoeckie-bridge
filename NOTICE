@@ -6,3 +6,7 @@ Licensed under the Apache License, Version 2.0 (see LICENSE).
 The VELUX ACTIVE departure mode code (login, scenario signing, gateway key pairing on port 25050) follows the
 protocol documented by ha-velux-active, https://github.com/Niek/ha-velux-active, Copyright (c) 2026 Niek van der
 Maas, MIT License.
+
+Home Connect appliances are reached with the homeconnect-websocket library,
+https://github.com/chris-mc1/homeconnect_websocket (used as a dependency, not copied). Appliance profiles come from
+the Home Connect Profile Downloader, https://github.com/bruestel/homeconnect-profile-downloader.
