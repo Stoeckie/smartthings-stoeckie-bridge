@@ -90,7 +90,7 @@ def test_source(monkeypatch):
         src = sb.Buienradar(sb.load_config())
         task = asyncio.create_task(src.run())
         st = await wait_for(lambda s: "postcode" in s)
-        assert st["summary"].startswith("Geen locatie")
+        assert st["summary"].startswith("No location")
         # settings from SmartThings: postcode + house number + radius in meters
         h = sb.REG.handlers["buienradar"]
         await h("settings", {"postcode": "1012JS", "housenumber": "1", "location": "", "radius_m": 5000,
@@ -102,7 +102,7 @@ def test_source(monkeypatch):
         assert sb.load_config()["buienradar"]["lat"] == 52.35  # looked up once, stored
         # unknown address
         await h("settings", {"postcode": "9999ZZ", "housenumber": "1"})
-        st = await wait_for(lambda s: "niet gevonden" in s.get("summary", ""))
+        st = await wait_for(lambda s: "not found" in s.get("summary", ""))
         task.cancel()
 
         # point only: the dry center

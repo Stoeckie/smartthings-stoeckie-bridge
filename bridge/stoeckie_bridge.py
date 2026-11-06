@@ -61,7 +61,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-02c"
+VERSION = "2026-11-06a"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -71,6 +71,44 @@ LOG_FILE = DATA / "bridge.log"
 # Extra networks allowed to open the setup page, e.g. "192.168.2.0/24" (Docker without host networking)
 SETUP_ALLOW = [ipaddress.ip_network(n.strip(), strict=False)
                for n in os.environ.get("STBRIDGE_SETUP_ALLOW", "").split(",") if n.strip()]
+
+
+def in_container() -> bool:
+    return (os.environ.get("STBRIDGE_IN_DOCKER") == "1" or os.path.exists("/.dockerenv")
+            or os.path.exists("/run/.containerenv"))
+
+
+def container_gateway(route_file: str = "/proc/net/route", sys_net: str = "/sys/class/net"):
+    """In Docker with a bridge network (port mapping, Docker Desktop), a browser on the Docker host reaches the
+    container from the network's gateway, not from 127.0.0.1. Return that gateway so the host can open the setup
+    page. Only when the default route goes over a virtual (veth) interface: with host networking the default
+    gateway is the real LAN router, which must not be allowed. LAN clients keep their own source address and still
+    need STBRIDGE_SETUP_ALLOW."""
+    try:
+        with open(route_file, encoding="ascii") as fh:
+            next(fh)
+            for line in fh:
+                f = line.split()
+                if len(f) < 3 or f[1] != "00000000":
+                    continue
+                iface, gw_hex = f[0], f[2]
+                ifindex = Path(sys_net, iface, "ifindex").read_text().strip()
+                iflink = Path(sys_net, iface, "iflink").read_text().strip()
+                if ifindex == iflink:  # a real interface: host networking
+                    return None
+                gw = ipaddress.ip_address(int(gw_hex, 16).to_bytes(4, "little"))
+                return gw if gw.is_private else None
+    except (OSError, ValueError, StopIteration):
+        return None
+    return None
+
+
+SETUP_GATEWAY = (container_gateway() if in_container() and os.environ.get("STBRIDGE_SETUP_ALLOW_GATEWAY", "1") != "0"
+                 else None)
+
+
+def setup_source_allowed(ip) -> bool:
+    return ip.is_loopback or ip == SETUP_GATEWAY or any(ip in net for net in SETUP_ALLOW)
 
 log = logging.getLogger("bridge")
 
@@ -343,7 +381,7 @@ class FGLair:
         try:
             name = dev.device_name or dev.name
         except Exception:  # noqa: BLE001
-            name = getattr(dev, "name", None) or "Airco"
+            name = getattr(dev, "name", None) or "Air conditioner"
         REG.upsert("fglair-" + dsn, "aircon", name, aircon_state(dev), dev.is_online(), self._command(dsn))
 
     async def _refresh(self, dsn: str) -> None:
@@ -759,7 +797,7 @@ VELUX_PAIR: dict[str, Any] = {"state": None, "error": None, "start": None}
 # LAN again after pairing, a replayed request is refused, and a device pretending to be the bridge cannot
 # produce a valid answer. Until a hub is paired the API stays open (old drivers keep working).
 PAIRING: dict[str, Any] = {"until": 0.0}
-PAIR_WINDOW = 300          # seconds the "Koppelen" button keeps pairing open
+PAIR_WINDOW = 300          # seconds the "Pair" button keeps pairing open
 SIG_MAX_AGE = 300          # seconds a signed request stays valid (hub and pc clocks use NTP)
 _SEEN_SIGS: dict[str, float] = {}
 
@@ -1062,7 +1100,7 @@ class VeluxCloud:
                 cfg = load_config().get("velux") or {}
                 key, key_id = cfg.get("hash_sign_key"), cfg.get("sign_key_id")
                 if not (key and key_id):
-                    raise PermissionError("unlock needs the gateway key: press 'Gateway koppelen' on the setup page")
+                    raise PermissionError("unlock needs the gateway key: press 'Pair gateway' on the setup page")
                 if cfg.get("sign_key_gateway") and cfg["sign_key_gateway"] != self.home["gateway"]:
                     raise PermissionError("key belongs to another gateway: pair again")
                 now = int(time.time())
@@ -1403,7 +1441,7 @@ class Buienradar:
         else:
             return
         if not found:
-            self.error = f"Adres niet gevonden / address not found: {what}"
+            self.error = f"Address not found: {what}"
             return
         b["lat"], b["lon"], b["place"] = found
         cfg = load_config()
@@ -1415,8 +1453,7 @@ class Buienradar:
         self.error = None
         await self._locate()
         if not buienradar_configured(self.b):
-            summary = self.error or ("Geen locatie: vul postcode en huisnummer of adres in (instellingen van dit apparaat)"
-                                     " / No location: enter your address or coordinates in the device settings")
+            summary = self.error or "No location: enter your address or coordinates in the device settings"
             REG.upsert("buienradar", "rainradar", "Buienradar", {"summary": summary, **self._settings_state()}, True,
                        self._command())
             return
@@ -1554,94 +1591,95 @@ def setup_tls(data_dir: Path):
 
 # ---------------------------------------------------------------- LAN HTTP API
 
-SETUP_HTML = """<!doctype html><html lang="nl"><head><meta charset="utf-8">
+SETUP_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Stoeckie Bridge setup</title>
 <style>body{font:15px system-ui,sans-serif;max-width:640px;margin:32px auto;padding:0 16px;color:#222}
 label{display:block;margin:14px 0 4px;font-weight:600}input,textarea,select{width:100%;box-sizing:border-box;padding:8px;
 font:13px ui-monospace,monospace}textarea{height:90px}button{margin-top:18px;padding:10px 18px;font-size:15px}
 .st{padding:10px;border-radius:6px;background:#f2f2f2;margin:12px 0}h3{margin-top:36px}</style></head><body>
 <h2>Stoeckie Bridge</h2><div class="st">{status}</div>
-<p>Alles wat je hier invult wordt alleen lokaal in config.json op deze pc opgeslagen.</p>
-<h3>SmartThings hub koppelen</h3>
-<p>Na koppelen accepteert de bridge alleen nog ondertekende verzoeken van de gekoppelde hub. Druk op Koppelen;
-de hub koppelt binnen 5 minuten vanzelf (bij de driver Stoeckie Bridge vanaf versie 2026-11-02b).</p>
+<p>Everything you enter here is stored only locally, in config.json on this computer.</p>
+<h3>Pair the SmartThings hub</h3>
+<p>After pairing, the bridge only accepts signed requests from the paired hub. Press Pair; the hub pairs by itself
+within 5 minutes (driver Stoeckie Bridge 2026-11-02b or newer).</p>
 <form method="post"><input type="hidden" name="section" value="api_pair">
-<button type="submit">Koppelen (5 minuten open)</button></form>
+<button type="submit">Pair (open for 5 minutes)</button></form>
 <form method="post"><input type="hidden" name="section" value="api_new_token">
-<button type="submit">Nieuw token (alle hubs opnieuw koppelen)</button></form>
+<button type="submit">New token (pair all hubs again)</button></form>
 <h3>AEG / Electrolux</h3>
-<p>Maak op <b>developer.electrolux.one</b> (inloggen met je AEG account) een API key aan en genereer
-een access token en refresh token.</p>
+<p>On <b>developer.electrolux.one</b> (sign in with your AEG / Electrolux account) create an API key and generate
+an access token and a refresh token.</p>
 <form method="post"><input type="hidden" name="section" value="aeg">
 <label>API key</label><input name="api_key" autocomplete="off" required>
 <label>Access token</label><textarea name="access_token" required></textarea>
 <label>Refresh token</label><textarea name="refresh_token" required></textarea>
-<button type="submit">AEG opslaan en verbinden</button></form>
-<h3>Fujitsu airco (FGLair)</h3>
-<p>E-mail en wachtwoord van de FGLair app.</p>
+<button type="submit">Save AEG and connect</button></form>
+<h3>Fujitsu air conditioners (FGLair)</h3>
+<p>Email and password of the FGLair app.</p>
 <form method="post"><input type="hidden" name="section" value="fglair">
-<label>E-mail</label><input name="username" type="email" autocomplete="off" required>
-<label>Wachtwoord</label><input name="password" type="password" autocomplete="off" required>
-<label>Regio</label><select name="region"><option value="eu">Europa</option><option value="default">Overig</option>
+<label>Email</label><input name="username" type="email" autocomplete="off" required>
+<label>Password</label><input name="password" type="password" autocomplete="off" required>
+<label>Region</label><select name="region"><option value="eu">Europe</option><option value="default">Other (Americas, Asia)</option>
 <option value="cn">China</option></select>
-<button type="submit">FGLair opslaan en verbinden</button></form>
+<button type="submit">Save FGLair and connect</button></form>
 <form method="post"><input type="hidden" name="section" value="fglair_settings">
-<label>Airco's bijwerken elke (seconden, 30 tot 600)</label>
+<label>Update the air conditioners every (seconds, 30 to 600)</label>
 <input name="poll_seconds" type="number" min="30" max="600" value="{fglair_poll}" required>
-<button type="submit">Instelling opslaan</button></form>
-<p>Ook in te stellen bij elke airco in de SmartThings app (Instellingen).</p>
+<button type="submit">Save setting</button></form>
+<p>Also available per air conditioner in the SmartThings app (Settings).</p>
 <h3>Škoda</h3>
-<p>Maak in de MyŠkoda app (8.16 of nieuwer) een API key aan: <b>Instellingen, Smart Home, API-sleutels</b>, en kies je auto.
-Het VIN (17 tekens) staat in de app bij de auto en op het kentekenbewijs.</p>
+<p>In the MyŠkoda app (8.16 or newer) create an API key: <b>Settings, Smart Home, API keys</b>, and choose your car.
+The VIN (17 characters) is shown in the app with the car and on the registration document.</p>
 <form method="post"><input type="hidden" name="section" value="skoda">
 <label>API key</label><input name="api_key" autocomplete="off" required>
 <label>VIN</label><input name="vin" maxlength="17" minlength="17" required>
-<button type="submit">Škoda opslaan en verbinden</button></form>
+<button type="submit">Save Škoda and connect</button></form>
 <form method="post"><input type="hidden" name="section" value="skoda_settings">
-<label>Auto bijwerken elke (minuten, minimaal 5; Škoda staat 20 opvragingen per uur toe)</label>
+<label>Update the car every (minutes, at least 5; Škoda allows 20 requests per hour)</label>
 <input name="poll_minutes" type="number" min="5" max="60" value="{skoda_poll}" required>
-<label>Temperatuur voor airco aan (°C)</label><input name="climate_temp" value="{skoda_temp}" required>
-<button type="submit">Instellingen opslaan</button></form>
-<p>Deze instellingen staan ook bij de auto in de SmartThings app (Instellingen).</p>
-<h3>iRobot (optioneel)</h3>
-<p>E-mail en wachtwoord van de iRobot app. De bridge leest alleen de namen en kamers van je favorieten,
-twee keer per dag, voor de Roomba driver op de hub. De robot zelf wordt lokaal bediend.</p>
+<label>Temperature for climate on (°C)</label><input name="climate_temp" value="{skoda_temp}" required>
+<button type="submit">Save settings</button></form>
+<p>These settings are also available with the car in the SmartThings app (Settings).</p>
+<h3>iRobot (optional)</h3>
+<p>Email and password of the iRobot app. The bridge only reads the names and rooms of your favorites,
+twice a day, for the Roomba driver on the hub. The robot itself is controlled locally.</p>
 <form method="post"><input type="hidden" name="section" value="irobot">
-<label>E-mail</label><input name="username" type="email" autocomplete="off" required>
-<label>Wachtwoord</label><input name="password" type="password" autocomplete="off" required>
-<label>Land (2 letters)</label><input name="country" value="NL" maxlength="2" required>
-<button type="submit">iRobot opslaan en verbinden</button></form>
-<h3>Buienradar (optioneel)</h3>
-<p>Regen nu en de komende 2 uur bij je huis, met straal. In Nederland en België via Buienradar, elders via Open-Meteo. Ook in te stellen bij het Buienradar apparaat in SmartThings
-(aanzetten: instelling Buienradar bij het Stoeckie Bridge apparaat). Laatste wijziging telt.</p>
+<label>Email</label><input name="username" type="email" autocomplete="off" required>
+<label>Password</label><input name="password" type="password" autocomplete="off" required>
+<label>Country (2 letters)</label><input name="country" value="NL" maxlength="2" required>
+<button type="submit">Save iRobot and connect</button></form>
+<h3>Rain radar (optional)</h3>
+<p>Rain now and in the next 2 hours around your home, with a radius. Buienradar in the Netherlands and Belgium,
+Open-Meteo everywhere else. Also available on the Buienradar device in SmartThings
+(switch it on with the setting Buienradar on the Stoeckie Bridge device). The last change wins.</p>
 <form method="post"><input type="hidden" name="section" value="buienradar">
-<label>Postcode</label><input name="postcode" value="{rain_pc}" placeholder="1234AB">
-<label>Huisnummer</label><input name="housenumber" value="{rain_nr}" placeholder="12">
-<label>Of adres (elk land: straat huisnummer, plaats, land)</label><input name="address" value="{rain_addr}" placeholder="Rue de la Loi 16, Brussel, België">
-<label>Of breedtegraad, lengtegraad</label><input name="location" value="{rain_loc}" placeholder="52.35, 5.62">
-<label>Bron</label><select name="provider"><option value="auto"{rain_p_auto}>Automatisch (Buienradar in NL/BE, anders Open-Meteo)</option>
-<option value="buienradar"{rain_p_buienradar}>Buienradar (NL/BE, radar, 5 minuten)</option>
-<option value="openmeteo"{rain_p_openmeteo}>Open-Meteo (wereldwijd, 15 minuten)</option></select>
-<label>Straal in meters (0 = alleen dit adres, max 25000)</label><input name="radius_m" type="number" min="0" max="25000" value="{rain_radius}">
-<label>Regen vanaf (mm/u)</label><input name="threshold" value="{rain_thr}">
-<button type="submit">Buienradar opslaan</button></form>
-<h3>VELUX ACTIVE vertrekstand (optioneel)</h3>
-<p>Voor vergrendelen en ontgrendelen (vertrekstand: alle ramen en zonwering geblokkeerd) vanuit SmartThings.
-De ramen zelf blijven lokaal via HomeKit lopen. E-mail en wachtwoord van de VELUX ACTIVE app.</p>
+<label>Postcode (NL)</label><input name="postcode" value="{rain_pc}" placeholder="1234AB">
+<label>House number (NL)</label><input name="housenumber" value="{rain_nr}" placeholder="12">
+<label>Or address (any country: street number, city, country)</label><input name="address" value="{rain_addr}" placeholder="Rue de la Loi 16, Brussels, Belgium">
+<label>Or latitude, longitude</label><input name="location" value="{rain_loc}" placeholder="52.37, 4.89">
+<label>Source</label><select name="provider"><option value="auto"{rain_p_auto}>Automatic (Buienradar in NL/BE, otherwise Open-Meteo)</option>
+<option value="buienradar"{rain_p_buienradar}>Buienradar (NL/BE, radar, 5 minutes)</option>
+<option value="openmeteo"{rain_p_openmeteo}>Open-Meteo (worldwide, 15 minutes)</option></select>
+<label>Radius in meters (0 = only this address, max 25000)</label><input name="radius_m" type="number" min="0" max="25000" value="{rain_radius}">
+<label>Rain from (mm/h)</label><input name="threshold" value="{rain_thr}">
+<button type="submit">Save rain radar</button></form>
+<h3>VELUX ACTIVE departure mode (optional)</h3>
+<p>To lock and unlock (departure mode: all windows and blinds blocked) from SmartThings.
+The windows themselves keep running locally over HomeKit. Email and password of the VELUX ACTIVE app.</p>
 <form method="post"><input type="hidden" name="section" value="velux">
-<label>E-mail</label><input name="username" type="email" autocomplete="off" required>
-<label>Wachtwoord</label><input name="password" type="password" autocomplete="off" required>
-<button type="submit">VELUX opslaan en verbinden</button></form>
-<p>Ontgrendelen moet ondertekend worden met een sleutel van de gateway. Eenmalig: vul het IP van de VELUX gateway in,
-klik op koppelen, wacht tot het lampje op de gateway knippert en druk dan binnen 3 minuten op de knop van de gateway.</p>
+<label>Email</label><input name="username" type="email" autocomplete="off" required>
+<label>Password</label><input name="password" type="password" autocomplete="off" required>
+<button type="submit">Save VELUX and connect</button></form>
+<p>Unlocking must be signed with a key from the gateway. Once: enter the IP of the VELUX gateway,
+click Pair gateway, wait until the light on the gateway blinks and then press the button on the gateway within 3 minutes.</p>
 <form method="post"><input type="hidden" name="section" value="velux_pair">
-<label>IP van de VELUX gateway</label><input name="gateway_ip" value="{velux_ip}" required>
-<button type="submit">Gateway koppelen</button></form>
+<label>IP of the VELUX gateway</label><input name="gateway_ip" value="{velux_ip}" required>
+<button type="submit">Pair gateway</button></form>
 <form method="post"><input type="hidden" name="section" value="velux_settings">
-<label>Vertrekstand en regensensor bijwerken elke (seconden, 30 tot 600)</label>
+<label>Update departure mode and rain sensor every (seconds, 30 to 600)</label>
 <input name="poll_seconds" type="number" min="30" max="600" value="{velux_poll}" required>
-<button type="submit">Instelling opslaan</button></form>
-<p>Ook in te stellen bij VELUX vertrekstand in de SmartThings app (Instellingen).</p></body></html>"""
+<button type="submit">Save setting</button></form>
+<p>Also available on VELUX departure mode in the SmartThings app (Settings).</p></body></html>"""
 
 
 def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> web.Application:
@@ -1654,7 +1692,7 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             ip = ipaddress.ip_address(req.remote or "")
         except ValueError:
             return False
-        if not (ip.is_loopback or any(ip in net for net in SETUP_ALLOW)):
+        if not setup_source_allowed(ip):
             return False
         host = (req.host or "").rsplit(":", 1)[0].strip("[]").lower()
         if host != "localhost":
@@ -1731,33 +1769,33 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
         lines = []
         devs = [d for d in REG.devices.values() if d["type"] == "dryer"]
         if not aeg_configured(e):
-            lines.append("AEG: nog niet ingesteld.")
+            lines.append("AEG: not set up yet.")
         elif devs:
-            lines.append("AEG verbonden: " + ", ".join(f"{d['name']} ({d['state'].get('applianceState')})" for d in devs))
+            lines.append("AEG connected: " + ", ".join(f"{d['name']} ({d['state'].get('applianceState')})" for d in devs))
         else:
-            lines.append("AEG ingesteld, nog geen droger gevonden (zie bridge.log).")
+            lines.append("AEG set up, no dryer found yet (see bridge.log).")
         acs = [d for d in REG.devices.values() if d["type"] == "aircon"]
         if not fglair_configured(f):
-            lines.append("FGLair: nog niet ingesteld.")
+            lines.append("FGLair: not set up yet.")
         elif acs:
-            lines.append("FGLair verbonden: " + ", ".join(
+            lines.append("FGLair connected: " + ", ".join(
                 f"{d['name']} ({d['state'].get('mode')}, {d['state'].get('setpoint')} C)" for d in acs))
         else:
-            lines.append("FGLair ingesteld, nog geen airco gevonden (zie bridge.log).")
+            lines.append("FGLair set up, no air conditioner found yet (see bridge.log).")
         k = cfg.get("skoda") or {}
         cars = [d for d in REG.devices.values() if d["type"] == "car"]
         if skoda_configured(k):
             if cars:
-                lines.append("Škoda verbonden: " + ", ".join(
-                    f"{d['name']} ({d['state'].get('battery')}%, sleutel geldig tot {d['state'].get('keyExpires') or '?'})"
+                lines.append("Škoda connected: " + ", ".join(
+                    f"{d['name']} ({d['state'].get('battery')}%, key valid until {d['state'].get('keyExpires') or '?'})"
                     for d in cars))
             else:
-                lines.append("Škoda ingesteld, nog geen gegevens (zie bridge.log).")
+                lines.append("Škoda set up, no data yet (see bridge.log).")
         b = cfg.get("buienradar") or {}
         if buienradar_enabled(b):
             rd = REG.devices.get("buienradar")
-            lines.append("Buienradar: " + (rd["state"].get("summary", "") if rd else "bezig met ophalen")
-                         + f" ({b.get('place') or 'geen locatie'}, straal {b.get('radius_m', 0)} m)")
+            lines.append("Rain radar: " + (rd["state"].get("summary", "") if rd else "fetching")
+                         + f" ({b.get('place') or 'no location'}, radius {b.get('radius_m', 0)} m)")
         v = cfg.get("velux") or {}
         if velux_configured(v):
             locks = [d for d in REG.devices.values() if d["type"] == "velux_lock"]
@@ -1765,49 +1803,51 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
                 lines.append("VELUX: " + str(VELUX["error"]))
             elif locks:
                 st = locks[0]["state"]
-                lines.append("VELUX verbonden: " + ("vergrendeld (vertrekstand)" if st.get("locked") else "ontgrendeld")
-                             + ("" if st.get("canUnlock") else ", ontgrendelen kan pas na Gateway koppelen"))
+                lines.append("VELUX connected: " + ("locked (departure mode)" if st.get("locked") else "unlocked")
+                             + ("" if st.get("canUnlock") else ", unlocking needs Pair gateway first"))
             else:
-                lines.append("VELUX ingesteld, bezig met verbinden.")
+                lines.append("VELUX set up, connecting.")
             p = VELUX_PAIR.get("state")
             if p == "press":
-                lines.append("VELUX gateway: druk NU op de knop van de gateway (lampje knippert). Ververs deze pagina.")
+                lines.append("VELUX gateway: press the button on the gateway NOW (light blinks). Then reload this page.")
             elif p == "waiting":
-                lines.append("VELUX gateway: koppelen wordt gestart...")
+                lines.append("VELUX gateway: starting to pair...")
             elif p == "done":
-                lines.append("VELUX gateway gekoppeld: ontgrendelen werkt.")
+                lines.append("VELUX gateway paired: unlocking works.")
             elif p == "failed":
-                lines.append("VELUX koppelen mislukt: " + str(VELUX_PAIR.get("error")))
+                lines.append("VELUX pairing failed: " + str(VELUX_PAIR.get("error")))
         r = cfg.get("irobot") or {}
         if irobot_configured(r):
             if IROBOT.get("error"):
                 lines.append("iRobot: " + str(IROBOT["error"]))
             elif IROBOT.get("updated"):
-                lines.append("iRobot verbonden: " + ", ".join(
-                    f"{v.get('name') or k}: {len(v['favorites'])} favoriet(en)" for k, v in IROBOT["robots"].items()))
+                lines.append("iRobot connected: " + ", ".join(
+                    f"{v.get('name') or k}: {len(v['favorites'])} favorite(s)" for k, v in IROBOT["robots"].items()))
             else:
-                lines.append("iRobot ingesteld, bezig met ophalen.")
+                lines.append("iRobot set up, fetching.")
         if PAIRING["until"] > time.time():
-            lines.append(f"SmartThings koppelen staat open (nog {int(PAIRING['until'] - time.time())} s): "
-                         "de hub koppelt bij zijn volgende poll.")
+            lines.append(f"SmartThings pairing is open ({int(PAIRING['until'] - time.time())} s left): "
+                         "the hub pairs at its next poll.")
         elif api_paired(cfg):
-            lines.append("SmartThings hub gekoppeld: de LAN API vraagt een ondertekend verzoek.")
+            lines.append("SmartThings hub paired: the LAN API only accepts signed requests.")
         else:
-            lines.append("LET OP: nog geen SmartThings hub gekoppeld, de LAN API is open voor het hele LAN. "
-                         "Druk hieronder op Koppelen.")
+            lines.append("NOTE: no SmartThings hub paired yet, the LAN API is open to the whole LAN. "
+                         "Press Pair below.")
         return "<br>".join(html.escape(x) for x in lines)
 
     def plain_from_lan(req) -> bool:
-        """Setup page over plain http from another computer: credentials would cross the LAN unencrypted."""
+        """Setup page over plain http from another computer: credentials would cross the LAN unencrypted.
+        The Docker gateway is the Docker host itself (the traffic never leaves that machine)."""
         try:
-            loop = ipaddress.ip_address(req.remote or "").is_loopback
+            ip = ipaddress.ip_address(req.remote or "")
+            loop = ip.is_loopback or (SETUP_GATEWAY is not None and ip == SETUP_GATEWAY)
         except ValueError:
             loop = False
         return https_port is not None and not req.secure and not loop
 
     async def setup_get(req):
         if not local_only(req):
-            return web.Response(status=403, text="setup alleen op deze pc (localhost)")
+            return web.Response(status=403, text="setup only from this computer (localhost) or an address in STBRIDGE_SETUP_ALLOW")
         if plain_from_lan(req):
             host = (req.host or "").rsplit(":", 1)[0]
             raise web.HTTPFound(f"https://{host}:{https_port}/setup")
@@ -1832,9 +1872,9 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
 
     async def setup_post(req):
         if not local_only(req):
-            return web.Response(status=403, text="setup alleen op deze pc (localhost)")
+            return web.Response(status=403, text="setup only from this computer (localhost) or an address in STBRIDGE_SETUP_ALLOW")
         if plain_from_lan(req):
-            return web.Response(status=403, text="gebruik https voor de setup pagina")
+            return web.Response(status=403, text="use https for the setup page")
         form = await req.post()
         cfg = load_config()
         section = str(form.get("section", "aeg"))
@@ -1870,7 +1910,7 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
                                               "provider")}
             new = buienradar_settings(v, b)
             if not (new.get("location") or (new.get("postcode") and new.get("housenumber")) or new.get("address")):
-                return web.Response(status=400, text="vul postcode en huisnummer, een adres of breedtegraad, lengtegraad in")
+                return web.Response(status=400, text="enter a postcode and house number, an address, or latitude, longitude")
             b.update(new)
             b["enabled"] = True
             b.pop("radius_km", None)
@@ -1904,10 +1944,10 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             try:
                 ipaddress.ip_address(ip)
             except ValueError:
-                return web.Response(status=400, text="geen geldig IP adres")
+                return web.Response(status=400, text="not a valid IP address")
             src = VELUX.get("source")
             if src is None or src.session is None:
-                return web.Response(status=409, text="Stel eerst de VELUX login in (en wacht tot hij verbonden is).")
+                return web.Response(status=409, text="Set up the VELUX login first (and wait until it is connected).")
             if VELUX_PAIR.get("state") not in ("waiting", "press"):
                 asyncio.get_running_loop().create_task(src.pair(ip))
             await asyncio.sleep(3)
@@ -1935,9 +1975,9 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
                                   "name": socket.gethostname(), "paired": api_paired()})
 
     async def pair(req):
-        """Hand the token to a hub, only while "Koppelen" on the setup page is open (5 minutes, one hub)."""
+        """Hand the token to a hub, only while "Pair" on the setup page is open (5 minutes, one hub)."""
         if time.time() > PAIRING["until"]:
-            return web.json_response({"error": "pairing closed: press Koppelen on the bridge setup page"},
+            return web.json_response({"error": "pairing closed: press Pair on the bridge setup page"},
                                      status=403)
         cfg = load_config()
         tok = api_token(cfg)
@@ -2057,7 +2097,7 @@ async def demo_devices() -> None:
             ac["setpoint"] = float(value)
         elif cmd in ("fan", "swing"):
             ac[cmd] = str(value)
-        REG.upsert("demo-aircon", "aircon", "Demo airco", ac, True, aircon)
+        REG.upsert("demo-aircon", "aircon", "Demo air conditioner", ac, True, aircon)
 
     await win("refresh", None)
     REG.handlers["demo-window"] = win
@@ -2096,7 +2136,7 @@ async def demo_devices() -> None:
                     "cyclePhase": "DRY" if el < 90 else ("COOL" if el < 120 else "UNAVAILABLE"),
                     "timeToEnd": max(0, 120 - el), "userSelections": {"programUID": "COTTON_PR_COTTONSECO"},
                     "doorState": "CLOSED", "remoteControl": "ENABLED"}
-        REG.upsert("demo-dryer", "dryer", "Demo droger", dryer_state(reported, "connected"), True, dry)
+        REG.upsert("demo-dryer", "dryer", "Demo dryer", dryer_state(reported, "connected"), True, dry)
         await asyncio.sleep(5)
 
 
@@ -2146,6 +2186,8 @@ async def serve(args) -> None:
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", port).start()
     log.info("Stoeckie Bridge %s listening on port %d (id %s)", VERSION, port, bridge_id)
+    if SETUP_GATEWAY is not None:
+        log.info("[setup] running in a container: setup page also allowed from the Docker host (%s)", SETUP_GATEWAY)
     if tls:
         await web.TCPSite(runner, "0.0.0.0", https_port, ssl_context=tls).start()
         log.info("[https] setup page on https://<this pc>:%d/setup, certificate SHA-256 %s", https_port, fp)
@@ -2177,7 +2219,7 @@ async def check_fglair() -> None:
     """Quick test of the FGLair login in config.json."""
     cfg = load_config()
     if not fglair_configured(cfg.get("fglair") or {}):
-        print("FGLair: nog niet ingesteld.")
+        print("FGLair: not set up yet.")
         return
     import aiohttp
     fg = FGLair(cfg)
@@ -2185,12 +2227,12 @@ async def check_fglair() -> None:
         fg.api = fg._new_api(session)
         await fg.api.async_sign_in()
         await fg._sync()
-    print(f"FGLair OK, {len(fg.devices)} airco('s):")
+    print(f"FGLair OK, {len(fg.devices)} air conditioner(s):")
     for d in REG.devices.values():
         if d["type"] == "aircon":
             s = d["state"]
-            print(f"  {d['name']} model={s.get('model')} online={d['online']} stand={s.get('mode')} "
-                  f"setpoint={s.get('setpoint')} binnen={s.get('temperature')} buiten={s.get('outdoorTemperature')} "
+            print(f"  {d['name']} model={s.get('model')} online={d['online']} mode={s.get('mode')} "
+                  f"setpoint={s.get('setpoint')} indoor={s.get('temperature')} outdoor={s.get('outdoorTemperature')} "
                   f"fan={s.get('fan')} modes={s.get('supportedModes')}")
 
 
@@ -2199,14 +2241,14 @@ async def check_all() -> None:
         try:
             await fn()
         except Exception as ex:  # noqa: BLE001
-            print(f"{name} FOUT: {ex}")
+            print(f"{name} ERROR: {ex}")
 
 
 async def check_aeg() -> None:
     """Quick test of the Electrolux credentials in config.json."""
     e = (load_config().get("electrolux") or {})
     if not aeg_configured(e):
-        print("AEG: nog niet ingesteld.")
+        print("AEG: not set up yet.")
         return
     from electrolux_group_developer_sdk.auth.token_manager import TokenManager
     from electrolux_group_developer_sdk.client.appliance_client import ApplianceClient
@@ -2215,12 +2257,12 @@ async def check_aeg() -> None:
     tm = TokenManager(e["access_token"], e["refresh_token"], e["api_key"], on_token_update=holder._on_tokens)
     client = ApplianceClient(tm, external_user_agent=f"StoeckieBridge/{VERSION}")
     apps = await client.get_appliances()
-    print(f"AEG OK, {len(apps)} apparaat/apparaten:")
+    print(f"AEG OK, {len(apps)} appliance(s):")
     for a in apps:
         st = await client.get_appliance_state(a.applianceId)
         rep = (st.properties or {}).get("reported", {}) or {}
-        print(f"  {a.applianceName} type={a.applianceType} verbinding={st.connectionState} "
-              f"status={rep.get('applianceState')} fase={rep.get('cyclePhase')} resttijd={rep.get('timeToEnd')}")
+        print(f"  {a.applianceName} type={a.applianceType} connection={st.connectionState} "
+              f"status={rep.get('applianceState')} phase={rep.get('cyclePhase')} timeToEnd={rep.get('timeToEnd')}")
 
 
 def setup_logging(verbose: bool) -> None:

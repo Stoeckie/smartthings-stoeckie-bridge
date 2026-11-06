@@ -65,7 +65,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-02b"
+local BUILD = "2026-11-06a"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -380,7 +380,7 @@ end
 
 local rescan -- forward declaration
 
--- pairing: the bridge hands out its token only while "Koppelen" is open on its setup page. A hub that already
+-- pairing: the bridge hands out its token only while "Pair" is open on its setup page. A hub that already
 -- has a token only accepts a new one with a proof made with the old token (or after "Forget pairing").
 local function try_pair(parent, ip, port, err)
   local st = state[parent.id]
@@ -398,9 +398,9 @@ local function try_pair(parent, ip, port, err)
       st.pair_hint = os.time()
       if why:find("not signed") then
         log.warn("[stbridge] " .. parent.label .. ": the bridge at " .. ip .. " does not sign its answers. After a "
-          .. "bridge reset: switch on Forget pairing in this device's settings and press Koppelen on the bridge setup page")
+          .. "bridge reset: switch on Forget pairing in this device's settings and press Pair on the bridge setup page")
       else
-        log.warn("[stbridge] " .. parent.label .. ": the bridge asks for pairing: press Koppelen on its setup page "
+        log.warn("[stbridge] " .. parent.label .. ": the bridge asks for pairing: press Pair on its setup page "
           .. "(https://" .. ip .. ":8443/setup)")
       end
     end
@@ -597,7 +597,7 @@ local function info_changed(driver, device, event, args)
       device:set_field("api_token", nil, { persist = true })
       local ip, port = bridge_addr(device)
       api.set_token(ip, port, nil)
-      log.info("[stbridge] " .. device.label .. ": pairing forgotten; press Koppelen on the bridge setup page")
+      log.info("[stbridge] " .. device.label .. ": pairing forgotten; press Pair on the bridge setup page")
     end
     if p.rainRadar ~= nil and p.rainRadar ~= old.rainRadar then
       local ip, port = bridge_addr(device)

@@ -1,20 +1,21 @@
 # Stoeckie Bridge (AEG / Electrolux, Fujitsu FGLair, Škoda, VELUX, Buienradar, iRobot favorites) in Docker.
 # Host networking: the hub reaches the bridge on the host IP, port 8787, and the setup page works on
-# http://localhost:8787/setup on the host (https on port 8443, self-signed). Without host networking (Docker Desktop, some NAS), use the
-# ports mapping and STBRIDGE_SETUP_ALLOW below instead.
+# http://localhost:8787/setup in a browser on the Docker host (https on port 8443, self-signed).
+# Without host networking (Docker Desktop, many NAS): comment out network_mode and use the ports line; the
+# setup page then still works from a browser on the Docker host (the bridge allows the Docker gateway).
 services:
   stoeckie-bridge:
     build: .
     container_name: stoeckie-bridge
     restart: unless-stopped
     network_mode: host
-    # ports: ["8787:8787", "8443:8443"]
+    # ports: ["8787:8787", "8443:8443"]   # instead of network_mode: host
     volumes:
       - ./data:/data
     environment:
       TZ: Europe/Amsterdam
-      # Allow the setup page from your LAN (needed without host networking), e.g.:
-      # STBRIDGE_SETUP_ALLOW: "192.168.2.0/24"
+      # Allow the setup page from another computer on your LAN (https://<host ip>:8443/setup), e.g.:
+      # STBRIDGE_SETUP_ALLOW: "192.168.1.20/32"
       # Optional instead of the setup page, only read on the first start:
       # ELECTROLUX_API_KEY: ""
       # ELECTROLUX_ACCESS_TOKEN: ""

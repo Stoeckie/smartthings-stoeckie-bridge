@@ -49,10 +49,11 @@ cd bridge
 docker compose up -d --build
 ```
 
-* Host networking, so the hub finds the bridge on the host IP, port 8787. Data (config.json, log) lives in `bridge/data`.
-* Setup page: http://localhost:8787/setup on the Docker host. From another computer: set `STBRIDGE_SETUP_ALLOW: "192.168.x.0/24"` in `docker-compose.yml` and open https://<host>:8443/setup.
+* Host networking (Linux), so the hub finds the bridge on the host IP, port 8787. Data (config.json, log) lives in `bridge/data`.
+* **Setup page:** open http://localhost:8787/setup in a browser **on the Docker host** (https://localhost:8443/setup also works; the certificate is self-signed). No need for a text browser inside the container.
+* **From another computer:** add its address to `STBRIDGE_SETUP_ALLOW` in `docker-compose.yml`, e.g. `STBRIDGE_SETUP_ALLOW: "192.168.1.20/32"`, run `docker compose up -d` and open https://<docker host ip>:8443/setup (https only, credentials never cross the LAN in plain text).
+* **Without host networking** (Docker Desktop on Windows/Mac, many NAS): use `ports: ["8787:8787", "8443:8443"]` instead of `network_mode: host`. A browser on the Docker host then reaches the container from the Docker network gateway; the bridge (2026-11-06a or newer) recognizes that inside a container and allows it, so http://localhost:8787/setup on the host just works. Other computers still need `STBRIDGE_SETUP_ALLOW`. Switch this off with `STBRIDGE_SETUP_ALLOW_GATEWAY: "0"`. The hub must reach port 8787 on the host IP; set that IP in the bridge device settings if the automatic search does not find it.
 * Credentials can also be passed once as environment variables (`ELECTROLUX_API_KEY`, `ELECTROLUX_ACCESS_TOKEN`, `ELECTROLUX_REFRESH_TOKEN`, `FGLAIR_USERNAME`, `FGLAIR_PASSWORD`, `FGLAIR_REGION`); after the first start `data/config.json` wins.
-* Without host networking (Docker Desktop on Windows/Mac): use `ports: ["8787:8787"]` instead of `network_mode: host`, and set `STBRIDGE_SETUP_ALLOW`.
 
 ## 2. Edge driver on the hub
 
@@ -107,7 +108,7 @@ The driver switches the device to the matching profile by itself.
 The windows and blinds run locally on the hub with the [VELUX ACTIVE (HomeKit local)](https://github.com/Stoeckie/smartthings-velux-active-local) driver. The departure mode (the departure switch, or "away" in the VELUX app) blocks all of them and only exists in the VELUX cloud, so the bridge adds a **lock** device for it:
 
 1. Setup page, section VELUX: e-mail and password of the VELUX ACTIVE app. Locking works right away.
-2. Unlocking must be signed with a key from the gateway. Once: fill in the gateway IP, click **Gateway koppelen**, wait until the gateway light flashes and press the gateway button within 3 minutes. The key stays in `config.json`.
+2. Unlocking must be signed with a key from the gateway. Once: fill in the gateway IP, click **Pair gateway**, wait until the gateway light flashes and press the gateway button within 3 minutes. The key stays in `config.json`.
 
 The gateway's rain sensor becomes its own device, **VELUX regensensor** (rain sensor: detected = raining).
 
@@ -126,7 +127,7 @@ Every drop is remembered. When the connection is back, the device shows **Last d
 ## Security and privacy
 
 * Credentials only live in `config.json` on the bridge pc (in `.gitignore`), never in the code or the driver.
-* The setup page only answers on the pc itself (or `STBRIDGE_SETUP_ALLOW`), only when opened by IP or `localhost`, and refuses forms posted from other websites.
+* The setup page only answers on the pc itself (or `STBRIDGE_SETUP_ALLOW`, or the Docker host when the bridge runs in a container with port mapping), only when opened by IP or `localhost`, and refuses forms posted from other websites.
 * From another computer the setup page only works over **https** (port 8443; plain http redirects there and refuses forms). The certificate is self-signed and made once on the bridge pc (`setup-cert.pem`, `setup-key.pem`); the browser warns the first time, the log shows its SHA-256 fingerprint to compare. `install-remote.bat` opens port 8443 only for the pc that may use the setup page.
 * `install-remote.bat` limits the bridge folder on the target (keys, tokens, certificate) to SYSTEM, administrators and LOCAL SERVICE. The bridge itself runs as **LOCAL SERVICE**, without admin rights: a flaw in the bridge or a package does not hand over the pc. PowerShell remoting on the target only accepts the pc that manages it.
 * Python packages are pinned to exact versions with hashes (`requirements.txt`, made from `requirements.in` with `uv pip compile --universal --generate-hashes`); a changed package is refused.
@@ -136,11 +137,11 @@ Every drop is remembered. When the connection is back, the device shows **Last d
 
 The LAN API only answers private and local addresses, only when addressed by IP (no DNS rebinding), never a request from a web page (`Origin` header) and only JSON bodies (no cross-site form or text/plain posts).
 
-**Pairing** (bridge and driver from 2026-11-02b): press **Koppelen** on the setup page; the bridge then hands its token to the first hub that asks within 5 minutes, the hub stores it and pairing closes. From then on:
+**Pairing** (bridge and driver from 2026-11-02b): press **Pair** on the setup page; the bridge then hands its token to the first hub that asks within 5 minutes, the hub stores it and pairing closes. From then on:
 
 * every request from the hub is signed with HMAC-SHA512 over method, path, time and body (`X-Stbridge-Time`, `X-Stbridge-Sig`); unsigned, changed, old (> 5 min) or replayed requests are refused;
 * every answer is signed back, so a device that takes over the bridge's address or pretends to be the bridge cannot feed the hub false states; when the bridge moves, the driver only follows a bridge that proves it has the token;
-* the token itself never crosses the LAN again. **Nieuw token** on the setup page makes a new one; a hub only accepts it with a proof made with the old token. After a bridge reinstall without the old config, switch on **Forget pairing** on the bridge device in SmartThings and press Koppelen.
+* the token itself never crosses the LAN again. **New token** on the setup page makes a new one; a hub only accepts it with a proof made with the old token. After a bridge reinstall without the old config, switch on **Forget pairing** on the bridge device in SmartThings and press Pair.
 
 Not paired yet: the API stays open as before, the setup page warns about it.
 

@@ -80,7 +80,7 @@ function M.command(ip, port, dev_id, cmd, value)
   return request("POST", ip, port, path, { cmd = cmd, value = value }, 15)
 end
 
---- Ask the bridge for its token; only works while "Koppelen" is open on the bridge setup page.
+--- Ask the bridge for its token; only works while "Pair" is open on the bridge setup page.
 function M.pair(ip, port)
   return request("POST", ip, port, "/stbridge/pair", { hub = true }, 5, true)
 end
