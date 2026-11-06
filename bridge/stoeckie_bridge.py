@@ -69,7 +69,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-06q"
+VERSION = "2026-11-06s"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -2261,7 +2261,7 @@ class Samsung:
             apps += json.loads((SS_DIR / "appliances.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             pass
-        self.appliances = [a for a in apps if isinstance(a, dict) and a.get("host")]
+        self.appliances = [a for a in apps if isinstance(a, dict) and a.get("host") and a.get("type", "washer") != "tv"]
         self.sessions: dict[str, Any] = {}
         self.locks: dict[str, asyncio.Lock] = {}
         self.programs: dict[str, dict[str, str]] = {}   # host -> {capability key: course code}
@@ -2495,6 +2495,242 @@ class Samsung:
         log.info("[samsung] %d appliance(s): %s", len(self.appliances),
                  ", ".join(f"{a.get('type', 'washer')} {a['host']}" for a in self.appliances))
         await asyncio.gather(*(self._run_one(a) for a in self.appliances))
+
+
+# ---------------------------------------------------------------- Samsung TV (Tizen, 2016 and later), local
+
+TV_INPUTS = {"HDMI1": "KEY_HDMI1", "HDMI2": "KEY_HDMI2", "HDMI3": "KEY_HDMI3", "HDMI4": "KEY_HDMI4",
+             "digitalTv": "KEY_DTV"}
+TV_RC = "/upnp/control/RenderingControl1"
+
+
+def tv_soap(action: str, args: str = "") -> tuple[dict[str, str], str]:
+    """Headers and body of a UPnP RenderingControl call (volume and mute; the TV's own DMR service, port 9197)."""
+    body = ('<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
+            's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>'
+            f'<u:{action} xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1"><InstanceID>0</InstanceID>'
+            f'<Channel>Master</Channel>{args}</u:{action}></s:Body></s:Envelope>')
+    headers = {"Content-Type": 'text/xml; charset="utf-8"',
+               "SOAPACTION": f'"urn:schemas-upnp-org:service:RenderingControl:1#{action}"'}
+    return headers, body
+
+
+def tv_xml_value(xml: str, tag: str) -> str | None:
+    i = xml.find(f"<{tag}>")
+    j = xml.find(f"</{tag}>", i)
+    return xml[i + len(tag) + 2:j].strip() if i >= 0 and j > i else None
+
+
+def wol_packet(mac: str) -> bytes:
+    raw = bytes.fromhex(mac.replace(":", "").replace("-", ""))
+    return b"\xff" * 6 + raw * 16
+
+
+class SamsungTV:
+    """Samsung TVs on the LAN: power state from http://tv:8001/api/v2/, volume and mute over UPnP (port 9197),
+    keys (power, input, channel) over the TV's remote control websocket (wss, port 8002). The first key makes the TV
+    ask "Allow" on screen; the token it then gives is kept in config.json (samsungtv.tokens). Power on from standby
+    sends the power key and a wake-on-LAN packet (needs "Power on with mobile" / network standby on the TV).
+    TVs come from samsung/appliances.json (type "tv", host, mac, name) or config "samsungtv": {"tvs": [...]}."""
+
+    POLL = 5
+    NAME = "Stoeckie Bridge"
+
+    def __init__(self, cfg: dict[str, Any]) -> None:
+        self.cfg = cfg
+        tvs = list((cfg.get("samsungtv") or {}).get("tvs") or [])
+        try:
+            tvs += [a for a in json.loads((SS_DIR / "appliances.json").read_text(encoding="utf-8"))
+                    if isinstance(a, dict) and a.get("type") == "tv"]
+        except (OSError, ValueError):
+            pass
+        self.tvs = [t for t in tvs if isinstance(t, dict) and t.get("host")]
+        self.tokens: dict[str, str] = dict((cfg.get("samsungtv") or {}).get("tokens") or {})
+        self.session = None
+        self.wake: dict[str, asyncio.Event] = {}
+        self.last: dict[str, dict[str, Any]] = {}
+        self.pair_now: dict[str, bool] = {}
+
+    @staticmethod
+    def dev_id(host: str) -> str:
+        return "samsungtv-" + host.replace(".", "-")
+
+    def _save_token(self, host: str, token: str) -> None:
+        self.tokens[host] = token
+        cfg = load_config()
+        cfg.setdefault("samsungtv", {}).setdefault("tokens", {})[host] = token
+        save_config(cfg)
+        log.info("[samsungtv] %s: paired", host)
+
+    async def _info(self, host: str) -> dict[str, Any] | None:
+        import aiohttp
+        try:
+            async with self.session.get(f"http://{host}:8001/api/v2/", timeout=aiohttp.ClientTimeout(total=3)) as r:
+                return (await r.json(content_type=None)).get("device") or {}
+        except Exception:  # noqa: BLE001
+            return None
+
+    async def _soap(self, host: str, action: str, args: str = "") -> str | None:
+        import aiohttp
+        headers, body = tv_soap(action, args)
+        try:
+            async with self.session.post(f"http://{host}:9197{TV_RC}", data=body.encode(), headers=headers,
+                                         timeout=aiohttp.ClientTimeout(total=3)) as r:
+                return await r.text() if r.status == 200 else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    async def _keys(self, host: str, keys: list[str], wait_pair: float = 30.0) -> None:
+        """Send remote control keys over the websocket (pairs the first time: the TV asks "Allow")."""
+        import ssl as _ssl
+        import aiohttp
+        name = base64.b64encode(self.NAME.encode()).decode()
+        url = f"wss://{host}:8002/api/v2/channels/samsung.remote.control?name={name}"
+        if self.tokens.get(host):
+            url += f"&token={self.tokens[host]}"
+        ctx = _ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE   # the TV has a self-signed certificate; this is the LAN only
+        async with self.session.ws_connect(url, ssl=ctx, timeout=aiohttp.ClientWSTimeout(ws_close=5),
+                                           heartbeat=None) as ws:
+            deadline = time.monotonic() + wait_pair
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise ValueError("the TV did not answer: accept 'Allow' on the TV screen and try again")
+                msg = await ws.receive(timeout=left)
+                if msg.type != aiohttp.WSMsgType.TEXT:
+                    raise ValueError(f"TV closed the connection ({getattr(msg.type, 'name', msg.type)}, "
+                                     f"{ws.exception() or msg.extra or ''}); Allow not chosen in time?")
+                ev = json.loads(msg.data)
+                if ev.get("event") == "ms.channel.connect":
+                    tok = (ev.get("data") or {}).get("token")
+                    if tok and tok != self.tokens.get(host):
+                        self._save_token(host, str(tok))
+                    break
+                if ev.get("event") == "ms.channel.unauthorized":
+                    raise ValueError("not allowed on the TV (Settings, General, External Device Manager, "
+                                     "Device Connection Manager: allow Stoeckie Bridge)")
+            for k in keys:
+                await ws.send_str(json.dumps({"method": "ms.remote.control", "params": {
+                    "Cmd": "Click", "DataOfCmd": k, "Option": "false", "TypeOfRemote": "SendRemoteKey"}}))
+                await asyncio.sleep(0.4)
+
+    def _wol(self, mac: str) -> None:
+        pkt = wol_packet(mac)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
+            sk.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            for _ in range(3):
+                sk.sendto(pkt, ("255.255.255.255", 9))
+
+    def _command(self, tv: dict[str, Any]):
+        host = str(tv["host"])
+
+        async def handler(cmd: str, value: Any) -> None:
+            st = self.last.get(host) or {}
+            on = st.get("power") == "on"
+            if cmd == "refresh":
+                if not self.tokens.get(host):
+                    self.pair_now[host] = True
+            elif cmd == "on":
+                if not on:
+                    if tv.get("mac"):
+                        self._wol(str(tv["mac"]))
+                    try:
+                        await self._keys(host, ["KEY_POWER"], 10)
+                    except Exception as ex:  # noqa: BLE001  (deep standby: only wake-on-LAN can wake it)
+                        log.info("[samsungtv] %s on: %s", host, ex)
+            elif cmd == "off":
+                if on:
+                    await self._keys(host, ["KEY_POWER"])
+            elif cmd == "volume":
+                v = max(0, min(100, int(round(float(value)))))
+                if await self._soap(host, "SetVolume", f"<DesiredVolume>{v}</DesiredVolume>") is None:
+                    raise ValueError("TV did not accept the volume (switched off?)")
+            elif cmd in ("volumeUp", "volumeDown"):
+                await self._keys(host, ["KEY_VOLUP" if cmd == "volumeUp" else "KEY_VOLDOWN"])
+            elif cmd == "mute":
+                m = 1 if str(value).lower() in ("1", "true", "muted", "on") else 0
+                if await self._soap(host, "SetMute", f"<DesiredMute>{m}</DesiredMute>") is None:
+                    raise ValueError("TV did not accept mute (switched off?)")
+            elif cmd == "input":
+                key = TV_INPUTS.get(str(value))
+                if not key:
+                    raise ValueError(f"unknown input {value}")
+                await self._keys(host, [key])
+                st["input"] = str(value)
+            elif cmd in ("channelUp", "channelDown"):
+                await self._keys(host, ["KEY_CHUP" if cmd == "channelUp" else "KEY_CHDOWN"])
+            elif cmd == "key":
+                k = str(value or "").upper()
+                if not k.startswith("KEY_") or not k[4:].replace("_", "").isalnum():
+                    raise ValueError("key must look like KEY_HOME")
+                await self._keys(host, [k])
+            else:
+                raise ValueError(f"unsupported command {cmd}")
+            log.info("[samsungtv] %s %s %s", host, cmd, "" if value is None else value)
+            ev = self.wake.get(host)
+            if ev is not None:
+                ev.set()
+        return handler
+
+    async def _read(self, tv: dict[str, Any]) -> dict[str, Any]:
+        host = str(tv["host"])
+        info = await self._info(host)
+        power = "on" if info and str(info.get("PowerState", "on")).lower() == "on" else "off"
+        st: dict[str, Any] = {"power": power, "model": (info or {}).get("modelName"),
+                              "input": (self.last.get(host) or {}).get("input"),
+                              "inputs": list(TV_INPUTS), "paired": bool(self.tokens.get(host))}
+        if power == "on":
+            vol = tv_xml_value(await self._soap(host, "GetVolume") or "", "CurrentVolume")
+            mute = tv_xml_value(await self._soap(host, "GetMute") or "", "CurrentMute")
+            st["volume"] = int(vol) if vol and vol.isdigit() else None
+            st["mute"] = None if mute is None else mute == "1"
+        return st
+
+    async def _run_one(self, tv: dict[str, Any]) -> None:
+        host = str(tv["host"])
+        name = str(tv.get("name") or "TV")
+        dev_id = self.dev_id(host)
+        wake = self.wake[host] = asyncio.Event()
+        REG.upsert(dev_id, "tv", name, {"power": "off", "inputs": list(TV_INPUTS)}, online=True,
+                   handler=self._command(tv))
+        asked_at, tries = -1e9, 0
+        while True:
+            try:
+                st = await self._read(tv)
+                if st.get("model") is None and (self.last.get(host) or {}).get("model"):
+                    st["model"] = self.last[host]["model"]
+                if st != self.last.get(host):
+                    self.last[host] = st
+                    REG.upsert(dev_id, "tv", name, st, online=True)
+                now = time.monotonic()
+                if (st["power"] == "on" and not self.tokens.get(host) and tries < 5
+                        and (now - asked_at > 120 or self.pair_now.pop(host, False))):
+                    # the TV shows "Allow" for the bridge for about 30 s; ask again every 2 minutes (at most 5
+                    # times per start) or right away after Refresh on the device
+                    asked_at, tries = now, tries + 1
+                    log.info("[samsungtv] %s: asking the TV for access, choose Allow on the TV screen", name)
+                    try:
+                        await self._keys(host, [], 45)
+                    except Exception as ex:  # noqa: BLE001
+                        log.info("[samsungtv] %s: pairing: %s", name, ex)
+            except Exception as ex:  # noqa: BLE001
+                log.info("[samsungtv] %s: %r", name, ex)
+            try:
+                await asyncio.wait_for(wake.wait(), self.POLL)
+                await asyncio.sleep(1)
+            except asyncio.TimeoutError:
+                pass
+            wake.clear()
+
+    async def run(self) -> None:
+        if not self.tvs:
+            return
+        import aiohttp
+        log.info("[samsungtv] %d TV(s): %s", len(self.tvs), ", ".join(t["host"] for t in self.tvs))
+        async with aiohttp.ClientSession() as self.session:
+            await asyncio.gather(*(self._run_one(t) for t in self.tvs))
 
 
 def _ss_short(v: Any, n: int = 600) -> str:
@@ -3289,7 +3525,7 @@ async def serve(args) -> None:
     port = int(cfg.get("port", 8787))
     sources = {"aeg": Electrolux, "fglair": FGLair, "skoda": Skoda, "irobot": IRobotCloud, "velux": VeluxCloud,
                "buienradar": Buienradar, "homeconnect": HomeConnect,
-               "samsung": Samsung}
+               "samsung": Samsung, "samsungtv": SamsungTV}
     tasks: dict[str, asyncio.Task] = {}
 
     def start(section: str) -> None:

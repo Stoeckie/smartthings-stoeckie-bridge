@@ -6,6 +6,7 @@
 --                                        remoteControlStatus, oven temperature + setpoint, program list +
 --                                        start (custom applianceProgram), oven temperature + cooking time
 --   washer (Samsung, local)          -> switch, washerOperatingState, remoteControlStatus, course list + start
+--   tv (Samsung, local)              -> switch, audioVolume, audioMute, mediaInputSource, tvChannel
 --   window (VELUX ACTIVE via HomeKit) -> windowShade, windowShadeLevel
 --   sensor (VELUX climate sensor)     -> temperature, humidity, CO2
 --   aircon (Fujitsu via FGLair)       -> switch, airConditionerMode (plus minHeat on units that have it, like the
@@ -70,7 +71,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-06n"
+local BUILD = "2026-11-06o"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -103,9 +104,9 @@ local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor =
                   aircon = "stoeckie-aircon-v3", car = "stoeckie-car-v2",
                   velux_lock = "stoeckie-velux-lock", rain = "stoeckie-rain-v4",
                   rainradar = "stoeckie-rainradar", dishwasher = "stoeckie-dishwasher-v2", oven = "stoeckie-oven-v2",
-                  washer = "stoeckie-washer-v3" }
+                  washer = "stoeckie-washer-v3", tv = "stoeckie-tv" }
 local MANUFACTURER = { dryer = "AEG", aircon = "Fujitsu", car = "Skoda", dishwasher = "Home Connect", oven = "Home Connect",
-                       washer = "Samsung" }
+                       washer = "Samsung", tv = "Samsung" }
 
 -- bridge value <-> SmartThings value
 local AC_MODE_TO_ST = { auto = "auto", cool = "cool", dry = "dry", fan = "fanOnly", heat = "heat", minheat = "minHeat" }
@@ -448,6 +449,19 @@ local function emit_washer(dev, s)
   hc_program(dev, s, washerProg)
 end
 
+-- Samsung TV, local via the bridge: power, volume, mute, input
+local function emit_tv(dev, s)
+  try_emit(dev, function() return s.power == "on" and capabilities.switch.switch.on() or capabilities.switch.switch.off() end)
+  if tonumber(s.volume) then
+    try_emit(dev, function() return capabilities.audioVolume.volume({ value = math.floor(s.volume), unit = "%" }) end)
+  end
+  if s.mute ~= nil then
+    try_emit(dev, function() return s.mute and capabilities.audioMute.mute.muted() or capabilities.audioMute.mute.unmuted() end)
+  end
+  if type(s.inputs) == "table" then emit_list(dev, "tvInputs", s.inputs, capabilities.mediaInputSource.supportedInputSources) end
+  if s.input then try_emit(dev, function() return capabilities.mediaInputSource.inputSource(s.input) end) end
+end
+
 local function emit_oven(dev, s)
   hc_common(dev, s)
   local op = s.operation or "inactive"
@@ -471,7 +485,8 @@ end
 
 local EMIT = { dryer = emit_dryer, window = emit_window, sensor = emit_sensor, aircon = emit_aircon, car = emit_car,
                velux_lock = emit_velux_lock, rain = emit_rain,
-               rainradar = emit_rainradar, dishwasher = emit_dishwasher, oven = emit_oven, washer = emit_washer }
+               rainradar = emit_rainradar, dishwasher = emit_dishwasher, oven = emit_oven, washer = emit_washer,
+  tv = emit_tv }
 
 -- polling -------------------------------------------------------------------------
 
@@ -959,6 +974,23 @@ local driver = Driver("stoeckie-bridge-local", {
       [hcProg.commands.setProgram.NAME] = function(driver, device, cmd) send(driver, device, "program", cmd.args.program) end,
       [hcProg.commands.startProgram.NAME] = function(driver, device, cmd) send(driver, device, "start", cmd.args.program) end,
       [hcProg.commands.start.NAME] = function(driver, device) send(driver, device, "start") end,
+    },
+    [capabilities.audioVolume.ID] = {
+      [capabilities.audioVolume.commands.setVolume.NAME] = function(driver, device, cmd) send(driver, device, "volume", cmd.args.volume) end,
+      [capabilities.audioVolume.commands.volumeUp.NAME] = function(driver, device) send(driver, device, "volumeUp") end,
+      [capabilities.audioVolume.commands.volumeDown.NAME] = function(driver, device) send(driver, device, "volumeDown") end,
+    },
+    [capabilities.audioMute.ID] = {
+      [capabilities.audioMute.commands.mute.NAME] = function(driver, device) send(driver, device, "mute", true) end,
+      [capabilities.audioMute.commands.unmute.NAME] = function(driver, device) send(driver, device, "mute", false) end,
+      [capabilities.audioMute.commands.setMute.NAME] = function(driver, device, cmd) send(driver, device, "mute", cmd.args.state == "muted") end,
+    },
+    [capabilities.mediaInputSource.ID] = {
+      [capabilities.mediaInputSource.commands.setInputSource.NAME] = function(driver, device, cmd) send(driver, device, "input", cmd.args.mode) end,
+    },
+    [capabilities.tvChannel.ID] = {
+      [capabilities.tvChannel.commands.channelUp.NAME] = function(driver, device) send(driver, device, "channelUp") end,
+      [capabilities.tvChannel.commands.channelDown.NAME] = function(driver, device) send(driver, device, "channelDown") end,
     },
     [washerProg.ID] = {
       [washerProg.commands.setProgram.NAME] = function(driver, device, cmd) send(driver, device, "program", cmd.args.program) end,

@@ -39,7 +39,7 @@ for _, id in ipairs({ "windowShade", "windowShadeLevel", "refresh", "dryerOperat
                       "silvervalley08660.airconMode", "silvervalley08660.targetTemperature",
                       "silvervalley08660.airflowDirection", "silvervalley08660.applianceProgram",
                       "silvervalley08660.cookSettings", "silvervalley08660.washerProgram", "dishwasherOperatingState", "ovenOperatingState",
-                      "washerOperatingState",
+                      "washerOperatingState", "audioVolume", "audioMute", "mediaInputSource", "tvChannel",
                       "ovenSetpoint", "temperatureMeasurement", "remoteControlStatus" }) do caps[id].ID = id end
 package.loaded["st.capabilities"] = caps
 package.loaded["st.driver"] = function(name, tmpl) DRIVER = tmpl; return { run = function() end } end
