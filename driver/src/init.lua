@@ -70,7 +70,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-06l"
+local BUILD = "2026-11-06m"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -242,12 +242,17 @@ local sync_profile -- defined with the polling code below
 
 local function emit_aircon(dev, s)
   try_emit(dev, function() return s.power == "off" and capabilities.switch.switch.off() or capabilities.switch.switch.on() end)
+  local modes = map_list(s.supportedModes, AC_MODE_TO_ST)
   local m = AC_MODE_TO_ST[s.mode or ""]
   if m then
-    try_emit(dev, function() return acMode.airConditionerMode(m) end)
-    try_emit(dev, function() return acModeX.mode(m) end)
+    dev:set_field("lastAcMode", m, { persist = true })
+  else
+    -- switched off: the mode list still needs a value, else the app shows "This device hasn't updated all of
+    -- its status information yet" (and on some phones the old mode list): keep the last mode
+    m = dev:get_field("lastAcMode") or (modes[1] and (modes[#modes] == "minHeat" and "heat" or modes[1])) or "auto"
   end
-  local modes = map_list(s.supportedModes, AC_MODE_TO_ST)
+  try_emit(dev, function() return acMode.airConditionerMode(m) end)
+  try_emit(dev, function() return acModeX.mode(m) end)
   emit_list(dev, "acModes", modes, acMode.supportedAcModes)
   emit_list(dev, "acModesX", modes, acModeX.supportedModes)
   if s.setpoint then
@@ -483,13 +488,34 @@ local function child_profile(key, device)
   end
 end
 
+-- a capability that only the newest profile of a kind has: when the device lacks it, the switch did not happen
+local function profile_marker(want)
+  if want == PROFILE.aircon then return airflowDir end
+  if want == PROFILE.washer then return washerProg end
+  if want == PROFILE.dishwasher then return hcProg end
+  if want == PROFILE.oven then return cookSet end
+end
+
 sync_profile = function(device)
   local want = child_profile(device.parent_assigned_child_key or "", device)
-  if want and device:get_field("profile") ~= want then
-    device:try_update_metadata({ profile = want })
-    device:set_field("profile", want, { persist = true })
-    log.info("[stbridge] " .. device.label .. ": profile " .. want)
+  if not want then return end
+  local marker = profile_marker(want)
+  local missing = marker ~= nil and not device:supports_capability(marker)
+  local same = device:get_field("profile") == want
+  if same and not missing then return end
+  local tries = 0
+  if same then
+    -- switched before, but the device still lacks the new capability (the switch got lost): try again,
+    -- at most 10 times, 5 min apart
+    tries = device:get_field("profileTries") or 0
+    local last = device:get_field("profileAt") or 0
+    if tries >= 10 or os.time() - last < 300 then return end
   end
+  device:set_field("profileTries", tries + 1)
+  device:set_field("profileAt", os.time())
+  device:try_update_metadata({ profile = want })
+  device:set_field("profile", want, { persist = true })
+  log.info("[stbridge] " .. device.label .. ": profile " .. want .. (missing and " (retry " .. (tries + 1) .. ")" or ""))
 end
 
 local function create_child(driver, parent, d)
@@ -583,6 +609,7 @@ local function poll(driver, parent)
       create_child(driver, parent, d)
     else
       if d.online == false then child:offline() else child:online() end
+      sync_profile(child)
       local fn = EMIT[d.type]
       if fn and d.state then
         local ok, e = pcall(fn, child, d.state)
