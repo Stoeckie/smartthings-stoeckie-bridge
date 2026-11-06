@@ -69,7 +69,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-07a"
+VERSION = "2026-11-07b"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -2448,12 +2448,12 @@ class Samsung:
                             pass
                 if fresh:
                     ok_at = now
-                    if timeouts:
+                    if timeouts >= 3:  # single skipped reads are normal for this firmware; only log real gaps
                         log.info("[samsung] %s: answering again after %d skipped read(s)", name, timeouts)
                     timeouts = 0
                 else:
                     timeouts += 1
-                    if timeouts in (1, 10, 30):
+                    if timeouts in (3, 10, 30):
                         log.info("[samsung] %s: no answer to %d read(s) in a row", name, timeouts)
                 if now - ok_at > self.LIVENESS:
                     raise ConnectionError(f"no answer for {self.LIVENESS} s")
