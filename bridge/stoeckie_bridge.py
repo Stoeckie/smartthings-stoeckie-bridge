@@ -31,6 +31,10 @@ LAN API (default port 8787, no auth, LAN only)
                (state: raining, rainRate mm/h, minutesUntilRain, minutesOfRain, intensity, summary)
   POST /stbridge/buienradar               body {"enabled": true} (from the bridge device)
   GET  /stbridge/irobot/<blid>[?refresh=1] -> {"name", "favorites": [{name, id, command, params}], "updated"}
+  POST /stbridge/srp                      body {"nonce", "box"} (signed and encrypted, paired hubs only)
+      One SRP step of a HomeKit pairing for an Edge driver on the hub (e.g. Somfy (HomeKit local)): the hub
+      needs minutes for it, some accessories give up sooner. The bridge only computes; it never talks to the
+      accessory and keeps nothing.
 
 Usage
   python stoeckie_bridge.py           run the bridge
@@ -61,7 +65,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-06a"
+VERSION = "2026-11-06b"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -820,6 +824,53 @@ VELUX_SYNC = "https://app.velux-active.com/syncapi/v1/"
 VELUX_CLIENT = {"client_id": "5931426da127d981e76bdd3f", "client_secret": "6ae2d89d15e767ae5c56b456b452d319"}
 VELUX_APP_VERSION = "791302006"
 VELUX_PAIR: dict[str, Any] = {"state": None, "error": None, "start": None}
+
+# --- HomeKit pair-setup SRP helper ------------------------------------------------------------------------
+# SRP-6a (RFC 5054 3072-bit group, SHA-512) with the HomeKit conventions, same as srp.lua in the Edge drivers.
+SRP_N = int(
+    "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B"
+    "302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE6"
+    "49286651ECE45B3DC2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F83655D23DCA3AD961C62F356208552BB9ED529077096966D"
+    "670C354E4ABC9804F1746C08CA18217C32905E462E36CE3BE39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF695581718"
+    "3995497CEA956AE515D2261898FA051015728E5A8AAAC42DAD33170D04507A33A85521ABDF1CBA64ECFB850458DBEF0A8AEA71575D060C7D"
+    "B3970F85A6E1E4C7ABF5AE8CDB0933D71E8C94E04A25619DCEE3D2261AD2EE6BF12FFA06D98A0864D87602733EC86A64521F2B18177B200C"
+    "BBE117577A615D6C770988C0BAD946E208E24FA074E5AB3143DB5BFCE0FD108E4B82D120A93AD2CAFFFFFFFFFFFFFFFF", 16)
+SRP_G = 5
+_SRP_LAST = {"t": 0.0}
+
+
+def srp_homekit_client(salt: bytes, b_pub: bytes, pin: str) -> tuple[bytes, bytes, bytes]:
+    """Client side of HomeKit pair-setup M3: returns (A, M1 proof, session key K)."""
+    def h(*parts: bytes) -> bytes:
+        return hashlib.sha512(b"".join(parts)).digest()
+
+    def pad(v: int) -> bytes:
+        return v.to_bytes(384, "big")
+
+    n_bytes = pad(SRP_N)
+    big_b = int.from_bytes(b_pub, "big")
+    if big_b % SRP_N == 0:
+        raise ValueError("invalid accessory key")
+    k = int.from_bytes(h(n_bytes, pad(SRP_G)), "big")
+    x = int.from_bytes(h(salt, h(b"Pair-Setup:" + pin.encode())), "big")
+    a = int.from_bytes(secrets.token_bytes(32), "big")
+    big_a = pow(SRP_G, a, SRP_N)
+    u = int.from_bytes(h(pad(big_a), pad(big_b)), "big")
+    if u == 0:
+        raise ValueError("invalid accessory key")
+    base = (big_b - k * pow(SRP_G, x, SRP_N)) % SRP_N
+    key = h(pad(pow(base, a + u * x, SRP_N)))
+    group = bytes(p ^ q for p, q in zip(h(n_bytes), h(bytes([SRP_G]))))
+    proof = h(group, h(b"Pair-Setup"), salt, pad(big_a), pad(big_b), key)
+    return pad(big_a), proof, key
+
+
+def srp_box_key(token: str, direction: str) -> bytes:
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    return HKDF(algorithm=hashes.SHA512(), length=32, salt=b"stbridge-srp",
+                info=direction.encode()).derive(token.encode())
+
 
 # --- LAN API authentication -------------------------------------------------------------------------
 # After pairing, every request from the hub carries an HMAC-SHA512 signature made with a shared token
@@ -2020,6 +2071,38 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
         proof = sign(cfg.get("api_token_prev") or tok, tok.encode())
         return web.json_response({"token": tok, "id": bridge_id, "proof": proof})
 
+    async def srp(req):
+        """HomeKit pair-setup helper for a paired hub. The request must be signed (checked by guard) and is
+        encrypted with a key derived from the shared token, so the HomeKit code never crosses the LAN in the clear."""
+        from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+        cfg = load_config()
+        if not api_paired(cfg) or not req.headers.get("X-Stbridge-Sig"):
+            return web.json_response({"error": "pairing required"}, status=401)
+        if time.time() - _SRP_LAST["t"] < 5:
+            return web.json_response({"error": "busy, try again in a few seconds"}, status=429)
+        _SRP_LAST["t"] = time.time()
+        tok = cfg["api_token"]
+        try:
+            body = await req.json()
+            plain = ChaCha20Poly1305(srp_box_key(tok, "request")).decrypt(
+                bytes.fromhex(body["nonce"]), bytes.fromhex(body["box"]), None)
+            d = json.loads(plain)
+            salt, b_pub, pin = bytes.fromhex(d["salt"]), bytes.fromhex(d["B"]), str(d["pin"])
+            if not (0 < len(salt) <= 64 and 0 < len(b_pub) <= 384) or len(pin) != 10 or \
+                    not (pin[:3] + pin[4:6] + pin[7:]).isdigit() or pin[3] != "-" or pin[6] != "-":
+                raise ValueError("bad input")
+            t0 = time.time()
+            big_a, proof, key = await asyncio.get_running_loop().run_in_executor(
+                None, srp_homekit_client, salt, b_pub, pin)
+        except Exception as err:  # noqa: BLE001
+            log.warning("[api] SRP helper refused a request from %s: %s", req.remote, type(err).__name__)
+            return web.json_response({"error": "bad request"}, status=400)
+        log.info("[api] SRP step for a HomeKit pairing computed for %s in %.2f s", req.remote, time.time() - t0)
+        nonce = secrets.token_bytes(12)
+        out = json.dumps({"A": big_a.hex(), "M1": proof.hex(), "K": key.hex()}).encode()
+        box = ChaCha20Poly1305(srp_box_key(tok, "response")).encrypt(nonce, out, None)
+        return web.json_response({"nonce": nonce.hex(), "box": box.hex()})
+
     async def devices(_req):
         return web.json_response({"devices": list(REG.devices.values()), "time": int(time.time())})
 
@@ -2091,6 +2174,7 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
     app.router.add_get("/", root)
     app.router.add_get("/stbridge/info", info)
     app.router.add_post("/stbridge/pair", pair)
+    app.router.add_post("/stbridge/srp", srp)
     app.router.add_get("/stbridge/devices", devices)
     app.router.add_post("/stbridge/devices/{dev_id}/command", command)
     app.router.add_get("/stbridge/irobot/{blid}", irobot)
