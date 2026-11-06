@@ -66,7 +66,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-06d"
+local BUILD = "2026-11-06e"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -85,9 +85,10 @@ local coolSetpoint = capabilities.thermostatCoolingSetpoint
 -- (the standard cooling setpoint is called "Cooling setpoint" in the app, also in heat mode)
 local acModeX = capabilities["silvervalley08660.airconMode"]
 local targetTemp = capabilities["silvervalley08660.targetTemperature"]
+local airflowDir = capabilities["silvervalley08660.airflowDirection"]  -- louver position 1..n (swing off)
 
 local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor = "stoeckie-climate",
-                  aircon = "stoeckie-aircon-v2", car = "stoeckie-car-v2",
+                  aircon = "stoeckie-aircon-v3", car = "stoeckie-car-v2",
                   velux_lock = "stoeckie-velux-lock", rain = "stoeckie-rain-v4",
                   rainradar = "stoeckie-rainradar" }
 local MANUFACTURER = { dryer = "AEG", aircon = "Fujitsu", car = "Skoda" }
@@ -235,6 +236,13 @@ local function emit_aircon(dev, s)
     try_emit(dev, function() return coolSetpoint.coolingSetpoint({ value = tonumber(s.setpoint), unit = "C" }) end)
     try_emit(dev, function() return targetTemp.temperature({ value = tonumber(s.setpoint), unit = "C" }) end)
   end
+  local n = tonumber(s.vDirCount) or 0
+  if n > 0 then
+    local list = {}
+    for i = 1, math.min(n, 8) do list[#list + 1] = tostring(i) end
+    emit_list(dev, "vDirs", list, airflowDir.supportedPositions)
+    if tonumber(s.vDir) then try_emit(dev, function() return airflowDir.position(tostring(math.floor(s.vDir))) end) end
+  end
   local r = s.setpointRange
   if type(r) == "table" and r[1] and r[2] then
     local enc = r[1] .. "-" .. r[2]
@@ -363,7 +371,8 @@ local function child_profile(key, device)
   if key:match("^velux%-") or key == "demo-velux" then return PROFILE.velux_lock end
   if key:match("^skoda%-") or key == "demo-car" then return PROFILE.car .. CAR_GRAPH[graph_mode(device)] end
   -- Minimum Heat is a mode (airConditionerMode minHeat); 2026-11-06b had a separate switch in profile -mh,
-  -- -v2 adds the custom mode list and "Set temperature" (custom presentation hides the standard ones)
+  -- -v2 adds the custom mode list and "Set temperature" (custom presentation hides the standard ones),
+  -- -v3 the airflow direction (louver position)
   if key:match("^fglair%-") or key == "demo-aircon" then return PROFILE.aircon end
   if key == "buienradar" or key == "demo-rainradar" then
     return PROFILE.rainradar .. (rain_simple(device) and "-simple" or "")
@@ -789,6 +798,11 @@ local driver = Driver("stoeckie-bridge-local", {
     },
     [targetTemp.ID] = {
       [targetTemp.commands.setTemperature.NAME] = handle_setpoint,
+    },
+    [airflowDir.ID] = {
+      [airflowDir.commands.setPosition.NAME] = function(driver, device, cmd)
+        send(driver, device, "vdir", tonumber(cmd.args.position))
+      end,
     },
     [acFan.ID] = {
       [acFan.commands.setFanMode.NAME] = handle_fan_mode,

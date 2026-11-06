@@ -65,7 +65,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-06e"
+VERSION = "2026-11-06f"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -331,6 +331,8 @@ def aircon_state(dev) -> dict[str, Any]:
         modes.append("minheat")  # the FGLair app shows Minimum Heat as an operation mode
     if min_on:
         mode = "minheat"
+    vnum = vdir_count(dev)
+    vdir = safe(lambda: int(dev.get_property_value(VDIR_PROP)), None) if vnum else None
     return {
         "power": "off" if mode == "off" else "on",
         "mode": mode,                                   # off on auto cool dry fan heat minheat
@@ -347,12 +349,30 @@ def aircon_state(dev) -> dict[str, Any]:
         # Minimum Heat (frost protection, about 10 C): a separate min_heat property in the cloud, shown as
         # mode "minheat" above. None when the unit has no such property.
         "minHeat": min_on if has_min else None,
+        # louver position 1..vDirCount when swing is off (None: unit has no positions)
+        "vDir": vdir if vdir and 1 <= vdir <= vnum else None,
+        "vDirCount": vnum or None,
     }
 
 
 # Property name used by the FGLair cloud for Minimum Heat. Not in ayla-iot-unofficial (it only has the
 # capability bit OP_MIN_HEAT); the bridge logs every unit's property names once so this can be checked.
 MIN_HEAT_PROP = "min_heat"
+# Vertical airflow direction (louver position when swing is off): position 1..count, written as raw properties
+# because the library has no setter for it.
+VDIR_PROP, VNUM_PROP, VSWING_PROP = "af_vertical_direction", "af_vertical_num_dir", "af_vertical_swing"
+VDIR_MAX = 8
+
+
+def vdir_count(dev) -> int:
+    """Number of louver positions the unit reports, 0 if it has none."""
+    try:
+        props = dev.properties_full
+        if VDIR_PROP not in props or VNUM_PROP not in props:
+            return 0
+        return max(0, min(VDIR_MAX, int(dev.get_property_value(VNUM_PROP) or 0)))
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def describe_unit(dev) -> str:
@@ -494,6 +514,13 @@ class FGLair:
                     await dev.async_set_set_temp(float(value))
                 elif cmd == "fan":
                     await dev.async_set_fan_speed(FanSpeed[str(value).upper()])
+                elif cmd == "vdir":
+                    n, count = int(value), vdir_count(dev)
+                    if not 1 <= n <= count:
+                        raise ValueError(f"airflow direction must be 1..{count}")
+                    if dev.get_property_value(VSWING_PROP):  # a fixed position ends vertical swing
+                        await dev.async_set_property_value(VSWING_PROP, 0)
+                    await dev.async_set_property_value(VDIR_PROP, n)
                 elif cmd == "minheat":  # older drivers (2026-11-06b) used a separate switch
                     await self._min_heat(dev, str(value).lower() in ("on", "1", "true"), strict=True)
                 elif cmd == "swing":
@@ -2209,7 +2236,7 @@ async def demo_devices() -> None:
           "fan": "auto", "swing": "off", "supportedModes": ["auto", "cool", "dry", "fan", "heat"],
           "supportedFans": ["quiet", "low", "medium", "high", "auto"],
           "supportedSwings": ["off", "vertical"], "setpointRange": [16.0, 30.0], "model": "DEMO",
-          "minHeat": False}
+          "minHeat": False, "vDir": 2, "vDirCount": 4}
     ac["supportedModes"].append("minheat")
 
     async def aircon(cmd, value):
@@ -2225,6 +2252,8 @@ async def demo_devices() -> None:
             ac["setpoint"] = float(value)
         elif cmd in ("fan", "swing"):
             ac[cmd] = str(value)
+        elif cmd == "vdir" and ac["vDirCount"] and 1 <= int(value) <= ac["vDirCount"]:
+            ac["vDir"], ac["swing"] = int(value), "off"
         elif cmd == "minheat":
             ac["minHeat"] = str(value).lower() in ("on", "1", "true")
             ac["power"], ac["mode"] = "on", "minheat" if ac["minHeat"] else "heat"

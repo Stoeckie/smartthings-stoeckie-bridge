@@ -1,4 +1,4 @@
-name: stoeckie-aircon-v2
+name: stoeckie-aircon-v3
 components:
   - id: main
     capabilities:
@@ -11,6 +11,8 @@ components:
       - id: silvervalley08660.airconMode
         version: 1
       - id: silvervalley08660.targetTemperature
+        version: 1
+      - id: silvervalley08660.airflowDirection
         version: 1
       - id: temperatureMeasurement
         version: 1
@@ -37,5 +39,5 @@ preferences:
       maximum: 600
       default: 60
 metadata:
-  vid: 7fc899a5-b4c1-3031-be6e-92c3e55b7af6
+  vid: e9af28ae-ca47-3a55-8b4a-e88b699e1e0f
   mnmn: SmartThingsCommunity

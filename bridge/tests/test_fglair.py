@@ -230,5 +230,45 @@ def test_min_heat(fake, monkeypatch):
             assert [x[0] for x in fake.sets[n:]] == ["operation_mode"]
             await h("minheat", "on")  # the separate switch of driver 2026-11-06b still works
             assert fake.sets[-1] == ("min_heat", 1)
+            assert st()["vDir"] is None and st()["vDirCount"] is None  # no louver positions on this fake
+            try:
+                await h("vdir", 2)
+                raise AssertionError("expected ValueError")
+            except ValueError:
+                pass
+        await runner.cleanup()
+    asyncio.run(main())
+
+
+def test_airflow_direction(fake, monkeypatch):
+    """Louver position: reported 1..count, setting it switches vertical swing off first."""
+    fake.props["af_vertical_direction"] = (3, "integer", False)
+    fake.props["af_vertical_num_dir"] = (6, "integer", True)
+    fake.props["af_vertical_swing"] = (1, "integer", False)
+    async def main():
+        runner, base = await start(fake)
+        patch_urls(monkeypatch, base)
+        monkeypatch.setattr(sb.asyncio, "sleep", _fast_sleep)
+        sb.REG.devices.clear()
+        fg = sb.FGLair({"fglair": {"username": "a@b.nl", "password": "goed", "region": "eu"}})
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            fg.api = fg._new_api(session)
+            await fg.api.async_sign_in()
+            await fg._sync()
+            st = lambda: sb.REG.devices["fglair-AC000W000000001"]["state"]
+            assert st()["vDir"] == 3 and st()["vDirCount"] == 6
+            h = sb.REG.handlers["fglair-AC000W000000001"]
+            n = len(fake.sets)
+            await h("vdir", 5)
+            assert fake.sets[n:] == [("af_vertical_swing", 0), ("af_vertical_direction", 5)]
+            await fg._sync()
+            assert st()["vDir"] == 5
+            for bad in (0, 7):
+                try:
+                    await h("vdir", bad)
+                    raise AssertionError("expected ValueError")
+                except ValueError:
+                    pass
         await runner.cleanup()
     asyncio.run(main())

@@ -36,7 +36,8 @@ for _, id in ipairs({ "windowShade", "windowShadeLevel", "refresh", "dryerOperat
                       "powerMeter", "presenceSensor", "contactSensor",
                       "airConditionerMode", "airConditionerFanMode", "fanOscillationMode",
                       "thermostatCoolingSetpoint", "lock", "waterSensor", "relativeHumidityMeasurement", "rainSensor", "precipitationSensor",
-                      "silvervalley08660.airconMode", "silvervalley08660.targetTemperature" }) do caps[id].ID = id end
+                      "silvervalley08660.airconMode", "silvervalley08660.targetTemperature",
+                      "silvervalley08660.airflowDirection" }) do caps[id].ID = id end
 package.loaded["st.capabilities"] = caps
 package.loaded["st.driver"] = function(name, tmpl) DRIVER = tmpl; return { run = function() end } end
 package.loaded["log"] = { info = function(m) print("I " .. m) end, warn = function(m) print("W " .. m) end,
@@ -180,7 +181,9 @@ def test_aircon_flow(bridge):
     assert ev["main:cap.thermostatCoolingSetpoint.coolingSetpointRange"]["minimum"] == 16.0
     # Minimum Heat is one of the modes (like in the FGLair app), no extra switch or profile
     assert "minHeat" in ev["main:cap.airConditionerMode.supportedAcModes"]
-    assert ac.new_profile in (None, "stoeckie-aircon-v2")
+    assert ac.new_profile in (None, "stoeckie-aircon-v3")
+    assert ev["main:cap.silvervalley08660.airflowDirection.position"] == "2"
+    assert ev["main:cap.silvervalley08660.airflowDirection.supportedPositions"] == ["1", "2", "3", "4"]
     assert ev["main:cap.silvervalley08660.targetTemperature.temperature"] == 21.0
     assert "minHeat" in ev["main:cap.silvervalley08660.airconMode.supportedModes"]
 
@@ -209,6 +212,9 @@ def test_aircon_flow(bridge):
     assert state()["minHeat"] is False and state()["mode"] == "fan"
     lua.execute(f'{h}["silvervalley08660.targetTemperature"].setTemperature(DRIVER_OBJ, AC, {{ args = {{ temperature = 22.5 }} }})')
     assert state()["setpoint"] == 22.5
+    lua.execute(f'{h}["silvervalley08660.airflowDirection"].setPosition(DRIVER_OBJ, AC, {{ args = {{ position = "4" }} }})')
+    assert state()["vDir"] == 4 and state()["swing"] == "off"
+    lua.execute(f'{h}.fanOscillationMode.setFanOscillationMode(DRIVER_OBJ, AC, {{ args = {{ fanOscillationMode = "vertical" }} }})')
 
     lua.execute("AC.events = {}")
     lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
