@@ -91,67 +91,85 @@ def write(name, obj):
     (HERE / name).write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8")
 
 
-def alts(attr="program"):
-    return [{"key": k, "value": f"{{{{i18n.attributes.{attr}.i18n.value.{k}.label}}}}", "type": "active"} for k in KEYS]
+def program_capability(prefix, title, programs):
+    """Write <prefix>.json, -pres.json, -en.json and -nl.json for a program list capability."""
+    keys = list(programs)
 
+    def alts():
+        return [{"key": k, "value": f"{{{{i18n.attributes.program.i18n.value.{k}.label}}}}", "type": "active"}
+                for k in keys]
 
-# ---------------------------------------------------------------- applianceProgram
-enum = {"type": "string", "enum": KEYS}
-write("applianceProgram.json", {
-    "name": "Appliance Program",
-    "attributes": {
-        "program": {"schema": {"type": "object", "properties": {"value": enum}, "additionalProperties": False,
-                               "required": ["value"]}, "setter": "setProgram", "enumCommands": []},
-        "supportedPrograms": {"schema": {"type": "object", "properties": {"value": {"type": "array", "items": enum}},
-                                         "additionalProperties": False, "required": ["value"]}, "enumCommands": []},
-    },
-    "commands": {
-        "setProgram": {"name": "setProgram", "arguments": [{"name": "program", "optional": False, "schema": enum}]},
-        "startProgram": {"name": "startProgram", "arguments": [{"name": "program", "optional": False, "schema": enum}]},
-        "start": {"name": "start", "arguments": []},
-    },
-})
-write("applianceProgram-pres.json", {
-    "dashboard": {"states": [{"label": "{{program.value}}", "alternatives": alts()}], "actions": []},
-    "detailView": [
-        {"label": "{{i18n.label}}", "displayType": "list",
-         "list": {"command": {"name": "setProgram", "alternatives": alts(), "argumentType": "string",
-                              "supportedValues": "supportedPrograms.value"},
-                  "state": {"value": "program.value", "valueType": "string", "alternatives": alts(),
-                            "supportedValues": "supportedPrograms.value"}}},
-        {"label": "{{i18n.commands.start.label}}", "displayType": "pushButton", "pushButton": {"command": "start"}},
-    ],
-    "automation": {
-        "conditions": [{"label": "{{i18n.label}}", "displayType": "list",
-                        "list": {"alternatives": alts(), "value": "program.value", "valueType": "string",
-                                 "supportedValues": "supportedPrograms.value"}}],
-        "actions": [
-            {"label": "{{i18n.commands.startProgram.label}}", "displayType": "list",
-             "list": {"alternatives": alts(), "command": "startProgram", "argumentType": "string",
-                      "supportedValues": "supportedPrograms.value"}},
-            {"label": "{{i18n.commands.setProgram.label}}", "displayType": "list",
-             "list": {"alternatives": alts(), "command": "setProgram", "argumentType": "string",
-                      "supportedValues": "supportedPrograms.value"}},
-        ],
-    },
-})
-for i, tag in enumerate(("en", "nl")):
-    label = ("Program", "Programma")[i]
-    write(f"applianceProgram-{tag}.json", {
-        "tag": tag, "label": label,
+    enum = {"type": "string", "enum": keys}
+    write(f"{prefix}.json", {
+        "name": title,
         "attributes": {
-            "program": {"label": label,
-                        "displayTemplate": ("{{device.label}} program is {{value}}",
-                                            "Programma van {{device.label}} is {{value}}")[i],
-                        "i18n": {"value": {k: {"label": v[i]} for k, v in PROGRAMS.items()}}},
-            "supportedPrograms": {"label": ("Supported programs", "Beschikbare programma's")[i]},
+            "program": {"schema": {"type": "object", "properties": {"value": enum}, "additionalProperties": False,
+                                   "required": ["value"]}, "setter": "setProgram", "enumCommands": []},
+            "supportedPrograms": {"schema": {"type": "object", "properties": {"value": {"type": "array",
+                                                                                         "items": enum}},
+                                             "additionalProperties": False, "required": ["value"]},
+                                  "enumCommands": []},
         },
         "commands": {
-            "setProgram": {"label": ("Select program", "Programma kiezen")[i]},
-            "startProgram": {"label": ("Start program", "Programma starten")[i]},
-            "start": {"label": ("Start", "Starten")[i]},
+            "setProgram": {"name": "setProgram", "arguments": [{"name": "program", "optional": False,
+                                                                "schema": enum}]},
+            "startProgram": {"name": "startProgram", "arguments": [{"name": "program", "optional": False,
+                                                                    "schema": enum}]},
+            "start": {"name": "start", "arguments": []},
         },
     })
+    write(f"{prefix}-pres.json", {
+        "dashboard": {"states": [{"label": "{{program.value}}", "alternatives": alts()}], "actions": []},
+        "detailView": [
+            {"label": "{{i18n.label}}", "displayType": "list",
+             "list": {"command": {"name": "setProgram", "alternatives": alts(), "argumentType": "string",
+                                  "supportedValues": "supportedPrograms.value"},
+                      "state": {"value": "program.value", "valueType": "string", "alternatives": alts(),
+                                "supportedValues": "supportedPrograms.value"}}},
+            {"label": "{{i18n.commands.start.label}}", "displayType": "pushButton",
+             "pushButton": {"command": "start"}},
+        ],
+        "automation": {
+            "conditions": [{"label": "{{i18n.label}}", "displayType": "list",
+                            "list": {"alternatives": alts(), "value": "program.value", "valueType": "string",
+                                     "supportedValues": "supportedPrograms.value"}}],
+            "actions": [
+                {"label": "{{i18n.commands.startProgram.label}}", "displayType": "list",
+                 "list": {"alternatives": alts(), "command": "startProgram", "argumentType": "string",
+                          "supportedValues": "supportedPrograms.value"}},
+                {"label": "{{i18n.commands.setProgram.label}}", "displayType": "list",
+                 "list": {"alternatives": alts(), "command": "setProgram", "argumentType": "string",
+                          "supportedValues": "supportedPrograms.value"}},
+            ],
+        },
+    })
+    for i, tag in enumerate(("en", "nl")):
+        label = ("Program", "Programma")[i]
+        write(f"{prefix}-{tag}.json", {
+            "tag": tag, "label": label,
+            "attributes": {
+                "program": {"label": label,
+                            "displayTemplate": ("{{device.label}} program is {{value}}",
+                                                "Programma van {{device.label}} is {{value}}")[i],
+                            "i18n": {"value": {k: {"label": v[i]} for k, v in programs.items()}}},
+                "supportedPrograms": {"label": ("Supported programs", "Beschikbare programma's")[i]},
+            },
+            "commands": {
+                "setProgram": {"label": ("Select program", "Programma kiezen")[i]},
+                "startProgram": {"label": ("Start program", "Programma starten")[i]},
+                "start": {"label": ("Start", "Starten")[i]},
+            },
+        })
+
+
+# silvervalley08660.applianceProgram: Home Connect (and, since a later update, also the washer keys)
+program_capability("applianceProgram", "Appliance Program", PROGRAMS)
+# silvervalley08660.washerProgram: Samsung washer courses (a capability of its own: a hub keeps the old version of
+# an updated capability for a long time, so new keys need a new capability)
+WASHER_START = list(PROGRAMS).index("cotton")
+program_capability("washerProgram", "Washer Program",
+                   {"none": PROGRAMS["none"], **dict(list(PROGRAMS.items())[WASHER_START:])})
+
 
 # ---------------------------------------------------------------- cookSettings (oven)
 write("cookSettings.json", {
@@ -226,6 +244,7 @@ def item(cap, comp="main"):
 
 
 P, C = "silvervalley08660.applianceProgram", "silvervalley08660.cookSettings"
+W = "silvervalley08660.washerProgram"
 write("dishwasher-config.json", {
     "type": "profile", "mnmn": "SmartThingsCommunity",
     "dashboard": {"states": [item("dishwasherOperatingState")], "actions": [item("switch")]},
@@ -240,10 +259,10 @@ write("dishwasher-config.json", {
 write("washer-config.json", {
     "type": "profile", "mnmn": "SmartThingsCommunity",
     "dashboard": {"states": [item("washerOperatingState")], "actions": [item("switch")]},
-    "detailView": [item("switch"), item("washerOperatingState"), item(P), item("remoteControlStatus"), item("refresh")],
+    "detailView": [item("switch"), item("washerOperatingState"), item(W), item("remoteControlStatus"), item("refresh")],
     "automation": {
-        "conditions": [item("switch"), item("washerOperatingState"), item(P), item("remoteControlStatus")],
-        "actions": [item("switch"), item(P), item("washerOperatingState")],
+        "conditions": [item("switch"), item("washerOperatingState"), item(W), item("remoteControlStatus")],
+        "actions": [item("switch"), item(W), item("washerOperatingState")],
     },
 })
 write("oven-config.json", {

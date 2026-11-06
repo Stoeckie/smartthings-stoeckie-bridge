@@ -38,7 +38,7 @@ for _, id in ipairs({ "windowShade", "windowShadeLevel", "refresh", "dryerOperat
                       "thermostatCoolingSetpoint", "lock", "waterSensor", "relativeHumidityMeasurement", "rainSensor", "precipitationSensor",
                       "silvervalley08660.airconMode", "silvervalley08660.targetTemperature",
                       "silvervalley08660.airflowDirection", "silvervalley08660.applianceProgram",
-                      "silvervalley08660.cookSettings", "dishwasherOperatingState", "ovenOperatingState",
+                      "silvervalley08660.cookSettings", "silvervalley08660.washerProgram", "dishwasherOperatingState", "ovenOperatingState",
                       "washerOperatingState",
                       "ovenSetpoint", "temperatureMeasurement", "remoteControlStatus" }) do caps[id].ID = id end
 package.loaded["st.capabilities"] = caps
@@ -490,8 +490,8 @@ def test_homeconnect_appliances(bridge):
     by = {d["id"]: d["state"] for d in st["devices"]}
     assert by["demo-washer"]["operation"] == "pause"
     vals = {washer.events[i].path: washer.events[i].arg for i in range(1, len(washer.events) + 1)}
-    assert vals.get("cap.silvervalley08660.applianceProgram.program") == "cotton"
-    lua.execute('DRIVER.capability_handlers["silvervalley08660.applianceProgram"].startProgram(DRIVER_OBJ, WASHER, { args = { program = "quick15" } })')
+    assert vals.get("cap.silvervalley08660.washerProgram.program") == "cotton"
+    lua.execute('DRIVER.capability_handlers["silvervalley08660.washerProgram"].startProgram(DRIVER_OBJ, WASHER, { args = { program = "quick15" } })')
     st = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{bridge}/stbridge/devices", timeout=5).read())
     by = {d["id"]: d["state"] for d in st["devices"]}
     assert by["demo-washer"]["program"] == "quick15" and by["demo-washer"]["operation"] == "run"

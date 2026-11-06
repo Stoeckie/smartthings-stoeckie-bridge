@@ -70,7 +70,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-06j"
+local BUILD = "2026-11-06l"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -97,12 +97,13 @@ local airflowDir = capabilities["silvervalley08660.airflowDirection"]  -- louver
 -- Home Connect: program list with start button, and oven temperature + cooking time (labels EN/NL)
 local hcProg = capabilities["silvervalley08660.applianceProgram"]
 local cookSet = capabilities["silvervalley08660.cookSettings"]
+local washerProg = capabilities["silvervalley08660.washerProgram"]   -- Samsung washer courses
 
 local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor = "stoeckie-climate",
                   aircon = "stoeckie-aircon-v3", car = "stoeckie-car-v2",
                   velux_lock = "stoeckie-velux-lock", rain = "stoeckie-rain-v4",
                   rainradar = "stoeckie-rainradar", dishwasher = "stoeckie-dishwasher-v2", oven = "stoeckie-oven-v2",
-                  washer = "stoeckie-washer-v2" }
+                  washer = "stoeckie-washer-v3" }
 local MANUFACTURER = { dryer = "AEG", aircon = "Fujitsu", car = "Skoda", dishwasher = "Home Connect", oven = "Home Connect",
                        washer = "Samsung" }
 
@@ -145,6 +146,7 @@ end
 local function try_emit(dev, make)
   local ok, err = pcall(function() dev:emit_event(make()) end)
   if not ok then log.warn("[stbridge] " .. dev.label .. ": " .. tostring(err)) end
+  return ok
 end
 
 local function iso_secs(v)
@@ -229,8 +231,11 @@ end
 local function emit_list(dev, key, list, make)
   local enc = table.concat(list, ",")
   if dev:get_field(key) == enc then return end
-  dev:set_field(key, enc)
-  try_emit(dev, function() return make(list, { visibility = { displayed = false } }) end)
+  -- remembered only when the event went out, so a refused event (e.g. a capability the hub still has in an
+  -- older version) is sent again at the next poll
+  if try_emit(dev, function() return make(list, { visibility = { displayed = false } }) end) then
+    dev:set_field(key, enc)
+  end
 end
 
 local sync_profile -- defined with the polling code below
@@ -381,13 +386,14 @@ local function hc_common(dev, s)
   end
 end
 
-local function hc_program(dev, s)
+local function hc_program(dev, s, cap)
+  cap = cap or hcProg
   if type(s.programs) == "table" and #s.programs > 0 then
     local list = {}
     for _, k in ipairs(s.programs) do list[#list + 1] = k end
-    emit_list(dev, "hcProgs", list, hcProg.supportedPrograms)
+    emit_list(dev, "hcProgs", list, cap.supportedPrograms)
   end
-  if s.program then try_emit(dev, function() return hcProg.program(tostring(s.program)) end) end
+  if s.program then try_emit(dev, function() return cap.program(tostring(s.program)) end) end
 end
 
 local function hc_completion(dev, s, cap)
@@ -426,7 +432,7 @@ local function emit_washer(dev, s)
   try_emit(dev, function() return washerOp.washerJobState[job]() end)
   if s.progress and washerOp.progress then try_emit(dev, function() return washerOp.progress(math.floor(s.progress)) end) end
   hc_completion(dev, s, washerOp)
-  hc_program(dev, s)
+  hc_program(dev, s, washerProg)
 end
 
 local function emit_oven(dev, s)
@@ -468,7 +474,8 @@ local function child_profile(key, device)
   if key == "buienradar" or key == "demo-rainradar" then
     return PROFILE.rainradar .. (rain_simple(device) and "-simple" or "")
   end
-  if key:match("^samsung%-") or key == "demo-washer" then return PROFILE.washer end  -- -v2: course list + Start
+  -- -v3: course list + Start (own capability washerProgram; -v2 used applianceProgram)
+  if key:match("^samsung%-") or key == "demo-washer" then return PROFILE.washer end
   -- -v2: program list, start button, oven temperature and cooking time
   if key:match("^homeconnect%-") or key == "demo-dishwasher" or key == "demo-oven" then
     if device:supports_capability(dishOp) then return PROFILE.dishwasher end
@@ -914,6 +921,11 @@ local driver = Driver("stoeckie-bridge-local", {
       [hcProg.commands.setProgram.NAME] = function(driver, device, cmd) send(driver, device, "program", cmd.args.program) end,
       [hcProg.commands.startProgram.NAME] = function(driver, device, cmd) send(driver, device, "start", cmd.args.program) end,
       [hcProg.commands.start.NAME] = function(driver, device) send(driver, device, "start") end,
+    },
+    [washerProg.ID] = {
+      [washerProg.commands.setProgram.NAME] = function(driver, device, cmd) send(driver, device, "program", cmd.args.program) end,
+      [washerProg.commands.startProgram.NAME] = function(driver, device, cmd) send(driver, device, "start", cmd.args.program) end,
+      [washerProg.commands.start.NAME] = function(driver, device) send(driver, device, "start") end,
     },
     [cookSet.ID] = {
       [cookSet.commands.setTemperature.NAME] = function(driver, device, cmd)

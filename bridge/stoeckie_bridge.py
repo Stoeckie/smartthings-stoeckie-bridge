@@ -69,7 +69,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-06p"
+VERSION = "2026-11-06q"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -2240,7 +2240,7 @@ class Samsung:
     samsung/appliances.json; give them a fixed IP. A washer switched off sleeps its wifi: it then shows as off."""
 
     POLL = 15          # power, remote control
-    HOT_EVERY = 1      # operational state
+    HOT_EVERY = 4      # operational state (this washer answers slowly when asked every second)
     PING = 25          # CoAP ping, keeps the session alive
     LIVENESS = 60      # no answer at all this long: new session
     # small resources every POLL seconds; the course resource is large (several CoAP blocks) and the firmware
@@ -2427,14 +2427,14 @@ class Samsung:
                 cmd = wake.is_set()
                 wake.clear()
                 async with self.locks[host]:
-                    fresh = await self._call(host, self._read_soft, sess, self.HOT, 2.0)
+                    fresh = await self._call(host, self._read_soft, sess, self.HOT, 4.0)
                     if now - warm_at >= self.POLL or cmd:
                         fresh.update(await self._call(host, self._read_soft, sess, self.RESOURCES, 4.0))
                         warm_at = now
                     if not once:
                         once = await self._call(host, self._read_soft, sess, self.ONCE, 4.0)
                     if now - course_at >= self.COURSE_EVERY or cmd or "/course/vs/0" not in cache:
-                        got = await self._call(host, self._read_soft, sess, self.COURSE, 15.0)
+                        got = await self._call(host, self._read_soft, sess, self.COURSE, 20.0)
                         if got:
                             fresh.update(got)
                             course_at = now
