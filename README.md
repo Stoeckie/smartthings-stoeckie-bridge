@@ -50,6 +50,7 @@ cd bridge
 docker compose up -d --build
 ```
 
+* **Update:** `git pull`, then in `bridge` again `docker compose up -d --build` (always with `--build`: since 2026-11-06g the image is `python:3.13-slim`). Settings in `bridge/data` stay.
 * Host networking (Linux), so the hub finds the bridge on the host IP, port 8787. Data (config.json, log) lives in `bridge/data`.
 * **Setup page:** open http://localhost:8787/setup in a browser **on the Docker host** (https://localhost:8443/setup also works; the certificate is self-signed). No need for a text browser inside the container.
 * **From another computer:** add its address to `STBRIDGE_SETUP_ALLOW` in `docker-compose.yml`, e.g. `STBRIDGE_SETUP_ALLOW: "192.168.1.20/32"`, run `docker compose up -d` and open https://<docker host ip>:8443/setup (https only, credentials never cross the LAN in plain text).
