@@ -5,7 +5,7 @@
 # What it does:
 #  - asks for the target IP and an administrator login of the target; the login can be saved here, encrypted for your
 #    Windows account (remote-cred.xml, Windows DPAPI), so later updates run without questions: update-remote.bat
-#  - installs Python 3.13 on the target when missing and keeps it on the newest 3.13 patch release ($PyVersion; Home Connect needs 3.13 or newer), copies the bridge to C:\StoeckieBridge, venv + packages
+#  - installs Python 3.13 on the target when missing and keeps it on $PyVersion ( Home Connect needs 3.13 or newer), copies the bridge to C:\StoeckieBridge, venv + packages
 #  - stops the bridge here and copies config.json (keys + bridge id, so SmartThings keeps the same devices)
 #  - firewall rule 8787, scheduled task at startup as LOCAL SERVICE (no admin rights, runs without anyone logged on)
 #  - checks from here that the target answers on port 8787; then disables the bridge here (or restarts it on failure)
@@ -15,7 +15,7 @@ $ErrorActionPreference = "Stop"
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $remoteDir = "C:\StoeckieBridge"
 $taskName = "Stoeckie Bridge"
-$PyVersion = "3.13.18"   # newest 3.13 patch release (security fixes); the target is upgraded to it
+$PyVersion = "3.13.17"   # last 3.13 release with a Windows installer (3.13.18+ are source only); next step is Python 3.14
 
 $credFile = Join-Path $dir "remote-cred.xml"      # saved login, encrypted for this Windows user (DPAPI)
 $prefsFile = Join-Path $dir "remote-target.json"   # target IP and the answers of the last run
