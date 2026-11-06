@@ -5,7 +5,7 @@
 # What it does:
 #  - asks for the target IP and an administrator login of the target; the login can be saved here, encrypted for your
 #    Windows account (remote-cred.xml, Windows DPAPI), so later updates run without questions: update-remote.bat
-#  - installs Python 3.13 on the target when missing (Home Connect needs 3.13 or newer), copies the bridge to C:\StoeckieBridge, venv + packages
+#  - installs Python 3.13 on the target when missing and keeps it on the newest 3.13 patch release ($PyVersion; Home Connect needs 3.13 or newer), copies the bridge to C:\StoeckieBridge, venv + packages
 #  - stops the bridge here and copies config.json (keys + bridge id, so SmartThings keeps the same devices)
 #  - firewall rule 8787, scheduled task at startup as LOCAL SERVICE (no admin rights, runs without anyone logged on)
 #  - checks from here that the target answers on port 8787; then disables the bridge here (or restarts it on failure)
@@ -15,6 +15,7 @@ $ErrorActionPreference = "Stop"
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $remoteDir = "C:\StoeckieBridge"
 $taskName = "Stoeckie Bridge"
+$PyVersion = "3.13.18"   # newest 3.13 patch release (security fixes); the target is upgraded to it
 
 $credFile = Join-Path $dir "remote-cred.xml"      # saved login, encrypted for this Windows user (DPAPI)
 $prefsFile = Join-Path $dir "remote-target.json"   # target IP and the answers of the last run
@@ -136,22 +137,40 @@ try {
 
     # ---- Python on the target
     Write-Host "Python controleren op $Target..."
-    $py = Invoke-Command -Session $session -ArgumentList $info.Arch {
-        param($arch)
+    $py = Invoke-Command -Session $session -ArgumentList $info.Arch, $PyVersion, $taskName {
+        param($arch, $want, $task)
         $ErrorActionPreference = "Continue"
         $full = Join-Path $env:ProgramFiles "Python313\python.exe"
-        if (Test-Path $full) { return $full }
-        $probe = "import sys; print(sys.version_info[1] if sys.version_info[0] == 3 else 0); print(sys.executable)"
-        foreach ($c in @("py", "python")) {
-            try {
-                if ($c -eq "py") { $r = & py -3 -c $probe 2>$null } else { $r = & python -c $probe 2>$null }
-                if ($LASTEXITCODE -eq 0 -and @($r).Count -ge 2 -and [int]$r[0] -ge 13) { return "$($r[1])".Trim() }
-            } catch {}
+        $wantMicro = [int]($want.Split(".")[2])
+        if (Test-Path $full) {
+            # installed by us: keep it on the newest 3.13 patch release (security fixes)
+            $micro = & $full -c "import sys; print(sys.version_info[2])" 2>$null
+            if ([int]$micro -ge $wantMicro) { return $full }
+        } else {
+            $probe = "import sys; print(sys.version_info[1] if sys.version_info[0] == 3 else 0); print(sys.executable)"
+            foreach ($c in @("py", "python")) {
+                try {
+                    if ($c -eq "py") { $r = & py -3 -c $probe 2>$null } else { $r = & python -c $probe 2>$null }
+                    if ($LASTEXITCODE -eq 0 -and @($r).Count -ge 2 -and [int]$r[0] -ge 13) { return "$($r[1])".Trim() }
+                } catch {}
+            }
         }
         $kind = if ($arch -eq "ARM64") { "arm64" } else { "amd64" }
-        $exe = Join-Path $env:TEMP "python-3.13.17-$kind.exe"
+        $exe = Join-Path $env:TEMP "python-$want-$kind.exe"
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest "https://www.python.org/ftp/python/3.13.17/python-3.13.17-$kind.exe" -OutFile $exe -UseBasicParsing
+        Invoke-WebRequest "https://www.python.org/ftp/python/$want/python-$want-$kind.exe" -OutFile $exe -UseBasicParsing
+        # only run an installer that is signed by the Python Software Foundation
+        $sig = Get-AuthenticodeSignature $exe
+        if ($sig.Status -ne "Valid" -or $sig.SignerCertificate.Subject -notmatch "Python Software Foundation") {
+            Remove-Item $exe -ErrorAction SilentlyContinue
+            throw "Python installer niet vertrouwd (handtekening $($sig.Status))"
+        }
+        # an upgrade replaces files the running bridge uses: stop it first (it is started again at the end)
+        Stop-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
+        Get-CimInstance Win32_Process -Filter "Name like 'python%'" |
+            Where-Object { $_.CommandLine -like "*stoeckie_bridge.py*" } |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        Start-Sleep 2
         $p = Start-Process $exe -ArgumentList "/quiet InstallAllUsers=1 PrependPath=1 Include_test=0" -Wait -PassThru
         Remove-Item $exe -ErrorAction SilentlyContinue
         if ($p.ExitCode -ne 0 -or -not (Test-Path $full)) { throw "Python installatie mislukt (code $($p.ExitCode))" }
@@ -336,7 +355,7 @@ try {
         Write-Host "config.json terughalen lukte niet: $($_.Exception.Message)"
     }
     if ($allow) {
-        Write-Host "Setup pagina: https://${Target}:8443/setup (eigen certificaat: de browser waarschuwt één keer)"
+        Write-Host "Setup pagina: https://${Target}:8443/setup (eigen certificaat: de browser waarschuwt een keer)"
     }
     Write-Host "Geef $Target een vaste DHCP reservering in UniFi."
 } catch {
