@@ -5,13 +5,13 @@ One small bridge brings cloud-only appliances into SmartThings:
 | Source | What you get | Brand page |
 |---|---|---|
 | **AEG / Electrolux** dryer (official Electrolux Group Developer API) | state, job, remaining time, door, finished; start, pause, stop | [smartthings-aeg-bridge](https://github.com/Stoeckie/smartthings-aeg-bridge) |
-| **Fujitsu FGLair** air conditioners | on/off, mode, setpoint, fan, swing, room and outdoor temperature, Minimum Heat (as a mode, on units that have it) | [smartthings-fujitsu-fglair](https://github.com/Stoeckie/smartthings-fujitsu-fglair) |
+| **Fujitsu FGLair** air conditioners | on/off, mode, setpoint, fan, swing, room and outdoor temperature (outdoor only on units with an outdoor sensor; others switch to a layout without it by themselves), Minimum Heat (as a mode, on units that have it) | [smartthings-fujitsu-fglair](https://github.com/Stoeckie/smartthings-fujitsu-fglair) |
 | **Škoda** cars (official MyŠkoda public API) | battery, charging on/off and power, charging cable, climate, at home, doors | [smartthings-skoda-bridge](https://github.com/Stoeckie/smartthings-skoda-bridge) |
 | **VELUX ACTIVE** departure mode (optional) | lock and unlock (departure mode: all windows and blinds blocked); rain sensor as its own device | windows: [VELUX ACTIVE (HomeKit local)](https://github.com/Stoeckie/smartthings-velux-active-local) |
 | **Rain radar** (optional) | rain now and the next 2 hours at your address with a radius: rain or dry, mm/h, minutes until rain, how long it rains. Buienradar in NL/BE, Open-Meteo worldwide | |
 | **Home Connect** (Bosch, Siemens, Neff) dishwasher and oven, local (optional) | on/off, running, remaining time, progress, door, oven temperature; choose and start programs, oven temperature and cooking time; stop, pause, resume. No cloud after setup | [below](#home-connect-bosch--siemens--neff-local) |
 | **Samsung** washer, local (optional, experimental) | on/off, running, phase, remaining time, progress; start, pause, stop. No cloud | [below](#samsung-washer-local-experimental) |
-| **Samsung TV** | not through the bridge: use the Edge driver [Samsung TV (local)](https://github.com/Stoeckie/smartthings-samsung-tv-local), which runs on the hub itself (power, volume, mute, input, channel) | [smartthings-samsung-tv-local](https://github.com/Stoeckie/smartthings-samsung-tv-local) |
+| **Samsung TV** | not through the bridge: use the Edge driver [Samsung TV (local)](https://github.com/Stoeckie/smartthings-samsung-tv-local), which runs on the hub itself (power, volume, mute, input, channel). The older TV support in the bridge still works but is no longer developed | [smartthings-samsung-tv-local](https://github.com/Stoeckie/smartthings-samsung-tv-local) |
 | **iRobot** favorites (optional) | favorite names and rooms for the [iRobot Roomba (local)](https://github.com/Stoeckie/smartthings-irobot-roomba-local) driver | |
 
 **This repository is the only place with the code.** The brand pages above explain one brand each and point here. Use only what you need: a source you do not set up is skipped.
