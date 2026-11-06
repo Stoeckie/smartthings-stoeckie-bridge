@@ -69,7 +69,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-06m"
+VERSION = "2026-11-06n"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -1854,7 +1854,7 @@ class HomeConnect:
     the appliance address from config ("homeconnect": {"hosts": {haId: ip}}), homeconnect/hosts.json or the mDNS
     name (give the appliances a fixed IP in the router)."""
 
-    POLL = 10
+    POLL = 5
 
     def __init__(self, cfg: dict[str, Any]) -> None:
         self.cfg = cfg
@@ -2240,10 +2240,14 @@ class Samsung:
     samsung/appliances.json; give them a fixed IP. A washer switched off sleeps its wifi: it then shows as off."""
 
     POLL = 10
+    HOT_EVERY = 2
     # small resources every POLL seconds; the course resource is large (several CoAP blocks) and the firmware
     # stops answering for a while when it is read too often, so it is read at connect, every COURSE_EVERY seconds
     # and right after a command
-    RESOURCES = (("operational", "state", "vs", "0"), ("power", "vs", "0"), ("remotectrl", "vs", "0"))
+    # The firmware drops a DTLS session that is idle for about 10 s (it then also ignores a new handshake for a
+    # while), so the small operational state is read every HOT seconds, like the smartthings-local bridge demo.
+    HOT = (("operational", "state", "vs", "0"),)
+    RESOURCES = (("power", "vs", "0"), ("remotectrl", "vs", "0"))
     COURSE = (("course", "vs", "0"),)
     COURSE_EVERY = 300
     ONCE = (("st", "washercourse", "vs", "0"),)
@@ -2378,7 +2382,7 @@ class Samsung:
         REG.upsert(dev_id, kind, name, ss_washer_state({}), online=True, handler=handler)
         once: dict[str, Any] = {}
         cache: dict[str, Any] = {}
-        course_at, wake_cmd = 0.0, False
+        course_at, warm_at, wake_cmd = 0.0, 0.0, False
         last, fails, logged = None, 0, False
         while True:
             sess = self.sessions.get(host)
@@ -2386,12 +2390,15 @@ class Samsung:
                 if sess is None:
                     sess, port = await self._call(host, self._open, host)
                     self.sessions[host] = sess
-                    course_at = 0.0
+                    course_at = warm_at = 0.0
                     log.info("[samsung] %s (%s): connected on port %s", name, host, port)
                     if not once:
                         once = await self._call(host, self._read, sess, self.ONCE)
                 async with self.locks[host]:
-                    fresh = await self._call(host, self._read, sess, self.RESOURCES)
+                    fresh = await self._call(host, self._read, sess, self.HOT)
+                    if time.time() - warm_at >= self.POLL or wake_cmd:
+                        fresh.update(await self._call(host, self._read, sess, self.RESOURCES))
+                        warm_at = time.time()
                     if time.time() - course_at >= self.COURSE_EVERY or wake_cmd:
                         try:
                             fresh.update(await self._call(host, self._read, sess, self.COURSE, 8.0))
@@ -2428,8 +2435,8 @@ class Samsung:
                         last = st
                 await asyncio.sleep(20 if fails < 10 else 60)
                 continue
-            try:  # next read after POLL seconds, or right after a command
-                await asyncio.wait_for(wake.wait(), self.POLL)
+            try:  # next read after HOT_EVERY seconds, or right after a command
+                await asyncio.wait_for(wake.wait(), self.HOT_EVERY)
                 await asyncio.sleep(1)
                 wake_cmd = True
             except asyncio.TimeoutError:
