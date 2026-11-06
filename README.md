@@ -10,6 +10,7 @@ One small bridge brings cloud-only appliances into SmartThings:
 | **VELUX ACTIVE** departure mode (optional) | lock and unlock (departure mode: all windows and blinds blocked); rain sensor as its own device | windows: [VELUX ACTIVE (HomeKit local)](https://github.com/Stoeckie/smartthings-velux-active-local) |
 | **Rain radar** (optional) | rain now and the next 2 hours at your address with a radius: rain or dry, mm/h, minutes until rain, how long it rains. Buienradar in NL/BE, Open-Meteo worldwide | |
 | **Home Connect** (Bosch, Siemens, Neff) dishwasher and oven, local (optional) | on/off, running, remaining time, progress, door, oven temperature; choose and start programs, oven temperature and cooking time; stop, pause, resume. No cloud after setup | [below](#home-connect-bosch--siemens--neff-local) |
+| **Samsung** washer, local (optional, experimental) | on/off, running, phase, remaining time, progress; start, pause, stop. No cloud | [below](#samsung-washer-local-experimental) |
 | **iRobot** favorites (optional) | favorite names and rooms for the [iRobot Roomba (local)](https://github.com/Stoeckie/smartthings-irobot-roomba-local) driver | |
 
 **This repository is the only place with the code.** The brand pages above explain one brand each and point here. Use only what you need: a source you do not set up is skipped.
@@ -120,6 +121,16 @@ SmartThings: dishwasher (on/off, running/finished, remaining time, progress, doo
 
 Uses the homeconnect-websocket library (github.com/chris-mc1/homeconnect_websocket).
 
+## Samsung washer, local (experimental)
+
+Samsung appliances normally only work through the Samsung cloud. Many of them also accept a local session on the LAN (OCF over CoAP-DTLS); the bridge uses the [smartthings-local](https://pypi.org/project/smartthings-local/) library for that (MIT). Tested models and limits are in that project's compatibility notes; the newest laundry generation refuses this kind of session.
+
+1. Give the washer a fixed IP in your router.
+2. Create `samsung\appliances.json` next to `config.json` (Windows: `C:\StoeckieBridge\samsung`, Docker: the data volume): `[{"host": "192.168.1.60", "type": "washer", "name": "Washer"}]`
+3. Restart the bridge. Check first with `python stoeckie_bridge.py --samsung-probe 192.168.1.60` (read only): it finds the port, makes one session and reads a few state values.
+
+The bridge makes a client certificate once (in the `samsung` folder; it never leaves that folder). SmartThings gets: on/off, running/paused/stopped, cycle phase (wash, rinse, spin, finish), remaining time, progress, remote control; start (needs remote control switched on at the washer), pause, stop. Choosing a course is not in yet. A washer that is switched off usually turns its wifi off too: it then shows as off.
+
 ## VELUX ACTIVE departure mode
 
 The windows and blinds run locally on the hub with the [VELUX ACTIVE (HomeKit local)](https://github.com/Stoeckie/smartthings-velux-active-local) driver. The departure mode (the departure switch, or "away" in the VELUX app) blocks all of them and only exists in the VELUX cloud, so the bridge adds a **lock** device for it:
@@ -186,4 +197,4 @@ Tests run without real accounts: a fake Ayla cloud (FGLair), a fake Škoda API, 
 
 ## License
 
-Apache 2.0, see LICENSE. Not affiliated with AB Electrolux, AEG, Fujitsu General, Ayla Networks, Škoda Auto, iRobot, VELUX, Netatmo, BSH Hausgeräte (Home Connect, Bosch, Siemens, Neff), Buienradar, Open-Meteo, OpenStreetMap or Samsung SmartThings.
+Apache 2.0, see LICENSE. Not affiliated with AB Electrolux, AEG, Fujitsu General, Ayla Networks, Škoda Auto, iRobot, VELUX, Netatmo, BSH Hausgeräte (Home Connect, Bosch, Siemens, Neff), Samsung, Buienradar, Open-Meteo, OpenStreetMap or Samsung SmartThings.

@@ -10,3 +10,7 @@ Maas, MIT License.
 Home Connect appliances are reached with the homeconnect-websocket library,
 https://github.com/chris-mc1/homeconnect_websocket (used as a dependency, not copied). Appliance profiles come from
 the Home Connect Profile Downloader, https://github.com/bruestel/homeconnect-profile-downloader.
+
+Samsung appliances are reached with the smartthings-local library, https://github.com/QuiteYellow/SmartThings-Local
+(MIT, used as a dependency). The washer course names per course table come from the localthings project,
+https://github.com/mbillow/localthings, Copyright (c) 2026 Marc Billow, MIT License.
