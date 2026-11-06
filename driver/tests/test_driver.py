@@ -60,8 +60,7 @@ function NEW_DEVICE(info)
               events = {}, state = "online",
               profile = { components = { main = { id = "main" }, outdoor = { id = "outdoor" }, plug = { id = "plug" },
                                          climate = { id = "climate" }, status = { id = "status" },
-                                         rain = { id = "rain" }, graph = { id = "graph" },
-                                         minHeat = { id = "minHeat" } } } }
+                                         rain = { id = "rain" }, graph = { id = "graph" } } } }
   function d:get_field(k) return self.fields[k] end
   function d:set_field(k, v) self.fields[k] = v end
   function d:emit_event(e) self.events[#self.events + 1] = { comp = "main", path = e.path, arg = e.arg } end
@@ -178,9 +177,9 @@ def test_aircon_flow(bridge):
     assert ev["main:cap.fanOscillationMode.fanOscillationMode"] == "fixed"
     assert "fanOnly" in ev["main:cap.airConditionerMode.supportedAcModes"]
     assert ev["main:cap.thermostatCoolingSetpoint.coolingSetpointRange"]["minimum"] == 16.0
-    # Minimum Heat: the unit reports it, so the child gets the profile with the minHeat switch
-    assert ac.new_profile == "stoeckie-aircon-mh"
-    assert ev["minHeat:cap.switch.switch.off"] is None
+    # Minimum Heat is one of the modes (like in the FGLair app), no extra switch or profile
+    assert "minHeat" in ev["main:cap.airConditionerMode.supportedAcModes"]
+    assert ac.new_profile in (None, "stoeckie-aircon")
 
     def state():
         with urllib.request.urlopen(f"http://127.0.0.1:{bridge}/stbridge/devices") as r:
@@ -198,10 +197,13 @@ def test_aircon_flow(bridge):
     assert state()["power"] == "off"
     lua.execute(f'{h}.switch.on(DRIVER_OBJ, AC)')
     assert state()["power"] == "on"
-    lua.execute(f'{h}.switch.on(DRIVER_OBJ, AC, {{ component = "minHeat" }})')
-    assert state()["minHeat"] is True and state()["power"] == "on"
-    lua.execute(f'{h}.switch.off(DRIVER_OBJ, AC, {{ component = "minHeat" }})')
-    assert state()["minHeat"] is False
+    lua.execute(f'{h}.airConditionerMode.setAirConditionerMode(DRIVER_OBJ, AC, {{ args = {{ mode = "minHeat" }} }})')
+    assert state()["minHeat"] is True and state()["mode"] == "minheat" and state()["power"] == "on"
+    lua.execute("AC.events = {}")
+    lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
+    assert events()["main:cap.airConditionerMode.airConditionerMode"] == "minHeat"
+    lua.execute(f'{h}.airConditionerMode.setAirConditionerMode(DRIVER_OBJ, AC, {{ args = {{ mode = "fanOnly" }} }})')
+    assert state()["minHeat"] is False and state()["mode"] == "fan"
 
     lua.execute("AC.events = {}")
     lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")

@@ -65,7 +65,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-06c"
+VERSION = "2026-11-06d"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -324,23 +324,29 @@ def aircon_state(dev) -> dict[str, Any]:
             return default
     mode = safe(lambda: _name(dev.op_mode), "off")
     lo, hi = safe(lambda: dev.temperature_range, (16.0, 30.0)) if mode not in ("off", "on") else (16.0, 30.0)
+    has_min = MIN_HEAT_PROP in safe(lambda: dev.properties_full, {})
+    min_on = has_min and bool(safe(lambda: dev.get_property_value(MIN_HEAT_PROP), 0))
+    modes = [m for m in (_name(x) for x in safe(lambda: dev.supported_op_modes, [])) if m not in ("off", "on")]
+    if has_min:
+        modes.append("minheat")  # the FGLair app shows Minimum Heat as an operation mode
+    if min_on:
+        mode = "minheat"
     return {
         "power": "off" if mode == "off" else "on",
-        "mode": mode,                                   # off on auto cool dry fan heat
+        "mode": mode,                                   # off on auto cool dry fan heat minheat
         "setpoint": safe(lambda: dev.set_temp),
         "temperature": safe(lambda: dev.sensed_temp),   # None on models without a room sensor
         "outdoorTemperature": safe(lambda: dev.outdoor_temperature),
         "fan": safe(lambda: _name(dev.fan_speed)),
         "swing": safe(lambda: SWING_NAMES.get(dev.swing_mode.name, "off"), "off"),
-        "supportedModes": [m for m in (_name(x) for x in safe(lambda: dev.supported_op_modes, []))
-                           if m not in ("off", "on")],
+        "supportedModes": modes,
         "supportedFans": [_name(x) for x in safe(lambda: dev.supported_fan_speeds, [])],
         "supportedSwings": [SWING_NAMES.get(x.name, "off") for x in safe(lambda: dev.supported_swing_modes, [])],
         "setpointRange": [lo, hi],
         "model": getattr(dev, "oem_model_number", None),
-        # Minimum Heat (frost protection, about 10 C): only when the unit has a min_heat property.
-        "minHeat": (bool(safe(lambda: dev.get_property_value(MIN_HEAT_PROP), 0))
-                    if MIN_HEAT_PROP in safe(lambda: dev.properties_full, {}) else None),
+        # Minimum Heat (frost protection, about 10 C): a separate min_heat property in the cloud, shown as
+        # mode "minheat" above. None when the unit has no such property.
+        "minHeat": min_on if has_min else None,
     }
 
 
@@ -449,6 +455,17 @@ class FGLair:
                     log.warning("[fglair] update %s failed: %s", dsn, ex)
                     REG.set_online("fglair-" + dsn, False)
 
+    @staticmethod
+    async def _min_heat(dev, on: bool, strict: bool = False) -> None:
+        """Switch Minimum Heat; when switching it off, only write if it is on (other units: no-op)."""
+        if MIN_HEAT_PROP not in dev.properties_full:
+            if on or strict:
+                raise ValueError("this unit has no Minimum Heat")
+            return
+        if not on and not dev.get_property_value(MIN_HEAT_PROP):
+            return
+        await dev.async_set_property_value(MIN_HEAT_PROP, 1 if on else 0)
+
     def _command(self, dsn: str):
         async def handler(cmd: str, value: Any) -> None:
             from ayla_iot_unofficial.fujitsu_consts import FanSpeed, OpMode
@@ -466,17 +483,19 @@ class FGLair:
                 elif cmd == "on":
                     await dev.async_set_op_mode(OpMode.ON)
                 elif cmd == "off":
+                    await self._min_heat(dev, False)
                     await dev.async_set_op_mode(OpMode.OFF)
+                elif cmd == "mode" and str(value).lower() == "minheat":
+                    await self._min_heat(dev, True)
                 elif cmd == "mode":
+                    await self._min_heat(dev, False)  # another mode ends Minimum Heat
                     await dev.async_set_op_mode(OpMode[str(value).upper()])
                 elif cmd == "setpoint":
                     await dev.async_set_set_temp(float(value))
                 elif cmd == "fan":
                     await dev.async_set_fan_speed(FanSpeed[str(value).upper()])
-                elif cmd == "minheat":
-                    if MIN_HEAT_PROP not in dev.properties_full:
-                        raise ValueError("this unit has no Minimum Heat")
-                    await dev.async_set_property_value(MIN_HEAT_PROP, 1 if str(value).lower() in ("on", "1", "true") else 0)
+                elif cmd == "minheat":  # older drivers (2026-11-06b) used a separate switch
+                    await self._min_heat(dev, str(value).lower() in ("on", "1", "true"), strict=True)
                 elif cmd == "swing":
                     # set each axis the unit has (the library also touches axes the unit lacks)
                     from ayla_iot_unofficial.fujitsu_consts import Capability
@@ -2199,6 +2218,7 @@ async def demo_devices() -> None:
           "supportedFans": ["quiet", "low", "medium", "high", "auto"],
           "supportedSwings": ["off", "vertical"], "setpointRange": [16.0, 30.0], "model": "DEMO",
           "minHeat": False}
+    ac["supportedModes"].append("minheat")
 
     async def aircon(cmd, value):
         if cmd == "on":
@@ -2208,12 +2228,16 @@ async def demo_devices() -> None:
             ac["last_mode"], ac["power"], ac["mode"] = ac["mode"], "off", "off"
         elif cmd == "mode":
             ac["power"], ac["mode"] = "on", str(value)
+            ac["minHeat"] = ac["mode"] == "minheat"
         elif cmd == "setpoint":
             ac["setpoint"] = float(value)
         elif cmd in ("fan", "swing"):
             ac[cmd] = str(value)
         elif cmd == "minheat":
             ac["minHeat"] = str(value).lower() in ("on", "1", "true")
+            ac["power"], ac["mode"] = "on", "minheat" if ac["minHeat"] else "heat"
+        if cmd == "off":
+            ac["minHeat"] = False
         REG.upsert("demo-aircon", "aircon", "Demo air conditioner", ac, True, aircon)
 
     await win("refresh", None)

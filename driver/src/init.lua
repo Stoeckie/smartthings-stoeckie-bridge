@@ -4,8 +4,8 @@
 --   dryer  (AEG via Electrolux API)  -> dryerOperatingState, remoteControlStatus, contactSensor (door)
 --   window (VELUX ACTIVE via HomeKit) -> windowShade, windowShadeLevel
 --   sensor (VELUX climate sensor)     -> temperature, humidity, CO2
---   aircon (Fujitsu via FGLair)       -> switch, airConditionerMode, setpoint, fan, swing, indoor/outdoor temp,
---                                        Minimum Heat switch (component minHeat) on units that have it
+--   aircon (Fujitsu via FGLair)       -> switch, airConditionerMode (plus minHeat on units that have it, like the
+--                                        FGLair app), setpoint, fan, swing, indoor/outdoor temp
 --   car    (Škoda public API)         -> battery, charging switch + power, at home, plug, climate, doors
 --   velux_lock (VELUX departure mode) -> lock (locked = away: all windows and blinds blocked)
 --   rain   (VELUX gateway rain sensor) -> rainSensor (detected = raining)
@@ -66,7 +66,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-06b"
+local BUILD = "2026-11-06c"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -89,8 +89,9 @@ local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor =
 local MANUFACTURER = { dryer = "AEG", aircon = "Fujitsu", car = "Skoda" }
 
 -- bridge value <-> SmartThings value
-local AC_MODE_TO_ST = { auto = "auto", cool = "cool", dry = "dry", fan = "fanOnly", heat = "heat" }
-local AC_MODE_FROM_ST = { auto = "auto", cool = "cool", dry = "dry", fanOnly = "fan", fan = "fan", heat = "heat" }
+local AC_MODE_TO_ST = { auto = "auto", cool = "cool", dry = "dry", fan = "fanOnly", heat = "heat", minheat = "minHeat" }
+local AC_MODE_FROM_ST = { auto = "auto", cool = "cool", dry = "dry", fanOnly = "fan", fan = "fan", heat = "heat",
+                          minHeat = "minheat" }
 local SWING_TO_ST = { off = "fixed", vertical = "vertical", horizontal = "horizontal", both = "all" }
 local SWING_FROM_ST = { fixed = "off", vertical = "vertical", horizontal = "horizontal", all = "both" }
 
@@ -250,20 +251,6 @@ local function emit_aircon(dev, s)
   local sw = SWING_TO_ST[s.swing or ""]
   if sw then try_emit(dev, function() return oscillation.fanOscillationMode(sw) end) end
   emit_list(dev, "acSwings", map_list(s.supportedSwings, SWING_TO_ST), oscillation.supportedFanOscillationModes)
-  -- Minimum Heat (frost protection, about 10 C): only units that report it get the extra switch
-  if s.minHeat ~= nil then
-    if not dev:get_field("minheat") then
-      dev:set_field("minheat", true, { persist = true })
-      sync_profile(dev)
-    end
-    local c = dev.profile and dev.profile.components and dev.profile.components.minHeat
-    if c then
-      local ok, err = pcall(function()
-        dev:emit_component_event(c, s.minHeat and capabilities.switch.switch.on() or capabilities.switch.switch.off())
-      end)
-      if not ok then log.warn("[stbridge] " .. dev.label .. " minHeat: " .. tostring(err)) end
-    end
-  end
 end
 
 local function comp_emit(dev, id, make)
@@ -365,7 +352,8 @@ local function child_profile(key, device)
   if key:match("^velux%-rain%-") or key == "demo-rain" then return PROFILE.rain end
   if key:match("^velux%-") or key == "demo-velux" then return PROFILE.velux_lock end
   if key:match("^skoda%-") or key == "demo-car" then return PROFILE.car .. CAR_GRAPH[graph_mode(device)] end
-  if key:match("^fglair%-") or key == "demo-aircon" then return PROFILE.aircon .. (device:get_field("minheat") and "-mh" or "") end
+  -- Minimum Heat is a mode (airConditionerMode minHeat); 2026-11-06b had a separate switch in profile -mh
+  if key:match("^fglair%-") or key == "demo-aircon" then return PROFILE.aircon end
   if key == "buienradar" or key == "demo-rainradar" then
     return PROFILE.rainradar .. (rain_simple(device) and "-simple" or "")
   end
@@ -548,12 +536,10 @@ end
 
 local function handle_switch_on(driver, device, cmd)
   local c = cmd and cmd.component
-  if c == "minHeat" then return send(driver, device, "minheat", "on") end
   send(driver, device, c == "climate" and "climate_on" or "on")
 end
 local function handle_switch_off(driver, device, cmd)
   local c = cmd and cmd.component
-  if c == "minHeat" then return send(driver, device, "minheat", "off") end
   send(driver, device, c == "climate" and "climate_off" or "off")
 end
 -- a refused lock command (e.g. unlock without the gateway key): show the real state again instead of a spinner

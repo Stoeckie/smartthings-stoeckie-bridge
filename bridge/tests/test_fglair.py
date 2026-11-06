@@ -210,9 +210,25 @@ def test_min_heat(fake, monkeypatch):
             fg.api = fg._new_api(session)
             await fg.api.async_sign_in()
             await fg._sync()
-            assert sb.REG.devices["fglair-AC000W000000001"]["state"]["minHeat"] is False
+            st = lambda: sb.REG.devices["fglair-AC000W000000001"]["state"]
+            assert st()["minHeat"] is False and st()["mode"] == "heat"
+            assert "minheat" in st()["supportedModes"]  # shown as a mode, like in the FGLair app
             assert "min_heat" in sb.describe_unit(fg.devices["AC000W000000001"])
-            await sb.REG.handlers["fglair-AC000W000000001"]("minheat", "on")
-            assert ("min_heat", 1) in fake.sets
+            h = sb.REG.handlers["fglair-AC000W000000001"]
+            await h("mode", "minheat")
+            assert fake.sets[-1] == ("min_heat", 1)
+            assert ("operation_mode", 6) not in fake.sets  # only the min_heat property is written
+            await fg._sync()
+            assert st()["mode"] == "minheat" and st()["minHeat"] is True and st()["power"] == "on"
+            n = len(fake.sets)
+            await h("mode", "cool")  # another mode ends Minimum Heat first
+            assert fake.sets[n] == ("min_heat", 0) and fake.sets[n + 1][0] == "operation_mode"
+            await fg._sync()
+            assert st()["mode"] == "cool" and st()["minHeat"] is False
+            n = len(fake.sets)
+            await h("off", None)  # Minimum Heat already off: no extra write
+            assert [x[0] for x in fake.sets[n:]] == ["operation_mode"]
+            await h("minheat", "on")  # the separate switch of driver 2026-11-06b still works
+            assert fake.sets[-1] == ("min_heat", 1)
         await runner.cleanup()
     asyncio.run(main())
