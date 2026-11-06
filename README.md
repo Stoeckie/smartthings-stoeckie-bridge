@@ -89,7 +89,7 @@ Rain at your address, now and the next two hours, refreshed every 5 minutes. Sou
    * **Radius (meters)**: 0 to 25000. With a radius the bridge also reads 8 points on a ring at that distance (and 8 at half of it, from 3 km) and takes the heaviest rain per time step, so "rain" means rain anywhere within the radius.
    * **Rain from (mm/h)**: default 0.1.
    * **Source**: Auto, Buienradar or Open-Meteo.
-   * **Show**: **Detail** (default): `rainSensor` (rain detected or not), `precipitationSensor` (none, possible, light, moderate, heavy, violent) and the custom capability `silvervalley08660.rainForecast`: rain now (mm/h), rain starts in (minutes, 999 = no rain in the next 2 hours), rain lasts (minutes) and a short summary (Dutch in NL/BE, English elsewhere), all usable in routines, e.g. *rain starts in less than 15 minutes → close the windows*. **Rain or dry only**: just `rainSensor`.
+   * **Show**: **Detail** (default): `rainSensor` (rain detected or not), `precipitationSensor` (none, possible, light, moderate, heavy, violent) and the custom capability `silvervalley08660.rainForecast`: rain now (mm/h), rain starts in (minutes, 999 = no rain in the next 2 hours), rain lasts (minutes) and a short summary in English, all usable in routines, e.g. *rain starts in less than 15 minutes → close the windows*. **Rain or dry only**: just `rainSensor`.
 
 The setup page has the same fields; the last change wins. Data: [Buienradar](https://www.buienradar.nl) (free for personal use), [Open-Meteo](https://open-meteo.com) (CC BY 4.0); addresses: [PDOK](https://www.pdok.nl), [OpenStreetMap Nominatim](https://nominatim.org) (© OpenStreetMap contributors, ODbL).
 
