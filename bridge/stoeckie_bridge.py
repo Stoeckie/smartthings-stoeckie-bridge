@@ -69,7 +69,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-06h"
+VERSION = "2026-11-06i"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -2033,6 +2033,343 @@ class HomeConnect:
             await asyncio.gather(*(self._run_one(p, app_id, session) for p in profiles))
 
 
+# ---------------------------------------------------------------- Samsung appliances (OCF over CoAP-DTLS), local
+
+SS_DIR = DATA / "samsung"
+# The client identity the factory ACL of compatible Samsung appliances grants access to (a public constant, see
+# github.com/QuiteYellow/SmartThings-Local docs/certificates.md). The appliance checks only this UUID in the
+# certificate subject; the key and the self-signed certificate are made here and never leave this folder.
+SS_CLIENT_UUID = "ab0b0ac4-aae9-4958-a04d-8ec36fe1b2f9"
+SS_PORTS = [5684] + list(range(49152, 49161))
+
+
+def samsung_cert(folder: Path | None = None) -> tuple[Path, Path]:
+    """Client certificate for local Samsung access (made once): RSA 2048, self-signed, UUID in OU, CN and SAN."""
+    folder = folder or SS_DIR
+    cert_p, key_p = folder / "client_fullchain.pem", folder / "client.key"
+    if cert_p.exists() and key_p.exists():
+        return cert_p, key_p
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+    folder.mkdir(parents=True, exist_ok=True)
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    u = SS_CLIENT_UUID
+    name = x509.Name([x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, f"uuid:{u}"),
+                      x509.NameAttribute(NameOID.COMMON_NAME, f"urn:uuid:{u}")])
+    now = dt.datetime.now(dt.timezone.utc)
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - dt.timedelta(days=1)).not_valid_after(now + dt.timedelta(days=3650))
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=False)
+            .add_extension(x509.KeyUsage(digital_signature=True, key_encipherment=True, content_commitment=False,
+                                         data_encipherment=False, key_agreement=False, key_cert_sign=False,
+                                         crl_sign=False, encipher_only=False, decipher_only=False), critical=False)
+            .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH, ExtendedKeyUsageOID.SERVER_AUTH]),
+                           critical=False)
+            .add_extension(x509.SubjectAlternativeName([
+                x509.UniformResourceIdentifier(f"urn:uuid:{u}"), x509.UniformResourceIdentifier(f"uri:uuid:{u}"),
+                x509.UniformResourceIdentifier(f"uuid:{u}"), x509.DNSName(u)]), critical=False)
+            .sign(key, hashes.SHA256()))
+    key_p.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL,
+                                        serialization.NoEncryption()))
+    cert_p.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    return cert_p, key_p
+
+
+# Washer course codes per course table (from /st/washercourse/vs/0), from the localthings project
+# (github.com/mbillow/localthings, MIT), confirmed there by reading back courses chosen on the machines.
+SS_WASHER_COURSES = {
+    "Table_00": {"01": "Normal", "55": "Whites", "57": "Self Clean+", "5b": "Cotton", "5c": "Extra Speed", "5d": "Super Eco Wash", "5e": "Delicates", "5f": "Baby Care", "60": "Outdoor", "61": "Dark Garment", "63": "Drum Clean", "64": "Rinse + Spin", "65": "Wool", "66": "Bedding", "67": "Synthetics", "68": "E Cotton", "6b": "Spin Only", "6c": "Denim", "70": "Heavy Duty", "71": "Bedding", "72": "Sanitize", "73": "Rinse + Spin", "74": "Active Wear", "75": "Delicates", "77": "Perm Press", "78": "Quick Wash", "91": "Self Clean", "94": "Towels", "9c": "Heavy Duty", "9d": "Rinse + Spin", "9e": "Perm Press", "9f": "Quick Wash", "a2": "Delicates", "a3": "Active Wear", "a5": "Bedding", "a9": "Sanitize", "aa": "Whites", "ab": "Eco Cold", "b1": "Self Clean+", "ba": "Drain/Spin", "d0": "Cotton", "d1": "E Cotton", "d2": "Synthetics", "d3": "Delicates", "d4": "Rinse + Spin", "d5": "Drum Clean", "d6": "Bedding", "d7": "Outdoor Care", "d8": "Wool", "da": "Super Eco Wash", "db": "Super Speed", "dc": "15' Quick Wash", "e4": "Anti Allergen"},
+    "Table_02": {"01": "Normal", "02": "Extra Heavy Duty", "03": "Super Eco Wash", "04": "Quick Wash", "05": "Wool/Lingerie", "06": "Bedding", "07": "Outdoor", "08": "Rinse+Spin", "09": "Drum Clean", "0a": "Towels", "0b": "Boil Wash", "0c": "Baby Care", "0d": "Spin Only", "0e": "Cloudy Day", "0f": "Pure Wash", "10": "Spin Dry", "11": "Summer Bedding", "12": "Cottons", "13": "Black Cottons", "14": "Delicate Underwear", "15": "Activewear", "16": "Blouses", "17": "Downloaded", "18": "Soft Bubble", "19": "AI Wash", "1a": "Shirts", "1b": "Cotton", "1c": "Eco 40-60", "1d": "Super Speed", "1e": "15' Quick Wash", "1f": "Intense Cold", "20": "Hygiene Steam", "21": "Colors", "22": "Wool", "23": "Outdoor", "24": "Bedding", "25": "Synthetics", "26": "Delicates", "27": "Rinse+Spin", "28": "Drain/Spin", "29": "Drum Clean+", "2a": "Jeans", "2b": "AI Wash", "2d": "Silent Wash", "2e": "Baby Care", "2f": "Activewear", "30": "Cloudy Day", "32": "Shirts", "33": "Towels", "34": "Mixed", "35": "E Cotton", "36": "Wash+Dry", "37": "Air Wash", "38": "Cotton Dry", "39": "Synthetics Dry", "3a": "Drum Clean", "51": "Super Speed", "52": "Eco Cold", "53": "Heavy Duty", "54": "Towels", "55": "Activewear", "56": "Bedding", "57": "Delicates", "5a": "Steam Sanitize", "5b": "Small Load", "5e": "Rinse+Spin", "60": "Self Clean+", "64": "Steam Whites", "65": "Colors", "66": "Denim", "69": "AI Wash", "6a": "Wool", "6b": "Denim", "6c": "Blouses", "6d": "Delicates", "6e": "Active Wear", "6f": "Bedding", "70": "Towels", "71": "Quick Wash", "72": "Shirts", "73": "Sanitize", "74": "Drum Clean", "75": "Outdoor", "76": "Baby Care", "77": "Cottons", "78": "Rinse + Spin", "79": "Spin Only", "7c": "Whites", "7d": "Bedding/Waterproof", "7e": "Self-Clean", "7f": "Wool/Delicate", "85": "Steam Normal", "86": "Deep Wash", "87": "Download", "88": "Pet Care", "8b": "Quick Wash", "8c": "AI OptiWash", "8f": "Intense Cold", "96": "Less Microfiber", "a0": "15' Quick Wash", "b0": "Mixed Load", "58": "Wool", "5c": "Outdoor", "5d": "Power Rinse", "5f": "Spin Only", "63": "Power Steam", "67": "Steam Allergen", "68": "Steam Bulky"},
+}
+SS_JOB = {"none": "none", "wash": "wash", "rinse": "rinse", "spin": "spin", "finish": "finish",
+          "prewash": "preWash", "weightsensing": "weightSensing", "delaywash": "delayWash", "airwash": "airWash",
+          "drying": "drying", "cooling": "cooling", "wrinkleprevent": "wrinklePrevent", "aiwash": "aIWash",
+          "airinse": "aIRinse", "aispin": "aISpin", "freezeprotection": "freezeProtection"}
+SS_OPTIONS = "x.com.samsung.da.options"
+
+
+def ss_option(options: Any, prefix: str) -> str | None:
+    """'<prefix>_<value>' from an options[] array."""
+    for o in options or []:
+        if isinstance(o, str) and o.startswith(prefix + "_"):
+            return o.split("_", 1)[1]
+    return None
+
+
+def ss_seconds(raw: Any) -> int | None:
+    """'HH:MM:SS' or 'MM:SS' -> seconds."""
+    if not isinstance(raw, str):
+        return None
+    try:
+        parts = [int(x) for x in raw.split(":")]
+    except ValueError:
+        return None
+    if len(parts) == 2:
+        parts = [0] + parts
+    if len(parts) != 3:
+        return None
+    return parts[0] * 3600 + parts[1] * 60 + parts[2]
+
+
+def ss_course_label(code: str | None, table: str | None) -> str | None:
+    if not code:
+        return None
+    return (SS_WASHER_COURSES.get(table or "") or {}).get(code.lower()) or f"Course {code.upper()}"
+
+
+def ss_washer_state(res: dict[str, Any]) -> dict[str, Any]:
+    """Flatten the washer resources (CBOR decoded, keyed by href) into what the Edge driver needs."""
+    op = res.get("/operational/state/vs/0") or {}
+    pw = res.get("/power/vs/0") or {}
+    p0 = res.get("/power/0") or {}
+    rc = res.get("/remotectrl/vs/0") or {}
+    course = res.get("/course/vs/0") or {}
+    table = (res.get("/st/washercourse/vs/0") or {}).get("x.com.samsung.da.st.courseTable")
+    if "x.com.samsung.da.power" in pw:
+        power = str(pw.get("x.com.samsung.da.power")).lower() == "on"
+    elif "value" in p0:
+        power = bool(p0.get("value"))
+    else:
+        power = bool(op)
+    st = str(op.get("x.com.samsung.da.state") or "").lower()
+    progress = str(op.get("x.com.samsung.da.progress") or "None")
+    running = st in ("run", "running") and progress != "Finish"
+    paused = st in ("pause", "paused")
+    finished = progress == "Finish"
+    remaining = ss_seconds(op.get("x.com.samsung.da.remainingTime")) if (running or paused) else None
+    pct = op.get("x.com.samsung.da.progressPercentage")
+    try:
+        pct = int(pct) if (running or paused) and pct is not None else None
+    except (TypeError, ValueError):
+        pct = None
+    code = ss_option(course.get(SS_OPTIONS), "Course")
+    return {
+        "power": "on" if power else "off",
+        "operation": "run" if running else ("pause" if paused else ("finished" if finished else "inactive")),
+        "job": "finish" if finished else (SS_JOB.get(progress.lower(), "none") if (running or paused) else "none"),
+        "remainingTime": remaining,
+        "completionTime": _iso_in(float(remaining)) if remaining and running else None,
+        "progress": pct,
+        "remoteStartAllowed": str(rc.get("x.com.samsung.da.remoteControlEnabled")).lower() == "true",
+        "course": ss_course_label(code, table),
+        "courseCode": code,
+    }
+
+
+class Samsung:
+    """Samsung appliances on the LAN (OCF over CoAP-DTLS, library smartthings-local). Washers for now.
+    Appliances come from config ("samsung": {"appliances": [{"host": ip, "type": "washer", "name": ...}]}) or
+    samsung/appliances.json; give them a fixed IP. A washer switched off sleeps its wifi: it then shows as off."""
+
+    POLL = 10
+    RESOURCES = (("operational", "state", "vs", "0"), ("power", "vs", "0"), ("power", "0"),
+                 ("remotectrl", "vs", "0"), ("course", "vs", "0"))
+    ONCE = (("st", "washercourse", "vs", "0"),)
+
+    def __init__(self, cfg: dict[str, Any]) -> None:
+        self.cfg = cfg
+        apps = list((cfg.get("samsung") or {}).get("appliances") or [])
+        try:
+            apps += json.loads((SS_DIR / "appliances.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+        self.appliances = [a for a in apps if isinstance(a, dict) and a.get("host")]
+        self.sessions: dict[str, Any] = {}
+        self.locks: dict[str, asyncio.Lock] = {}
+
+    @staticmethod
+    def dev_id(host: str) -> str:
+        return "samsung-" + host.replace(".", "-")
+
+    def _open(self, host: str):
+        """Find the DTLS port and open an authenticated session (blocking, run in a thread)."""
+        from smartthings_local.protocol import dtls_probe
+        from smartthings_local.protocol.auth import CertificateAuth
+        from smartthings_local.protocol.dtls_session import DtlsCoapSession
+        cert_p, key_p = samsung_cert()
+        live = dtls_probe.probe_dtls_ports(host, SS_PORTS)
+        port = live.selected_port or (live.responder_ports[0] if live.responder_ports else None)
+        if not port:
+            raise ConnectionError("no answer (switched off?)")
+        sess = DtlsCoapSession(host, port, auth=CertificateAuth.from_files(str(cert_p), str(key_p)))
+        sess.connect(timeout=12.0)
+        sess.start_reader()
+        return sess, port
+
+    @staticmethod
+    def _read(sess, paths) -> dict[str, Any]:
+        import cbor2
+        out: dict[str, Any] = {}
+        for path in paths:
+            code, body = sess.get(list(path))
+            if code == 0x45 and body:
+                try:
+                    out["/" + "/".join(path)] = cbor2.loads(body)
+                except Exception:  # noqa: BLE001
+                    pass
+        return out
+
+    @staticmethod
+    def _write(sess, path, body: dict[str, Any]) -> None:
+        import cbor2
+        code, _ = sess.post(list(path), cbor2.dumps(body))
+        if code >> 5 != 2:
+            raise ValueError(f"appliance refused ({code >> 5}.{code & 0x1F:02d})")
+
+    def _command(self, host: str):
+        async def handler(cmd: str, value: Any) -> None:
+            sess = self.sessions.get(host)
+            if cmd == "refresh":
+                return
+            if sess is None:
+                raise ValueError("washer not reachable (switched off?)")
+            op = ("operational", "state", "vs", "0")
+            body = {"run": {"x.com.samsung.da.state": "Run"}, "start": {"x.com.samsung.da.state": "Run"},
+                    "resume": {"x.com.samsung.da.state": "Run"}, "pause": {"x.com.samsung.da.state": "Pause"},
+                    "stop": {"x.com.samsung.da.state": "Ready"}}.get(cmd)
+            async with self.locks[host]:
+                if body is not None:
+                    await asyncio.to_thread(self._write, sess, op, body)
+                elif cmd in ("on", "off"):
+                    try:
+                        await asyncio.to_thread(self._write, sess, ("power", "vs", "0"),
+                                                {"x.com.samsung.da.power": "On" if cmd == "on" else "Off"})
+                    except ValueError:
+                        await asyncio.to_thread(self._write, sess, ("power", "0"), {"value": cmd == "on"})
+                else:
+                    raise ValueError(f"unsupported command {cmd}")
+            log.info("[samsung] %s %s", host, cmd)
+        return handler
+
+    async def _run_one(self, a: dict[str, Any]) -> None:
+        host = str(a["host"])
+        kind = str(a.get("type") or "washer")
+        name = str(a.get("name") or "Samsung Washer")
+        dev_id = self.dev_id(host)
+        self.locks[host] = asyncio.Lock()
+        handler = self._command(host)
+        REG.upsert(dev_id, kind, name, ss_washer_state({}), online=True, handler=handler)
+        once: dict[str, Any] = {}
+        last, fails, logged = None, 0, False
+        while True:
+            sess = self.sessions.get(host)
+            try:
+                if sess is None:
+                    sess, port = await asyncio.to_thread(self._open, host)
+                    self.sessions[host] = sess
+                    log.info("[samsung] %s (%s): connected on port %s", name, host, port)
+                    if not once:
+                        once = await asyncio.to_thread(self._read, sess, self.ONCE)
+                async with self.locks[host]:
+                    res = await asyncio.to_thread(self._read, sess, self.RESOURCES)
+                res.update(once)
+                if not logged:  # once, to learn this model's resources (no secrets in them)
+                    logged = True
+                    log.info("[samsung] %s resources: %s", name, _ss_short(res, 3000))
+                st = ss_washer_state(res)
+                fails = 0
+                if st != last:
+                    REG.upsert(dev_id, kind, name, st, online=True)
+                    last = st
+            except Exception as ex:  # noqa: BLE001
+                fails += 1
+                if sess is not None:
+                    try:
+                        await asyncio.to_thread(sess.close)
+                    except Exception:  # noqa: BLE001
+                        pass
+                self.sessions.pop(host, None)
+                if fails == 1 or fails % 30 == 0:
+                    log.info("[samsung] %s (%s): %s", name, host, ex)
+                if fails >= 3:  # wifi of a switched off washer sleeps: show it as off, not as broken
+                    st = ss_washer_state({})
+                    if st != last:
+                        REG.upsert(dev_id, kind, name, st, online=True)
+                        last = st
+                await asyncio.sleep(20 if fails < 10 else 60)
+                continue
+            await asyncio.sleep(self.POLL)
+
+    async def run(self) -> None:
+        if not self.appliances:
+            return
+        try:
+            import smartthings_local  # noqa: F401
+        except ImportError:
+            log.warning("[samsung] %d appliance(s) configured, but smartthings-local is not installed: run the "
+                        "installer again", len(self.appliances))
+            return
+        log.info("[samsung] %d appliance(s): %s", len(self.appliances),
+                 ", ".join(f"{a.get('type', 'washer')} {a['host']}" for a in self.appliances))
+        await asyncio.gather(*(self._run_one(a) for a in self.appliances))
+
+
+def _ss_short(v: Any, n: int = 600) -> str:
+    t = json.dumps(v, default=lambda o: o.hex() if isinstance(o, (bytes, bytearray)) else str(o))
+    return t if len(t) <= n else t[:n] + "..."
+
+
+def samsung_probe(host: str) -> int:
+    """Read-only check whether a Samsung appliance accepts a local session: finds the DTLS port, does one
+    handshake with the client certificate and reads a few state resources (never /oic/sec/*)."""
+    import cbor2
+    from smartthings_local.protocol import dtls_probe, ocf_discovery
+    from smartthings_local.protocol.auth import CertificateAuth
+    from smartthings_local.protocol.dtls_session import DtlsCoapSession
+    cert_p, key_p = samsung_cert()
+    print(f"[samsung] {host}: client certificate {cert_p}")
+    ports: list[int] = []
+    try:
+        disc = ocf_discovery.discover_ocf_secure_ports(host)
+        print(f"[samsung] OCF directory (udp 5683): {disc!r}")
+        ports = [int(x) for x in (getattr(disc, "ports", None) or []) if isinstance(x, int)]
+    except Exception as ex:  # noqa: BLE001
+        print(f"[samsung] OCF directory: {ex!r}")
+    live = dtls_probe.probe_dtls_ports(host, ports + [p for p in SS_PORTS if p not in ports])
+    print(f"[samsung] DTLS probe: outcome={live.outcome} selected={live.selected_port} "
+          f"responders={live.responder_ports}")
+    port = live.selected_port or (live.responder_ports[0] if live.responder_ports else None)
+    if not port:
+        print("[samsung] no DTLS server found (appliance off, asleep or not on this network)")
+        return 1
+    try:
+        diag = dtls_probe.diagnose_dtls_handshake(host, port, cert_path=str(cert_p), key_path=str(key_p))
+        print(f"[samsung] handshake: {diag!r}")
+    except Exception as ex:  # noqa: BLE001
+        print(f"[samsung] handshake diagnostic: {ex!r}")
+    sess = DtlsCoapSession(host, port, auth=CertificateAuth.from_files(str(cert_p), str(key_p)))
+    ok = 0
+    try:
+        sess.connect(timeout=12.0)
+        sess.start_reader()
+        for path in (["oic", "d"], ["operational", "state", "vs", "0"], ["power", "vs", "0"], ["power", "0"],
+                     ["remotectrl", "vs", "0"], ["course", "vs", "0"], ["st", "washercourse", "vs", "0"],
+                     ["washer", "vs", "0"], ["kidslock", "vs", "0"]):
+            try:
+                code, body = sess.get(path)
+                try:
+                    val = cbor2.loads(body) if body else None
+                except Exception:  # noqa: BLE001
+                    val = body
+                print(f"[samsung] GET /{'/'.join(path)}: {code} {_ss_short(val)}")
+                if str(code) in ("2.05", "69") or getattr(code, "name", "") == "CONTENT":
+                    ok += 1
+            except Exception as ex:  # noqa: BLE001
+                print(f"[samsung] GET /{'/'.join(path)}: {ex!r}")
+    except Exception as ex:  # noqa: BLE001
+        print(f"[samsung] session: {ex!r}")
+    finally:
+        try:
+            sess.close()
+        except Exception:  # noqa: BLE001
+            pass
+    print(f"[samsung] result: {ok} resource(s) read")
+    return 0 if ok else 2
+
+
 # ---------------------------------------------------------------- HTTPS for the setup page (self-signed)
 
 def _local_ips() -> list[str]:
@@ -2704,6 +3041,22 @@ async def demo_devices() -> None:
         REG.upsert(dev, dev.split("-")[1], "Demo " + dev.split("-")[1], st, True,
                    lambda c, v, d=dev, s_=st: demo_hc(d, s_, c, v))
 
+    washer = {"power": "on", "operation": "run", "job": "wash", "remainingTime": 2400,
+              "completionTime": _iso_in(2400), "progress": 35, "remoteStartAllowed": True, "course": "Cotton",
+              "courseCode": "5b"}
+
+    async def demo_washer(cmd, value):
+        if cmd in ("on", "off"):
+            washer["power"] = cmd
+        elif cmd in ("run", "start", "resume"):
+            washer["operation"] = "run"
+        elif cmd == "pause":
+            washer["operation"] = "pause"
+        elif cmd == "stop":
+            washer.update(operation="inactive", job="none", remainingTime=None, completionTime=None, progress=None)
+        REG.upsert("demo-washer", "washer", "Demo washer", washer, True, demo_washer)
+
+    await demo_washer("refresh", None)
     await demo_hc("demo-dishwasher", dish, "refresh", None)
     await demo_hc("demo-oven", oven, "refresh", None)
     t0 = time.time()
@@ -2743,7 +3096,8 @@ async def serve(args) -> None:
         save_config(cfg)
     port = int(cfg.get("port", 8787))
     sources = {"aeg": Electrolux, "fglair": FGLair, "skoda": Skoda, "irobot": IRobotCloud, "velux": VeluxCloud,
-               "buienradar": Buienradar, "homeconnect": HomeConnect}
+               "buienradar": Buienradar, "homeconnect": HomeConnect,
+               "samsung": Samsung}
     tasks: dict[str, asyncio.Task] = {}
 
     def start(section: str) -> None:
@@ -2862,7 +3216,10 @@ def main() -> None:
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--demo", action="store_true", help="fake devices, for testing the driver")
     p.add_argument("--check", action="store_true", help="test the AEG and FGLair logins, list appliances and exit")
+    p.add_argument("--samsung-probe", metavar="IP", help="check if a Samsung appliance accepts a local session")
     args = p.parse_args()
+    if args.samsung_probe:
+        sys.exit(samsung_probe(args.samsung_probe))
     setup_logging(args.verbose)
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())

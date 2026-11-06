@@ -1,0 +1,14 @@
+name: stoeckie-washer
+components:
+  - id: main
+    capabilities:
+      - id: switch
+        version: 1
+      - id: washerOperatingState
+        version: 1
+      - id: remoteControlStatus
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: Washer

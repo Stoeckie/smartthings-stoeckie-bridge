@@ -39,6 +39,7 @@ for _, id in ipairs({ "windowShade", "windowShadeLevel", "refresh", "dryerOperat
                       "silvervalley08660.airconMode", "silvervalley08660.targetTemperature",
                       "silvervalley08660.airflowDirection", "silvervalley08660.applianceProgram",
                       "silvervalley08660.cookSettings", "dishwasherOperatingState", "ovenOperatingState",
+                      "washerOperatingState",
                       "ovenSetpoint", "temperatureMeasurement", "remoteControlStatus" }) do caps[id].ID = id end
 package.loaded["st.capabilities"] = caps
 package.loaded["st.driver"] = function(name, tmpl) DRIVER = tmpl; return { run = function() end } end
@@ -476,3 +477,15 @@ def test_homeconnect_appliances(bridge):
     vals = {oven.events[i].path: oven.events[i].arg for i in range(1, len(oven.events) + 1)}
     assert vals.get("cap.silvervalley08660.applianceProgram.program") == "pizza"
     assert lua.eval("OVEN").new_profile in (None, "stoeckie-oven-v2")
+    lua.execute('''
+      for _, d in ipairs(DEVICES) do if d.parent_assigned_child_key == "demo-washer" then WASHER = d end end
+    ''')
+    washer = lua.eval("WASHER")
+    assert washer is not None
+    wpaths = [washer.events[i].path for i in range(1, len(washer.events) + 1)]
+    assert "cap.washerOperatingState.machineState.run" in wpaths
+    assert "cap.washerOperatingState.washerJobState.wash" in wpaths
+    lua.execute('DRIVER.capability_handlers.washerOperatingState.setMachineState(DRIVER_OBJ, WASHER, { args = { state = "pause" } })')
+    st = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{bridge}/stbridge/devices", timeout=5).read())
+    by = {d["id"]: d["state"] for d in st["devices"]}
+    assert by["demo-washer"]["operation"] == "pause"

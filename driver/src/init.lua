@@ -5,6 +5,7 @@
 --   dishwasher / oven (Home Connect, local) -> switch, dishwasher/ovenOperatingState, contactSensor (door),
 --                                        remoteControlStatus, oven temperature + setpoint, program list +
 --                                        start (custom applianceProgram), oven temperature + cooking time
+--   washer (Samsung, local)          -> switch, washerOperatingState, remoteControlStatus
 --   window (VELUX ACTIVE via HomeKit) -> windowShade, windowShadeLevel
 --   sensor (VELUX climate sensor)     -> temperature, humidity, CO2
 --   aircon (Fujitsu via FGLair)       -> switch, airConditionerMode (plus minHeat on units that have it, like the
@@ -69,7 +70,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-06h"
+local BUILD = "2026-11-06i"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -79,6 +80,7 @@ local windowShade = capabilities.windowShade
 local windowShadeLevel = capabilities.windowShadeLevel
 local dryerOp = capabilities.dryerOperatingState
 local dishOp = capabilities.dishwasherOperatingState
+local washerOp = capabilities.washerOperatingState
 local ovenOp = capabilities.ovenOperatingState
 local ovenSetpoint = capabilities.ovenSetpoint
 local remoteControl = capabilities.remoteControlStatus
@@ -99,8 +101,10 @@ local cookSet = capabilities["silvervalley08660.cookSettings"]
 local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor = "stoeckie-climate",
                   aircon = "stoeckie-aircon-v3", car = "stoeckie-car-v2",
                   velux_lock = "stoeckie-velux-lock", rain = "stoeckie-rain-v4",
-                  rainradar = "stoeckie-rainradar", dishwasher = "stoeckie-dishwasher-v2", oven = "stoeckie-oven-v2" }
-local MANUFACTURER = { dryer = "AEG", aircon = "Fujitsu", car = "Skoda", dishwasher = "Home Connect", oven = "Home Connect" }
+                  rainradar = "stoeckie-rainradar", dishwasher = "stoeckie-dishwasher-v2", oven = "stoeckie-oven-v2",
+                  washer = "stoeckie-washer" }
+local MANUFACTURER = { dryer = "AEG", aircon = "Fujitsu", car = "Skoda", dishwasher = "Home Connect", oven = "Home Connect",
+                       washer = "Samsung" }
 
 -- bridge value <-> SmartThings value
 local AC_MODE_TO_ST = { auto = "auto", cool = "cool", dry = "dry", fan = "fanOnly", heat = "heat", minheat = "minHeat" }
@@ -408,6 +412,22 @@ local function emit_dishwasher(dev, s)
   hc_program(dev, s)
 end
 
+-- Samsung washer, local via the bridge (OCF over CoAP-DTLS)
+local WASHER_JOBS = { none = true, wash = true, rinse = true, spin = true, finish = true, preWash = true,
+  weightSensing = true, delayWash = true, airWash = true, drying = true, cooling = true, wrinklePrevent = true,
+  aIWash = true, aIRinse = true, aISpin = true, freezeProtection = true }
+local function emit_washer(dev, s)
+  try_emit(dev, function() return s.power == "on" and capabilities.switch.switch.on() or capabilities.switch.switch.off() end)
+  try_emit(dev, function() return remoteControl.remoteControlEnabled(s.remoteStartAllowed and "true" or "false") end)
+  local op = s.operation or "inactive"
+  local machine = op == "run" and "run" or (op == "pause" and "pause" or "stop")
+  local job = WASHER_JOBS[s.job or ""] and s.job or "none"
+  try_emit(dev, function() return washerOp.machineState[machine]() end)
+  try_emit(dev, function() return washerOp.washerJobState[job]() end)
+  if s.progress and washerOp.progress then try_emit(dev, function() return washerOp.progress(math.floor(s.progress)) end) end
+  hc_completion(dev, s, washerOp)
+end
+
 local function emit_oven(dev, s)
   hc_common(dev, s)
   local op = s.operation or "inactive"
@@ -431,7 +451,7 @@ end
 
 local EMIT = { dryer = emit_dryer, window = emit_window, sensor = emit_sensor, aircon = emit_aircon, car = emit_car,
                velux_lock = emit_velux_lock, rain = emit_rain,
-               rainradar = emit_rainradar, dishwasher = emit_dishwasher, oven = emit_oven }
+               rainradar = emit_rainradar, dishwasher = emit_dishwasher, oven = emit_oven, washer = emit_washer }
 
 -- polling -------------------------------------------------------------------------
 
@@ -695,6 +715,9 @@ local function device_init(driver, device)
   if device:supports_capability(ovenOp) then
     device:emit_event(ovenOp.supportedMachineStates({ "ready", "running", "paused" }, { visibility = { displayed = false } }))
   end
+  if device:supports_capability(washerOp) then
+    device:emit_event(washerOp.supportedMachineStates({ "run", "pause", "stop" }, { visibility = { displayed = false } }))
+  end
   if device:supports_capability(dryerOp) then
     device:emit_event(dryerOp.supportedMachineStates({ "run", "pause", "stop" }, { visibility = { displayed = false } }))
   end
@@ -897,6 +920,9 @@ local driver = Driver("stoeckie-bridge-local", {
       [cookSet.commands.setDuration.NAME] = function(driver, device, cmd)
         send(driver, device, "duration", tonumber(cmd.args.duration))
       end,
+    },
+    [washerOp.ID] = {
+      [washerOp.commands.setMachineState.NAME] = handle_hc_machine,
     },
     [dryerOp.ID] = {
       [dryerOp.commands.setMachineState.NAME] = handle_machine_state,

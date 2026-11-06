@@ -181,6 +181,13 @@ try {
         Copy-Item -Path ($hc | ForEach-Object { $_.FullName }) -Destination "$remoteDir\homeconnect" -ToSession $session -Force
         Write-Host "Home Connect profielen gekopieerd: $($hc.Count)"
     }
+    # Samsung appliances (samsung\appliances.json: addresses only; the client certificate is made on the bridge pc)
+    $ss = Join-Path $dir "samsung\appliances.json"
+    if (Test-Path $ss) {
+        Invoke-Command -Session $session -ArgumentList "$remoteDir\samsung" { param($p) New-Item -ItemType Directory -Force -Path $p | Out-Null }
+        Copy-Item -Path $ss -Destination "$remoteDir\samsung" -ToSession $session -Force
+        Write-Host "Samsung apparaten gekopieerd"
+    }
     Write-Host "Packages installeren op $Target (paar minuten)..."
     Invoke-Command -Session $session -ArgumentList $remoteDir, $py, $taskName {
         param($d, $py, $task)

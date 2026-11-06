@@ -19,3 +19,5 @@ bridge/remote-ready.txt
 bridge/*-log.txt
 remote-check.txt
 bridge/homeconnect/
+bridge/samsung/
+bridge/data/samsung/
