@@ -11,6 +11,7 @@ One small bridge brings cloud-only appliances into SmartThings:
 | **Rain radar** (optional) | rain now and the next 2 hours at your address with a radius: rain or dry, mm/h, minutes until rain, how long it rains. Buienradar in NL/BE, Open-Meteo worldwide | |
 | **Home Connect** (Bosch, Siemens, Neff) dishwasher and oven, local (optional) | on/off, running, remaining time, progress, door, oven temperature; choose and start programs, oven temperature and cooking time; stop, pause, resume. No cloud after setup | [below](#home-connect-bosch--siemens--neff-local) |
 | **Samsung** washer, local (optional, experimental) | on/off, running, phase, remaining time, progress; start, pause, stop. No cloud | [below](#samsung-washer-local-experimental) |
+| **Samsung TV** | not through the bridge: use the Edge driver [Samsung TV (local)](https://github.com/Stoeckie/smartthings-samsung-tv-local), which runs on the hub itself (power, volume, mute, input, channel) | [smartthings-samsung-tv-local](https://github.com/Stoeckie/smartthings-samsung-tv-local) |
 | **iRobot** favorites (optional) | favorite names and rooms for the [iRobot Roomba (local)](https://github.com/Stoeckie/smartthings-irobot-roomba-local) driver | |
 
 **This repository is the only place with the code.** The brand pages above explain one brand each and point here. Use only what you need: a source you do not set up is skipped.
@@ -129,7 +130,7 @@ Samsung appliances normally only work through the Samsung cloud. Many of them al
 2. Create `samsung\appliances.json` next to `config.json` (Windows: `C:\StoeckieBridge\samsung`, Docker: the data volume): `[{"host": "192.168.1.60", "type": "washer", "name": "Washer"}]`
 3. Restart the bridge. Check first with `python stoeckie_bridge.py --samsung-probe 192.168.1.60` (read only): it finds the port, makes one session and reads a few state values.
 
-The bridge makes a client certificate once (in the `samsung` folder; it never leaves that folder). SmartThings gets: on/off, running/paused/stopped, cycle phase (wash, rinse, spin, finish), remaining time, progress, remote control; start (needs remote control switched on at the washer), pause, stop. Choosing a course is not in yet. A washer that is switched off usually turns its wifi off too: it then shows as off.
+The bridge makes a client certificate once (in the `samsung` folder; it never leaves that folder). SmartThings gets: on/off, running/paused/stopped, cycle phase (wash, rinse, spin, finish), remaining time, progress, remote control; choose a course (the courses your washer reports), start (needs remote control switched on at the washer), pause, stop. The washer answers slowly under load, so state is read every 4 s while it runs and less often otherwise. A washer that is switched off usually turns its wifi off too: it then shows as off.
 
 ## VELUX ACTIVE departure mode
 
