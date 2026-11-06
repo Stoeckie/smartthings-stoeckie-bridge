@@ -65,7 +65,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-06b"
+VERSION = "2026-11-06c"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -2197,7 +2197,8 @@ async def demo_devices() -> None:
     ac = {"power": "on", "mode": "heat", "setpoint": 21.0, "temperature": 19.5, "outdoorTemperature": 8.0,
           "fan": "auto", "swing": "off", "supportedModes": ["auto", "cool", "dry", "fan", "heat"],
           "supportedFans": ["quiet", "low", "medium", "high", "auto"],
-          "supportedSwings": ["off", "vertical"], "setpointRange": [16.0, 30.0], "model": "DEMO"}
+          "supportedSwings": ["off", "vertical"], "setpointRange": [16.0, 30.0], "model": "DEMO",
+          "minHeat": False}
 
     async def aircon(cmd, value):
         if cmd == "on":
@@ -2211,6 +2212,8 @@ async def demo_devices() -> None:
             ac["setpoint"] = float(value)
         elif cmd in ("fan", "swing"):
             ac[cmd] = str(value)
+        elif cmd == "minheat":
+            ac["minHeat"] = str(value).lower() in ("on", "1", "true")
         REG.upsert("demo-aircon", "aircon", "Demo air conditioner", ac, True, aircon)
 
     await win("refresh", None)

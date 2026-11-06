@@ -5,7 +5,7 @@ One small bridge brings cloud-only appliances into SmartThings:
 | Source | What you get | Brand page |
 |---|---|---|
 | **AEG / Electrolux** dryer (official Electrolux Group Developer API) | state, job, remaining time, door, finished; start, pause, stop | [smartthings-aeg-bridge](https://github.com/Stoeckie/smartthings-aeg-bridge) |
-| **Fujitsu FGLair** air conditioners | on/off, mode, setpoint, fan, swing, room and outdoor temperature | [smartthings-fujitsu-fglair](https://github.com/Stoeckie/smartthings-fujitsu-fglair) |
+| **Fujitsu FGLair** air conditioners | on/off, mode, setpoint, fan, swing, room and outdoor temperature, Minimum Heat (extra switch on units that have it) | [smartthings-fujitsu-fglair](https://github.com/Stoeckie/smartthings-fujitsu-fglair) |
 | **Škoda** cars (official MyŠkoda public API) | battery, charging on/off and power, charging cable, climate, at home, doors | [smartthings-skoda-bridge](https://github.com/Stoeckie/smartthings-skoda-bridge) |
 | **VELUX ACTIVE** departure mode (optional) | lock and unlock (departure mode: all windows and blinds blocked); rain sensor as its own device | windows: [VELUX ACTIVE (HomeKit local)](https://github.com/Stoeckie/smartthings-velux-active-local) |
 | **Rain radar** (optional) | rain now and the next 2 hours at your address with a radius: rain or dry, mm/h, minutes until rain, how long it rains. Buienradar in NL/BE, Open-Meteo worldwide | |
@@ -153,7 +153,7 @@ Put the bridge pc in the same network (VLAN) as the hub and the other IoT device
 
 ## Unofficial parts
 
-* FGLair uses [ayla-iot-unofficial](https://pypi.org/project/ayla-iot-unofficial/) (the library of the Home Assistant FGLair integration). Each poll only reads the cloud values; the bridge asks the wifi adapter for a fresh room temperature (the library's "refresh" write) at most every 15 minutes, because doing that every minute kept the adapter busy and the FGLair app then could not change the unit.
+* FGLair uses [ayla-iot-unofficial](https://pypi.org/project/ayla-iot-unofficial/) (the library of the Home Assistant FGLair integration). Each poll only reads the cloud values; the bridge asks the wifi adapter for a fresh room temperature (the library's "refresh" write) at most every 15 minutes, because doing that every minute kept the adapter busy and the FGLair app then could not change the unit. Minimum Heat uses the `min_heat` property; the device only gets the extra "Minimum Heat" switch when the unit reports that property.
 * iRobot favorites use [roombapy-prime](https://github.com/johnnyh1975/roombapy-prime); iRobot limits logins per account.
 * VELUX departure mode uses the VELUX ACTIVE app login, as documented by [ha-velux-active](https://github.com/Niek/ha-velux-active) (MIT).
 * Electrolux and Škoda use the manufacturers' official APIs.

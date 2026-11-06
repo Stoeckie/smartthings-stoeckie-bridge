@@ -4,7 +4,8 @@
 --   dryer  (AEG via Electrolux API)  -> dryerOperatingState, remoteControlStatus, contactSensor (door)
 --   window (VELUX ACTIVE via HomeKit) -> windowShade, windowShadeLevel
 --   sensor (VELUX climate sensor)     -> temperature, humidity, CO2
---   aircon (Fujitsu via FGLair)       -> switch, airConditionerMode, setpoint, fan, swing, indoor/outdoor temp
+--   aircon (Fujitsu via FGLair)       -> switch, airConditionerMode, setpoint, fan, swing, indoor/outdoor temp,
+--                                        Minimum Heat switch (component minHeat) on units that have it
 --   car    (Škoda public API)         -> battery, charging switch + power, at home, plug, climate, doors
 --   velux_lock (VELUX departure mode) -> lock (locked = away: all windows and blinds blocked)
 --   rain   (VELUX gateway rain sensor) -> rainSensor (detected = raining)
@@ -65,7 +66,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-06a"
+local BUILD = "2026-11-06b"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -213,6 +214,8 @@ local function emit_list(dev, key, list, make)
   try_emit(dev, function() return make(list, { visibility = { displayed = false } }) end)
 end
 
+local sync_profile -- defined with the polling code below
+
 local function emit_aircon(dev, s)
   try_emit(dev, function() return s.power == "off" and capabilities.switch.switch.off() or capabilities.switch.switch.on() end)
   local m = AC_MODE_TO_ST[s.mode or ""]
@@ -247,6 +250,20 @@ local function emit_aircon(dev, s)
   local sw = SWING_TO_ST[s.swing or ""]
   if sw then try_emit(dev, function() return oscillation.fanOscillationMode(sw) end) end
   emit_list(dev, "acSwings", map_list(s.supportedSwings, SWING_TO_ST), oscillation.supportedFanOscillationModes)
+  -- Minimum Heat (frost protection, about 10 C): only units that report it get the extra switch
+  if s.minHeat ~= nil then
+    if not dev:get_field("minheat") then
+      dev:set_field("minheat", true, { persist = true })
+      sync_profile(dev)
+    end
+    local c = dev.profile and dev.profile.components and dev.profile.components.minHeat
+    if c then
+      local ok, err = pcall(function()
+        dev:emit_component_event(c, s.minHeat and capabilities.switch.switch.on() or capabilities.switch.switch.off())
+      end)
+      if not ok then log.warn("[stbridge] " .. dev.label .. " minHeat: " .. tostring(err)) end
+    end
+  end
 end
 
 local function comp_emit(dev, id, make)
@@ -348,12 +365,13 @@ local function child_profile(key, device)
   if key:match("^velux%-rain%-") or key == "demo-rain" then return PROFILE.rain end
   if key:match("^velux%-") or key == "demo-velux" then return PROFILE.velux_lock end
   if key:match("^skoda%-") or key == "demo-car" then return PROFILE.car .. CAR_GRAPH[graph_mode(device)] end
+  if key:match("^fglair%-") or key == "demo-aircon" then return PROFILE.aircon .. (device:get_field("minheat") and "-mh" or "") end
   if key == "buienradar" or key == "demo-rainradar" then
     return PROFILE.rainradar .. (rain_simple(device) and "-simple" or "")
   end
 end
 
-local function sync_profile(device)
+sync_profile = function(device)
   local want = child_profile(device.parent_assigned_child_key or "", device)
   if want and device:get_field("profile") ~= want then
     device:try_update_metadata({ profile = want })
@@ -529,10 +547,14 @@ local function handle_machine_state(driver, device, cmd)
 end
 
 local function handle_switch_on(driver, device, cmd)
-  send(driver, device, (cmd and cmd.component == "climate") and "climate_on" or "on")
+  local c = cmd and cmd.component
+  if c == "minHeat" then return send(driver, device, "minheat", "on") end
+  send(driver, device, c == "climate" and "climate_on" or "on")
 end
 local function handle_switch_off(driver, device, cmd)
-  send(driver, device, (cmd and cmd.component == "climate") and "climate_off" or "off")
+  local c = cmd and cmd.component
+  if c == "minHeat" then return send(driver, device, "minheat", "off") end
+  send(driver, device, c == "climate" and "climate_off" or "off")
 end
 -- a refused lock command (e.g. unlock without the gateway key): show the real state again instead of a spinner
 local function lock_cmd(driver, device, cmd)
