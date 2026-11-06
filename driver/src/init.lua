@@ -66,7 +66,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-06e"
+local BUILD = "2026-11-06f"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -587,6 +587,16 @@ end
 
 -- lifecycle -----------------------------------------------------------------------
 
+-- Buienradar location settings live on the Buienradar device; the bridge stores them in its config. Pushed on
+-- every change and again at every driver start, so a change made while the bridge was down is not lost.
+local function push_rain_settings(driver, device)
+  local p = device.preferences or {}
+  if p.postcode == nil and p.location == nil and p.address == nil then return end
+  send(driver, device, "settings", { postcode = p.postcode or "", housenumber = p.houseNumber or "",
+    address = p.address or "", location = p.location or "", radius_m = p.radiusMeters,
+    threshold = p.rainThreshold, provider = p.provider or "auto" })
+end
+
 local function device_init(driver, device)
   if is_parent(device) then
     state[device.id] = state[device.id] or {}
@@ -602,6 +612,9 @@ local function device_init(driver, device)
   end
   -- profile changed since the device was made (new category/icon, battery graph option): switch it once
   sync_profile(device)
+  if key == "buienradar" or key == "demo-rainradar" then
+    device.thread:call_with_delay(30, function() pcall(push_rain_settings, driver, device) end)
+  end
   log.debug("[stbridge] init child " .. key)
 end
 
@@ -650,11 +663,7 @@ local function info_changed(driver, device, event, args)
   local rkeys = { "postcode", "houseNumber", "address", "location", "radiusMeters", "rainThreshold", "provider" }
   local rchanged = false
   for _, k in ipairs(rkeys) do if p[k] ~= nil and p[k] ~= old[k] then rchanged = true end end
-  if rchanged then
-    send(driver, device, "settings", { postcode = p.postcode or "", housenumber = p.houseNumber or "",
-      address = p.address or "", location = p.location or "", radius_m = p.radiusMeters,
-      threshold = p.rainThreshold, provider = p.provider or "auto" })
-  end
+  if rchanged then push_rain_settings(driver, device) end
 end
 
 local function device_removed(driver, device)
