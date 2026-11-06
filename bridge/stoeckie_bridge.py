@@ -65,7 +65,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-06d"
+VERSION = "2026-11-06e"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -1165,9 +1165,9 @@ class VeluxCloud:
         state = {"locked": bool(gw.get("locked")), "locking": bool(gw.get("locking")), "busy": bool(gw.get("busy")),
                  "canUnlock": bool(cfg.get("hash_sign_key") and cfg.get("sign_key_id")),
                  "pairing": VELUX_PAIR["state"]}
-        REG.upsert("velux-" + self.home["gateway"], "velux_lock", "VELUX vertrekstand", state, True, self._command())
+        REG.upsert("velux-" + self.home["gateway"], "velux_lock", "VELUX departure mode", state, True, self._command())
         if "is_raining" in gw:  # the gateway's rain sensor as its own device
-            REG.upsert("velux-rain-" + self.home["gateway"], "rain", "VELUX regensensor",
+            REG.upsert("velux-rain-" + self.home["gateway"], "rain", "VELUX rain sensor",
                        {"raining": bool(gw.get("is_raining"))}, True, self._refresh_only())
         log.debug("[velux] locked %s, raining %s", state["locked"], gw.get("is_raining"))
 
@@ -1441,8 +1441,8 @@ def parse_raintext(text: str) -> list[float]:
     return out
 
 
-def rain_summary(rates: list[float], threshold: float = RAIN_THRESHOLD, lang: str = "nl") -> dict[str, Any]:
-    """Now, minutes until rain, how long it rains, intensity class and a short summary (Dutch or English)."""
+def rain_summary(rates: list[float], threshold: float = RAIN_THRESHOLD, lang: str = "en") -> dict[str, Any]:
+    """Now, minutes until rain, how long it rains, intensity class and a short summary (English)."""
     if not rates:
         return {}
     wet = [r >= threshold for r in rates]
@@ -1475,20 +1475,13 @@ def rain_summary(rates: list[float], threshold: float = RAIN_THRESHOLD, lang: st
     if intensity == "none" and until <= 15:
         intensity = "possiblePrecipitation"
     more = "+" if start is not None and start * 5 + lasts >= horizon else ""
-    if lang == "nl":
-        if wet[0]:
-            text = f"Regent nu ({now:g} mm/u), nog {lasts}{more} min"
-        elif start is not None:
-            text = f"Regen over {until} min, {lasts}{more} min lang, max {peak:g} mm/u"
-        else:
-            text = f"Droog, geen regen verwacht ({horizon // 60} uur)"
+    # Always English: device texts are not translated by the SmartThings app, so one language for everyone.
+    if wet[0]:
+        text = f"Raining now ({now:g} mm/h), {lasts}{more} more min"
+    elif start is not None:
+        text = f"Rain in {until} min, for {lasts}{more} min, up to {peak:g} mm/h"
     else:
-        if wet[0]:
-            text = f"Raining now ({now:g} mm/h), {lasts}{more} more min"
-        elif start is not None:
-            text = f"Rain in {until} min, for {lasts}{more} min, up to {peak:g} mm/h"
-        else:
-            text = f"Dry, no rain expected ({horizon // 60} h)"
+        text = f"Dry, no rain expected ({horizon // 60} h)"
     return {"raining": bool(wet[0]), "rainRate": round(now, 2), "minutesUntilRain": until, "minutesOfRain": lasts,
             "peakRate": round(peak, 2), "totalMm": total, "intensity": intensity, "summary": text,
             "horizonMinutes": horizon}
@@ -1575,8 +1568,7 @@ class Buienradar:
             raise RuntimeError(f"no data from {provider}")
         n = min(len(s) for s in series)
         rates = [max(s[i] for s in series) for i in range(n)]  # heaviest rain anywhere in the radius
-        lang = "nl" if in_benelux(lat, lon) else "en"
-        state = rain_summary(rates, float(self.b.get("threshold") or RAIN_THRESHOLD), lang)
+        state = rain_summary(rates, float(self.b.get("threshold") or RAIN_THRESHOLD))
         state.update(points=len(series), provider=provider, **self._settings_state())
         name = "Buienradar" if provider == "buienradar" else "Rain radar"
         REG.upsert("buienradar", "rainradar", name, state, True, self._command())
@@ -2207,7 +2199,7 @@ async def demo_devices() -> None:
 
     async def win(cmd, value):
         pos["v"] = {"open": 100, "close": 0}.get(cmd, int(value or 0) if cmd == "level" else pos["v"])
-        REG.upsert("demo-window", "window", "Demo dakraam", {"position": pos["v"], "target": pos["v"],
+        REG.upsert("demo-window", "window", "Demo roof window", {"position": pos["v"], "target": pos["v"],
                                                              "positionState": "stopped"})
 
     async def dry(cmd, value):
@@ -2256,20 +2248,20 @@ async def demo_devices() -> None:
             car["climate"] = "ON"
         elif cmd == "climate_off":
             car["climate"] = "OFF"
-        REG.upsert("demo-car", "car", "Demo auto", car, True, demo_car)
+        REG.upsert("demo-car", "car", "Demo car", car, True, demo_car)
 
     await demo_car("refresh", None)
     velux = {"locked": True, "canUnlock": True}
-    REG.upsert("demo-rain", "rain", "Demo regensensor", {"raining": False}, True, dry)
+    REG.upsert("demo-rain", "rain", "Demo rain sensor", {"raining": False}, True, dry)
 
     async def demo_velux(cmd, value):
         if cmd in ("lock", "unlock"):
             velux["locked"] = cmd == "lock"
-        REG.upsert("demo-velux", "velux_lock", "Demo VELUX vertrekstand", velux, True, demo_velux)
+        REG.upsert("demo-velux", "velux_lock", "Demo VELUX departure mode", velux, True, demo_velux)
 
     await demo_velux("refresh", None)
     rain = rain_summary([0.0] * 4 + [0.5, 1.2, 0.8] + [0.0] * 17)
-    REG.upsert("demo-rainradar", "rainradar", "Demo Buienradar", rain, True, dry)
+    REG.upsert("demo-rainradar", "rainradar", "Demo rain radar", rain, True, dry)
     t0 = time.time()
     while True:
         el = int(time.time() - t0) % 180

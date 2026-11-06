@@ -16,13 +16,13 @@ def test_parse_and_summary():
     assert rates == [0.0, 0.1, 1.0, 10.0, 0.0]
     s = sb.rain_summary(rates)
     assert (s["raining"], s["minutesUntilRain"], s["minutesOfRain"], s["peakRate"]) == (False, 5, 15, 10.0)
-    assert s["intensity"] == "possiblePrecipitation" and s["summary"].startswith("Regen over 5 min")
+    assert s["intensity"] == "possiblePrecipitation" and s["summary"].startswith("Rain in 5 min")
     s = sb.rain_summary([2.0, 3.0, 0.0])
     assert (s["raining"], s["minutesUntilRain"], s["minutesOfRain"], s["intensity"]) == (True, 0, 10, "light")
-    assert s["summary"].startswith("Regent nu")
+    assert s["summary"].startswith("Raining now")
     s = sb.rain_summary([0.0] * 24)
     assert (s["raining"], s["minutesUntilRain"], s["minutesOfRain"]) == (False, 999, 0)
-    assert s["summary"] == "Droog, geen regen verwacht (2 uur)"
+    assert s["summary"] == "Dry, no rain expected (2 h)"
     s = sb.rain_summary([0.0] * 20 + [1.0] * 4)
     assert s["minutesOfRain"] == 20 and "20+ min" in s["summary"]  # still raining at the end of the forecast
 

@@ -66,7 +66,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-06c"
+local BUILD = "2026-11-06d"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -81,9 +81,13 @@ local acMode = capabilities.airConditionerMode
 local acFan = capabilities.airConditionerFanMode
 local oscillation = capabilities.fanOscillationMode
 local coolSetpoint = capabilities.thermostatCoolingSetpoint
+-- custom capabilities with English and Dutch labels: mode list with Minimum Heat, and "Set temperature"
+-- (the standard cooling setpoint is called "Cooling setpoint" in the app, also in heat mode)
+local acModeX = capabilities["silvervalley08660.airconMode"]
+local targetTemp = capabilities["silvervalley08660.targetTemperature"]
 
 local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor = "stoeckie-climate",
-                  aircon = "stoeckie-aircon", car = "stoeckie-car-v2",
+                  aircon = "stoeckie-aircon-v2", car = "stoeckie-car-v2",
                   velux_lock = "stoeckie-velux-lock", rain = "stoeckie-rain-v4",
                   rainradar = "stoeckie-rainradar" }
 local MANUFACTURER = { dryer = "AEG", aircon = "Fujitsu", car = "Skoda" }
@@ -220,10 +224,16 @@ local sync_profile -- defined with the polling code below
 local function emit_aircon(dev, s)
   try_emit(dev, function() return s.power == "off" and capabilities.switch.switch.off() or capabilities.switch.switch.on() end)
   local m = AC_MODE_TO_ST[s.mode or ""]
-  if m then try_emit(dev, function() return acMode.airConditionerMode(m) end) end
-  emit_list(dev, "acModes", map_list(s.supportedModes, AC_MODE_TO_ST), acMode.supportedAcModes)
+  if m then
+    try_emit(dev, function() return acMode.airConditionerMode(m) end)
+    try_emit(dev, function() return acModeX.mode(m) end)
+  end
+  local modes = map_list(s.supportedModes, AC_MODE_TO_ST)
+  emit_list(dev, "acModes", modes, acMode.supportedAcModes)
+  emit_list(dev, "acModesX", modes, acModeX.supportedModes)
   if s.setpoint then
     try_emit(dev, function() return coolSetpoint.coolingSetpoint({ value = tonumber(s.setpoint), unit = "C" }) end)
+    try_emit(dev, function() return targetTemp.temperature({ value = tonumber(s.setpoint), unit = "C" }) end)
   end
   local r = s.setpointRange
   if type(r) == "table" and r[1] and r[2] then
@@ -352,7 +362,8 @@ local function child_profile(key, device)
   if key:match("^velux%-rain%-") or key == "demo-rain" then return PROFILE.rain end
   if key:match("^velux%-") or key == "demo-velux" then return PROFILE.velux_lock end
   if key:match("^skoda%-") or key == "demo-car" then return PROFILE.car .. CAR_GRAPH[graph_mode(device)] end
-  -- Minimum Heat is a mode (airConditionerMode minHeat); 2026-11-06b had a separate switch in profile -mh
+  -- Minimum Heat is a mode (airConditionerMode minHeat); 2026-11-06b had a separate switch in profile -mh,
+  -- -v2 adds the custom mode list and "Set temperature" (custom presentation hides the standard ones)
   if key:match("^fglair%-") or key == "demo-aircon" then return PROFILE.aircon end
   if key == "buienradar" or key == "demo-rainradar" then
     return PROFILE.rainradar .. (rain_simple(device) and "-simple" or "")
@@ -557,7 +568,7 @@ local function handle_ac_mode(driver, device, cmd)
   if m then send(driver, device, "mode", m) else log.warn("[stbridge] unsupported AC mode " .. tostring(cmd.args.mode)) end
 end
 local function handle_setpoint(driver, device, cmd)
-  send(driver, device, "setpoint", tonumber(cmd.args.setpoint))
+  send(driver, device, "setpoint", tonumber(cmd.args.setpoint or cmd.args.temperature))
 end
 local function handle_fan_mode(driver, device, cmd) send(driver, device, "fan", cmd.args.fanMode) end
 local function handle_oscillation(driver, device, cmd)
@@ -772,6 +783,12 @@ local driver = Driver("stoeckie-bridge-local", {
     },
     [coolSetpoint.ID] = {
       [coolSetpoint.commands.setCoolingSetpoint.NAME] = handle_setpoint,
+    },
+    [acModeX.ID] = {
+      [acModeX.commands.setMode.NAME] = handle_ac_mode,
+    },
+    [targetTemp.ID] = {
+      [targetTemp.commands.setTemperature.NAME] = handle_setpoint,
     },
     [acFan.ID] = {
       [acFan.commands.setFanMode.NAME] = handle_fan_mode,
