@@ -70,7 +70,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-06m"
+local BUILD = "2026-11-06n"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -279,6 +279,14 @@ local function emit_aircon(dev, s)
   if s.temperature then
     try_emit(dev, function() return capabilities.temperatureMeasurement.temperature({ value = tonumber(s.temperature), unit = "C" }) end)
   end
+  -- an outdoor temperature that stays empty: switch to the profile without it (and back when it shows up)
+  local no_out = s.outdoorTemperature == nil
+  local n = no_out and ((dev:get_field("noOutCount") or 0) + 1) or 0
+  dev:set_field("noOutCount", n)
+  if (n >= 3) ~= (dev:get_field("noOutdoor") == true) and (n >= 3 or not no_out) then
+    dev:set_field("noOutdoor", n >= 3, { persist = true })
+    sync_profile(dev)
+  end
   if s.outdoorTemperature and dev.profile.components.outdoor then
     local t = tonumber(s.outdoorTemperature)
     local ok, err = pcall(function()
@@ -475,7 +483,10 @@ local function child_profile(key, device)
   -- Minimum Heat is a mode (airConditionerMode minHeat); 2026-11-06b had a separate switch in profile -mh,
   -- -v2 adds the custom mode list and "Set temperature" (custom presentation hides the standard ones),
   -- -v3 the airflow direction (louver position)
-  if key:match("^fglair%-") or key == "demo-aircon" then return PROFILE.aircon end
+  -- -in: units without an outdoor temperature (an empty outdoor value made the app warn about missing status)
+  if key:match("^fglair%-") or key == "demo-aircon" then
+    return PROFILE.aircon .. (device:get_field("noOutdoor") and "-in" or "")
+  end
   if key == "buienradar" or key == "demo-rainradar" then
     return PROFILE.rainradar .. (rain_simple(device) and "-simple" or "")
   end
@@ -490,7 +501,7 @@ end
 
 -- a capability that only the newest profile of a kind has: when the device lacks it, the switch did not happen
 local function profile_marker(want)
-  if want == PROFILE.aircon then return airflowDir end
+  if want:sub(1, #PROFILE.aircon) == PROFILE.aircon then return airflowDir end
   if want == PROFILE.washer then return washerProg end
   if want == PROFILE.dishwasher then return hcProg end
   if want == PROFILE.oven then return cookSet end

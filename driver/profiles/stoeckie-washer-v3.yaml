@@ -15,5 +15,5 @@ components:
     categories:
       - name: Washer
 metadata:
-  vid: WASHERVID
+  vid: 6a9cf782-75f1-3ec1-a85e-50f5db25f25b
   mnmn: SmartThingsCommunity
