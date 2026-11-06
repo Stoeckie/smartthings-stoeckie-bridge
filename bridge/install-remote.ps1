@@ -5,7 +5,7 @@
 # What it does:
 #  - asks for the target IP and an administrator login of the target; the login can be saved here, encrypted for your
 #    Windows account (remote-cred.xml, Windows DPAPI), so later updates run without questions: update-remote.bat
-#  - installs Python 3.13 on the target when missing and keeps it on $PyVersion (Home Connect needs 3.13 or newer), copies the bridge to C:\StoeckieBridge, venv + packages
+#  - installs Python 3.14 on the target when missing and keeps it on $PyVersion (Python 3.13 gets no Windows security releases any more), copies the bridge to C:\StoeckieBridge, venv + packages
 #  - stops the bridge here and copies config.json (keys + bridge id, so SmartThings keeps the same devices)
 #  - firewall rule 8787, scheduled task at startup as LOCAL SERVICE (no admin rights, runs without anyone logged on)
 #  - checks from here that the target answers on port 8787; then disables the bridge here (or restarts it on failure)
@@ -15,7 +15,7 @@ $ErrorActionPreference = "Stop"
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $remoteDir = "C:\StoeckieBridge"
 $taskName = "Stoeckie Bridge"
-$PyVersion = "3.13.17"   # last 3.13 release with a Windows installer (3.13.18+ are source only); next step is Python 3.14
+$PyVersion = "3.14.10"   # newest 3.14 release with a Windows installer; the target is kept on it (security fixes)
 
 $credFile = Join-Path $dir "remote-cred.xml"      # saved login, encrypted for this Windows user (DPAPI)
 $prefsFile = Join-Path $dir "remote-target.json"   # target IP and the answers of the last run
@@ -140,10 +140,10 @@ try {
     $py = Invoke-Command -Session $session -ArgumentList $info.Arch, $PyVersion, $taskName {
         param($arch, $want, $task)
         $ErrorActionPreference = "Continue"
-        $full = Join-Path $env:ProgramFiles "Python313\python.exe"
+        $full = Join-Path $env:ProgramFiles "Python314\python.exe"
         $wantMicro = [int]($want.Split(".")[2])
         if (Test-Path $full) {
-            # installed by us: keep it on the newest 3.13 patch release (security fixes)
+            # installed by us: keep it on the newest 3.14 patch release (security fixes)
             $micro = & $full -c "import sys; print(sys.version_info[2])" 2>$null
             if ([int]$micro -ge $wantMicro) { return $full }
         } else {
@@ -151,7 +151,7 @@ try {
             foreach ($c in @("py", "python")) {
                 try {
                     if ($c -eq "py") { $r = & py -3 -c $probe 2>$null } else { $r = & python -c $probe 2>$null }
-                    if ($LASTEXITCODE -eq 0 -and @($r).Count -ge 2 -and [int]$r[0] -ge 13) { return "$($r[1])".Trim() }
+                    if ($LASTEXITCODE -eq 0 -and @($r).Count -ge 2 -and [int]$r[0] -ge 14) { return "$($r[1])".Trim() }
                 } catch {}
             }
         }
@@ -212,10 +212,18 @@ try {
         param($d, $py, $task)
         $ErrorActionPreference = "Continue"
         $vpy = "$d\venv\Scripts\python.exe"
-        # a venv from an older Python (3.12) is made again with the new one; stop the bridge first (files in use)
+        $want = & $py -c "import sys; print(sys.version_info[1])" 2>$null
+        # a venv from another Python minor version is made again: first next to the old one (venv-new), so a failed
+        # package install leaves the running bridge untouched; then stop the bridge and swap the folders
         if (Test-Path $vpy) {
             $vv = & $vpy -c "import sys; print(sys.version_info[1])" 2>$null
-            if ([int]$vv -lt 13) {
+            if ([int]$vv -ne [int]$want) {
+                $new = "$d\venv-new"
+                if (Test-Path $new) { Remove-Item -Recurse -Force $new }
+                & $py -m venv $new 2>&1 | Out-Null
+                if (-not (Test-Path "$new\Scripts\python.exe")) { throw "venv-new aanmaken mislukt" }
+                $o = & "$new\Scripts\python.exe" -m pip install --require-hashes -r "$d\requirements.txt" --quiet 2>&1 | Out-String
+                if ($LASTEXITCODE -ne 0) { Remove-Item -Recurse -Force $new -ErrorAction SilentlyContinue; throw "pip install (nieuwe Python) mislukt: $o" }
                 Stop-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
                 Get-CimInstance Win32_Process -Filter "Name like 'python%'" |
                     Where-Object { $_.CommandLine -like "*stoeckie_bridge.py*" } |
@@ -223,6 +231,7 @@ try {
                 Start-Sleep 2
                 Remove-Item -Recurse -Force "$d\venv"
                 if (Test-Path "$d\venv") { throw "oude venv kon niet weg (bestanden in gebruik)" }
+                Rename-Item $new "venv"
             }
         }
         if (-not (Test-Path $vpy)) { & $py -m venv "$d\venv" 2>&1 | Out-Null }

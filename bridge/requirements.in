@@ -1,5 +1,5 @@
 # Direct dependencies. requirements.txt is generated from this file with exact versions and hashes:
-#   uv pip compile requirements.in --universal --python-version 3.13 --generate-hashes -o requirements.txt
+#   uv pip compile requirements.in --universal --python-version 3.13 --generate-hashes --exclude-newer <7 days ago> -o requirements.txt
 aiohttp>=3.9
 electrolux-group-developer-sdk>=0.7
 ayla-iot-unofficial>=1.4

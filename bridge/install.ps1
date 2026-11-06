@@ -1,5 +1,5 @@
 # Stoeckie Bridge installer for Windows.
-# - installs Python 3.13 (per user, via winget) when missing (Home Connect needs 3.13 or newer)
+# - installs Python 3.14 (per user, via winget) when missing (3.13 gets no Windows security releases any more)
 # - creates a venv next to this script and installs the dependencies
 # - creates config.json from config.example.json
 # - opens TCP 8787 in the Windows firewall (asks for admin once)
@@ -11,10 +11,10 @@ $out = Join-Path $dir "install-log.txt"
 Start-Transcript -Path $out -Force | Out-Null
 
 function Find-Python {
-    foreach ($c in @("py -3.13", "py -3", "python")) {
+    foreach ($c in @("py -3.14", "py -3", "python")) {
         try {
             $v = & cmd /c "$c --version 2>&1"
-            if ($LASTEXITCODE -eq 0 -and $v -match "Python 3\.(\d+)" -and [int]$Matches[1] -ge 13) { return $c }
+            if ($LASTEXITCODE -eq 0 -and $v -match "Python 3\.(\d+)" -and [int]$Matches[1] -ge 14) { return $c }
         } catch {}
     }
     return $null
@@ -23,17 +23,17 @@ function Find-Python {
 $py = Find-Python
 if (-not $py) {
     Write-Host "Python niet gevonden, installeren via winget..."
-    winget install -e --id Python.Python.3.13 --scope user --silent --accept-package-agreements --accept-source-agreements
+    winget install -e --id Python.Python.3.14 --scope user --silent --accept-package-agreements --accept-source-agreements
     $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine")
     $py = Find-Python
-    if (-not $py) { throw "Python installatie mislukt. Installeer Python 3.13 van python.org en start opnieuw." }
+    if (-not $py) { throw "Python installatie mislukt. Installeer Python 3.14 van python.org en start opnieuw." }
 }
 Write-Host "Python: $py"
 
-# a venv from an older Python (3.12) is made again with 3.13
+# a venv from an older Python is made again with 3.14
 if (Test-Path "$dir\venv\Scripts\python.exe") {
     $vv = & "$dir\venv\Scripts\python.exe" -c "import sys; print(sys.version_info[1])"
-    if ([int]$vv -lt 13) { Remove-Item -Recurse -Force "$dir\venv" }
+    if ([int]$vv -lt 14) { Remove-Item -Recurse -Force "$dir\venv" }
 }
 if (-not (Test-Path "$dir\venv\Scripts\python.exe")) {
     & cmd /c "$py -m venv `"$dir\venv`""

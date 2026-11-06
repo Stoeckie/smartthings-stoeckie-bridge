@@ -52,7 +52,7 @@ cd bridge
 docker compose up -d --build
 ```
 
-* **Update:** `git pull`, then in `bridge` again `docker compose up -d --build` (always with `--build`: since 2026-11-06g the image is `python:3.13-slim`). Settings in `bridge/data` stay.
+* **Update:** `git pull`, then in `bridge` again `docker compose up -d --build` (always with `--build`: since 2026-11-07 the image is `python:3.14-slim`). Settings in `bridge/data` stay.
 * Host networking (Linux), so the hub finds the bridge on the host IP, port 8787. Data (config.json, log) lives in `bridge/data`.
 * **Setup page:** open http://localhost:8787/setup in a browser **on the Docker host** (https://localhost:8443/setup also works; the certificate is self-signed). No need for a text browser inside the container.
 * **From another computer:** add its address to `STBRIDGE_SETUP_ALLOW` in `docker-compose.yml`, e.g. `STBRIDGE_SETUP_ALLOW: "192.168.1.20/32"`, run `docker compose up -d` and open https://<docker host ip>:8443/setup (https only, credentials never cross the LAN in plain text).
@@ -114,7 +114,7 @@ Dishwashers and ovens (other Home Connect appliances follow) talk to the bridge 
 1. Download the **Home Connect Profile Downloader** for your system (github.com/bruestel/homeconnect-profile-downloader, Releases), sign in with your Home Connect account, choose **Home Assistant - Home Connect Local** and save the zip(s).
 2. Put the zips in a folder `homeconnect` next to `config.json` (Windows: `C:\StoeckieBridge\homeconnect`, Docker: the data volume). They contain the appliance keys: keep them private.
 3. Give the appliances a fixed IP in your router. Optional `homeconnect\hosts.json`: `{"<haId>": "192.168.1.50"}` (otherwise the mDNS name is used).
-4. Restart the bridge. Needs **Python 3.13** or newer (the Windows installer installs it; Docker image `python:3.13-slim`).
+4. Restart the bridge. Needs **Python 3.13** or newer; the installers and the Docker image use **3.14** (3.13 gets no Windows security releases any more).
 
 SmartThings: dishwasher (on/off, running/finished, remaining time, progress, door, remote start allowed, stop) and oven (on/off, running/paused, cavity temperature, set temperature, remaining time, door, stop, pause/resume).
 
