@@ -5,7 +5,7 @@
 # What it does:
 #  - asks for the target IP and an administrator login of the target; the login can be saved here, encrypted for your
 #    Windows account (remote-cred.xml, Windows DPAPI), so later updates run without questions: update-remote.bat
-#  - installs Python 3.13 on the target when missing and keeps it on $PyVersion ( Home Connect needs 3.13 or newer), copies the bridge to C:\StoeckieBridge, venv + packages
+#  - installs Python 3.13 on the target when missing and keeps it on $PyVersion (Home Connect needs 3.13 or newer), copies the bridge to C:\StoeckieBridge, venv + packages
 #  - stops the bridge here and copies config.json (keys + bridge id, so SmartThings keeps the same devices)
 #  - firewall rule 8787, scheduled task at startup as LOCAL SERVICE (no admin rights, runs without anyone logged on)
 #  - checks from here that the target answers on port 8787; then disables the bridge here (or restarts it on failure)
