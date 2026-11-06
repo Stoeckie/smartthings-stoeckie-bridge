@@ -69,7 +69,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-06n"
+VERSION = "2026-11-06p"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -2239,8 +2239,10 @@ class Samsung:
     Appliances come from config ("samsung": {"appliances": [{"host": ip, "type": "washer", "name": ...}]}) or
     samsung/appliances.json; give them a fixed IP. A washer switched off sleeps its wifi: it then shows as off."""
 
-    POLL = 10
-    HOT_EVERY = 2
+    POLL = 15          # power, remote control
+    HOT_EVERY = 1      # operational state
+    PING = 25          # CoAP ping, keeps the session alive
+    LIVENESS = 60      # no answer at all this long: new session
     # small resources every POLL seconds; the course resource is large (several CoAP blocks) and the firmware
     # stops answering for a while when it is read too often, so it is read at connect, every COURSE_EVERY seconds
     # and right after a command
@@ -2312,7 +2314,7 @@ class Samsung:
             except Exception as ex:  # noqa: BLE001
                 errors += 1
                 last = ex
-                log.info("[samsung] GET /%s: %r", "/".join(path), ex)
+                log.debug("[samsung] GET /%s: %r", "/".join(path), ex)
                 if "closed" in str(ex).lower():
                     raise
                 continue
@@ -2371,7 +2373,22 @@ class Samsung:
                 ev.set()
         return handler
 
+    @staticmethod
+    def _read_soft(sess, paths, timeout: float) -> dict[str, Any]:
+        """Like _read, but never raises for timeouts: a GET the firmware does not answer is just skipped."""
+        try:
+            return Samsung._read(sess, paths, timeout)
+        except Exception as ex:  # noqa: BLE001
+            if "closed" in str(ex).lower():
+                raise
+            return {}
+
     async def _run_one(self, a: dict[str, Any]) -> None:
+        """Like the smartthings-local bridge demo: the small operational state every second (2 s timeout), the
+        rest at a slower pace, and a GET that times out is skipped instead of tearing the session down (the
+        firmware sometimes stops answering for a few seconds, and a torn down session makes it ignore new
+        handshakes for a while). Only after LIVENESS seconds without any answer is the session closed and made
+        again; a CoAP ping every PING seconds keeps it alive."""
         host = str(a["host"])
         kind = str(a.get("type") or "washer")
         name = str(a.get("name") or "Samsung Washer")
@@ -2382,66 +2399,89 @@ class Samsung:
         REG.upsert(dev_id, kind, name, ss_washer_state({}), online=True, handler=handler)
         once: dict[str, Any] = {}
         cache: dict[str, Any] = {}
-        course_at, warm_at, wake_cmd = 0.0, 0.0, False
         last, fails, logged = None, 0, False
         while True:
             sess = self.sessions.get(host)
-            try:
-                if sess is None:
+            if sess is None:
+                try:
                     sess, port = await self._call(host, self._open, host)
-                    self.sessions[host] = sess
-                    course_at = warm_at = 0.0
-                    log.info("[samsung] %s (%s): connected on port %s", name, host, port)
-                    if not once:
-                        once = await self._call(host, self._read, sess, self.ONCE)
-                async with self.locks[host]:
-                    fresh = await self._call(host, self._read, sess, self.HOT)
-                    if time.time() - warm_at >= self.POLL or wake_cmd:
-                        fresh.update(await self._call(host, self._read, sess, self.RESOURCES))
-                        warm_at = time.time()
-                    if time.time() - course_at >= self.COURSE_EVERY or wake_cmd:
-                        try:
-                            fresh.update(await self._call(host, self._read, sess, self.COURSE, 8.0))
-                            course_at = time.time()
-                        except Exception as ex:  # noqa: BLE001
-                            log.info("[samsung] %s course: %r", name, ex)
-                wake_cmd = False
-                res = {**cache, **fresh}    # a resource that did not answer this time keeps its last value
-                cache = res
-                res.update(once)
-                if not logged:  # once, to learn this model's resources (no secrets in them)
-                    logged = True
-                    log.info("[samsung] %s resources: %s", name, _ss_short(res, 3000))
-                st = ss_washer_state(res)
-                self.programs[host] = ss_programs(res)
+                except Exception as ex:  # noqa: BLE001
+                    fails += 1
+                    if fails <= 3 or fails % 30 == 0:
+                        log.info("[samsung] %s (%s): %r", name, host, ex)
+                    if fails >= 2:
+                        # no answer: switched off (its wifi sleeps) or another local client holds the only session.
+                        # The bridge can not tell these apart, so the device shows offline instead of a wrong state.
+                        REG.set_online(dev_id, False)
+                    await asyncio.sleep(30 if fails < 10 else 60)
+                    continue
+                self.sessions[host] = sess
+                REG.set_online(dev_id, True)
+                log.info("[samsung] %s (%s): connected on port %s", name, host, port)
                 fails = 0
-                if st != last:
-                    REG.upsert(dev_id, kind, name, st, online=True)
-                    last = st
-            except Exception as ex:  # noqa: BLE001
-                fails += 1
-                if sess is not None:
-                    try:
-                        await self._call(host, sess.close)
-                    except Exception:  # noqa: BLE001
-                        pass
-                self.sessions.pop(host, None)
-                if fails <= 3 or fails % 30 == 0:
-                    log.info("[samsung] %s (%s): %r", name, host, ex)
-                if fails >= 3:  # wifi of a switched off washer sleeps: show it as off, not as broken
-                    st = ss_washer_state({})
+                now = time.monotonic()
+                ok_at, warm_at, course_at, ping_at = now, 0.0, 0.0, now
+                timeouts = 0
+            try:
+                now = time.monotonic()
+                cmd = wake.is_set()
+                wake.clear()
+                async with self.locks[host]:
+                    fresh = await self._call(host, self._read_soft, sess, self.HOT, 2.0)
+                    if now - warm_at >= self.POLL or cmd:
+                        fresh.update(await self._call(host, self._read_soft, sess, self.RESOURCES, 4.0))
+                        warm_at = now
+                    if not once:
+                        once = await self._call(host, self._read_soft, sess, self.ONCE, 4.0)
+                    if now - course_at >= self.COURSE_EVERY or cmd or "/course/vs/0" not in cache:
+                        got = await self._call(host, self._read_soft, sess, self.COURSE, 15.0)
+                        if got:
+                            fresh.update(got)
+                            course_at = now
+                        else:
+                            course_at = now - self.COURSE_EVERY + 30   # try again in 30 s
+                    if now - ping_at >= self.PING:
+                        ping_at = now
+                        try:
+                            await self._call(host, sess.ping)
+                        except Exception:  # noqa: BLE001
+                            pass
+                if fresh:
+                    ok_at = now
+                    if timeouts:
+                        log.info("[samsung] %s: answering again after %d skipped read(s)", name, timeouts)
+                    timeouts = 0
+                else:
+                    timeouts += 1
+                    if timeouts in (1, 10, 30):
+                        log.info("[samsung] %s: no answer to %d read(s) in a row", name, timeouts)
+                if now - ok_at > self.LIVENESS:
+                    raise ConnectionError(f"no answer for {self.LIVENESS} s")
+                if fresh:
+                    res = {**cache, **fresh, **once}
+                    cache = res
+                    if not logged:  # once, to learn this model's resources (no secrets in them)
+                        logged = True
+                        log.info("[samsung] %s resources: %s", name, _ss_short(res, 3000))
+                    st = ss_washer_state(res)
+                    self.programs[host] = ss_programs(res)
                     if st != last:
                         REG.upsert(dev_id, kind, name, st, online=True)
                         last = st
-                await asyncio.sleep(20 if fails < 10 else 60)
+            except Exception as ex:  # noqa: BLE001
+                log.info("[samsung] %s (%s): %r, new session", name, host, ex)
+                try:
+                    await self._call(host, sess.close)
+                except Exception:  # noqa: BLE001
+                    pass
+                self.sessions.pop(host, None)
+                await asyncio.sleep(30)
                 continue
             try:  # next read after HOT_EVERY seconds, or right after a command
                 await asyncio.wait_for(wake.wait(), self.HOT_EVERY)
-                await asyncio.sleep(1)
-                wake_cmd = True
+                await asyncio.sleep(0.5)
             except asyncio.TimeoutError:
                 pass
-            wake.clear()
 
     async def run(self) -> None:
         if not self.appliances:

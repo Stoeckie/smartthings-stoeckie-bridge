@@ -101,3 +101,39 @@ def test_courses_real_dump():
                             "/st/washercourse/vs/0": {"x.com.samsung.da.st.courseTable": "Table_00"}})
     assert list(progs) == ["cotton", "eco4060", "quick15", "superSpeed", "superEco", "wool", "bedding",
                            "antiAllergen", "drumClean", "drainSpin", "rinseSpin", "delicates", "synthetics", "eCotton"]
+
+
+def test_loop_keeps_session_on_timeouts(monkeypatch):
+    """A few unanswered reads do not close the session; state still gets published."""
+    import asyncio
+    import cbor2
+    sb.REG.devices.clear()
+    calls = {"n": 0, "closed": 0}
+
+    class Sess:
+        def get(self, path, timeout=10):
+            calls["n"] += 1
+            if 3 <= calls["n"] <= 6:
+                raise TimeoutError("session operation timed out")
+            data = {"operational/state/vs/0": {"x.com.samsung.da.state": "Run", "x.com.samsung.da.progress": "Wash",
+                                               "x.com.samsung.da.remainingTime": "00:30:00"},
+                    "power/vs/0": {"x.com.samsung.da.power": "On"}}.get("/".join(path), {})
+            return 0x45, cbor2.dumps(data)
+
+        def ping(self):
+            pass
+
+        def close(self):
+            calls["closed"] += 1
+
+    ss = sb.Samsung({"samsung": {"appliances": [{"host": "192.168.1.9", "name": "W"}]}})
+    monkeypatch.setattr(ss, "_open", lambda host: (Sess(), 49155))
+    monkeypatch.setattr(sb.Samsung, "HOT_EVERY", 0.01)
+
+    async def main():
+        t = asyncio.create_task(ss._run_one({"host": "192.168.1.9", "name": "W"}))
+        await asyncio.sleep(0.6)
+        t.cancel()
+    asyncio.run(main())
+    st = sb.REG.devices["samsung-192-168-1-9"]["state"]
+    assert st["operation"] == "run" and st["power"] == "on" and calls["closed"] == 0
