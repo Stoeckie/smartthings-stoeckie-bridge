@@ -1,4 +1,4 @@
-name: stoeckie-washer
+name: stoeckie-washer-v2
 components:
   - id: main
     capabilities:
@@ -8,7 +8,12 @@ components:
         version: 1
       - id: remoteControlStatus
         version: 1
+      - id: silvervalley08660.applianceProgram
+        version: 1
       - id: refresh
         version: 1
     categories:
       - name: Washer
+metadata:
+  vid: WASHERVID
+  mnmn: SmartThingsCommunity

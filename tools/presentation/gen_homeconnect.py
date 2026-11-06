@@ -55,6 +55,34 @@ PROGRAMS = {
     "micro900": ("Microwave 900 W", "Magnetron 900 W"),
     "microMax": ("Microwave max", "Magnetron max"),
     "drying": ("Drying", "Drogen"),
+    # washer (Samsung)
+    "cotton": ("Cotton", "Katoen"),
+    "eCotton": ("E Cotton", "E Katoen"),
+    "eco4060": ("Eco 40-60", "Eco 40-60"),
+    "synthetics": ("Synthetics", "Synthetisch"),
+    "delicates": ("Delicates", "Fijne was"),
+    "wool": ("Wool", "Wol"),
+    "bedding": ("Bedding", "Beddengoed"),
+    "outdoor": ("Outdoor", "Outdoor"),
+    "babyCare": ("Baby Care", "Babykleding"),
+    "antiAllergen": ("Anti Allergen", "Anti-allergie"),
+    "quick15": ("15' Quick Wash", "Snelwas 15'"),
+    "quickWash": ("Quick Wash", "Snelwas"),
+    "superSpeed": ("Super Speed", "Supersnel"),
+    "superEco": ("Super Eco Wash", "Super Eco"),
+    "mixed": ("Mixed Load", "Gemengde was"),
+    "towels": ("Towels", "Handdoeken"),
+    "denim": ("Denim", "Jeans"),
+    "shirts": ("Shirts", "Overhemden"),
+    "activeWear": ("Active Wear", "Sportkleding"),
+    "colors": ("Colors", "Bonte was"),
+    "whites": ("Whites", "Witte was"),
+    "aiWash": ("AI Wash", "AI Wash"),
+    "hygieneSteam": ("Hygiene Steam", "Hygiene stoom"),
+    "rinseSpin": ("Rinse + Spin", "Spoelen + centrifugeren"),
+    "spinOnly": ("Spin Only", "Alleen centrifugeren"),
+    "drainSpin": ("Drain/Spin", "Pompen/centrifugeren"),
+    "drumClean": ("Drum Clean", "Trommelreiniging"),
 }
 KEYS = list(PROGRAMS)
 
@@ -207,6 +235,15 @@ write("dishwasher-config.json", {
         "conditions": [item("switch"), item("dishwasherOperatingState"), item(P), item("contactSensor"),
                        item("remoteControlStatus")],
         "actions": [item("switch"), item(P), item("dishwasherOperatingState")],
+    },
+})
+write("washer-config.json", {
+    "type": "profile", "mnmn": "SmartThingsCommunity",
+    "dashboard": {"states": [item("washerOperatingState")], "actions": [item("switch")]},
+    "detailView": [item("switch"), item("washerOperatingState"), item(P), item("remoteControlStatus"), item("refresh")],
+    "automation": {
+        "conditions": [item("switch"), item("washerOperatingState"), item(P), item("remoteControlStatus")],
+        "actions": [item("switch"), item(P), item("washerOperatingState")],
     },
 })
 write("oven-config.json", {

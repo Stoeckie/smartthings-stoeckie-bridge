@@ -56,3 +56,48 @@ def test_washer_commands(monkeypatch):
     assert writes[0] == (("operational", "state", "vs", "0"), {"x.com.samsung.da.state": "Run"})
     assert writes[1][1] == {"x.com.samsung.da.state": "Ready"}
     assert writes[2] == (("power", "vs", "0"), {"x.com.samsung.da.power": "Off"})
+
+
+def test_courses():
+    # 1 nibble header 1 -> records of 3 bytes; first byte is the course code
+    course = {"x.com.samsung.da.supportedOptions": "1D0AAAABDBBBBDCCCCCD8DDDDBA0000",
+              "x.com.samsung.da.options": ["Course_D0"]}
+    assert sb.ss_course_codes(course) == ["D0", "BD", "DC", "D8", "BA"]
+    assert sb.ss_course_codes({}, {"x.com.samsung.da.editCourseList": "EditCourseList_1C1D21"}) == ["1C", "1D", "21"]
+    res = {"/course/vs/0": course, "/st/washercourse/vs/0": {"x.com.samsung.da.st.courseTable": "Table_00"}}
+    progs = sb.ss_programs(res)
+    assert progs == {"cotton": "D0", "eco4060": "BD", "quick15": "DC", "wool": "D8", "drainSpin": "BA"}
+    st = sb.ss_washer_state(res)
+    assert st["program"] == "cotton" and st["programs"][:2] == ["cotton", "eco4060"]
+
+
+def test_course_command(monkeypatch):
+    import asyncio
+    import pytest
+    ss = sb.Samsung({})
+    writes = []
+    monkeypatch.setattr(sb.Samsung, "_write", staticmethod(lambda sess, path, body: writes.append((path, body))))
+    host = "192.168.1.9"
+    ss.locks[host], ss.sessions[host] = asyncio.Lock(), object()
+    ss.programs[host] = {"cotton": "D0", "quick15": "DC"}
+    h = ss._command(host)
+    asyncio.run(h("program", "quick15"))
+    assert writes == [(("course", "vs", "0"), {"x.com.samsung.da.options": ["Course_DC"]})]
+    asyncio.run(h("start", "cotton"))
+    assert writes[1][1] == {"x.com.samsung.da.options": ["Course_D0"]}
+    assert writes[2] == (("operational", "state", "vs", "0"), {"x.com.samsung.da.state": "Run"})
+    with pytest.raises(ValueError):
+        asyncio.run(h("program", "wool"))
+
+
+def test_courses_real_dump():
+    # supportedOptions of a WW..T washer (DA_WM_A51_20_COMMON, Table_00); same 14 courses as the cloud lists
+    so = ("3D0847E923FA7FFBD84109308A7FFDC811E933FA33FDB841E923FA67FDA8102923FA53FD8841E920FA30FD6841E933FA30F"
+          "E48560943FA67FD585209204A520BA80009000A6FFD48000913FA6FFD3831E920FA30FD2843E923FA67FD18430923FA7FF")
+    course = {"x.com.samsung.da.supportedOptions": [so], "x.com.samsung.da.options": ["Course_D0"]}
+    assert sb.ss_course_codes(course) == ["D0", "BD", "DC", "DB", "DA", "D8", "D6", "E4", "D5", "BA", "D4", "D3",
+                                          "D2", "D1"]
+    progs = sb.ss_programs({"/course/vs/0": course,
+                            "/st/washercourse/vs/0": {"x.com.samsung.da.st.courseTable": "Table_00"}})
+    assert list(progs) == ["cotton", "eco4060", "quick15", "superSpeed", "superEco", "wool", "bedding",
+                           "antiAllergen", "drumClean", "drainSpin", "rinseSpin", "delicates", "synthetics", "eCotton"]

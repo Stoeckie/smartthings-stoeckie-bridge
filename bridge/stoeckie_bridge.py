@@ -69,7 +69,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-06i"
+VERSION = "2026-11-06m"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -1854,7 +1854,7 @@ class HomeConnect:
     the appliance address from config ("homeconnect": {"hosts": {haId: ip}}), homeconnect/hosts.json or the mDNS
     name (give the appliances a fixed IP in the router)."""
 
-    POLL = 5
+    POLL = 10
 
     def __init__(self, cfg: dict[str, Any]) -> None:
         self.cfg = cfg
@@ -2084,6 +2084,64 @@ SS_WASHER_COURSES = {
     "Table_00": {"01": "Normal", "55": "Whites", "57": "Self Clean+", "5b": "Cotton", "5c": "Extra Speed", "5d": "Super Eco Wash", "5e": "Delicates", "5f": "Baby Care", "60": "Outdoor", "61": "Dark Garment", "63": "Drum Clean", "64": "Rinse + Spin", "65": "Wool", "66": "Bedding", "67": "Synthetics", "68": "E Cotton", "6b": "Spin Only", "6c": "Denim", "70": "Heavy Duty", "71": "Bedding", "72": "Sanitize", "73": "Rinse + Spin", "74": "Active Wear", "75": "Delicates", "77": "Perm Press", "78": "Quick Wash", "91": "Self Clean", "94": "Towels", "9c": "Heavy Duty", "9d": "Rinse + Spin", "9e": "Perm Press", "9f": "Quick Wash", "a2": "Delicates", "a3": "Active Wear", "a5": "Bedding", "a9": "Sanitize", "aa": "Whites", "ab": "Eco Cold", "b1": "Self Clean+", "ba": "Drain/Spin", "d0": "Cotton", "d1": "E Cotton", "d2": "Synthetics", "d3": "Delicates", "d4": "Rinse + Spin", "d5": "Drum Clean", "d6": "Bedding", "d7": "Outdoor Care", "d8": "Wool", "da": "Super Eco Wash", "db": "Super Speed", "dc": "15' Quick Wash", "e4": "Anti Allergen"},
     "Table_02": {"01": "Normal", "02": "Extra Heavy Duty", "03": "Super Eco Wash", "04": "Quick Wash", "05": "Wool/Lingerie", "06": "Bedding", "07": "Outdoor", "08": "Rinse+Spin", "09": "Drum Clean", "0a": "Towels", "0b": "Boil Wash", "0c": "Baby Care", "0d": "Spin Only", "0e": "Cloudy Day", "0f": "Pure Wash", "10": "Spin Dry", "11": "Summer Bedding", "12": "Cottons", "13": "Black Cottons", "14": "Delicate Underwear", "15": "Activewear", "16": "Blouses", "17": "Downloaded", "18": "Soft Bubble", "19": "AI Wash", "1a": "Shirts", "1b": "Cotton", "1c": "Eco 40-60", "1d": "Super Speed", "1e": "15' Quick Wash", "1f": "Intense Cold", "20": "Hygiene Steam", "21": "Colors", "22": "Wool", "23": "Outdoor", "24": "Bedding", "25": "Synthetics", "26": "Delicates", "27": "Rinse+Spin", "28": "Drain/Spin", "29": "Drum Clean+", "2a": "Jeans", "2b": "AI Wash", "2d": "Silent Wash", "2e": "Baby Care", "2f": "Activewear", "30": "Cloudy Day", "32": "Shirts", "33": "Towels", "34": "Mixed", "35": "E Cotton", "36": "Wash+Dry", "37": "Air Wash", "38": "Cotton Dry", "39": "Synthetics Dry", "3a": "Drum Clean", "51": "Super Speed", "52": "Eco Cold", "53": "Heavy Duty", "54": "Towels", "55": "Activewear", "56": "Bedding", "57": "Delicates", "5a": "Steam Sanitize", "5b": "Small Load", "5e": "Rinse+Spin", "60": "Self Clean+", "64": "Steam Whites", "65": "Colors", "66": "Denim", "69": "AI Wash", "6a": "Wool", "6b": "Denim", "6c": "Blouses", "6d": "Delicates", "6e": "Active Wear", "6f": "Bedding", "70": "Towels", "71": "Quick Wash", "72": "Shirts", "73": "Sanitize", "74": "Drum Clean", "75": "Outdoor", "76": "Baby Care", "77": "Cottons", "78": "Rinse + Spin", "79": "Spin Only", "7c": "Whites", "7d": "Bedding/Waterproof", "7e": "Self-Clean", "7f": "Wool/Delicate", "85": "Steam Normal", "86": "Deep Wash", "87": "Download", "88": "Pet Care", "8b": "Quick Wash", "8c": "AI OptiWash", "8f": "Intense Cold", "96": "Less Microfiber", "a0": "15' Quick Wash", "b0": "Mixed Load", "58": "Wool", "5c": "Outdoor", "5d": "Power Rinse", "5f": "Spin Only", "63": "Power Steam", "67": "Steam Allergen", "68": "Steam Bulky"},
 }
+# Course label (above) -> key of the SmartThings capability silvervalley08660.applianceProgram (EN/NL labels in
+# tools/presentation/gen_homeconnect.py). Courses without a key here are not offered in SmartThings.
+SS_COURSE_KEY = {
+    "Cotton": "cotton", "Cottons": "cotton", "E Cotton": "eCotton", "Eco 40-60": "eco4060",
+    "Synthetics": "synthetics", "Delicates": "delicates", "Wool": "wool", "Bedding": "bedding",
+    "Outdoor": "outdoor", "Outdoor Care": "outdoor", "Baby Care": "babyCare", "Anti Allergen": "antiAllergen",
+    "15' Quick Wash": "quick15", "Quick Wash": "quickWash", "Super Speed": "superSpeed",
+    "Super Eco Wash": "superEco", "Mixed Load": "mixed", "Mixed": "mixed", "Towels": "towels", "Denim": "denim",
+    "Jeans": "denim", "Shirts": "shirts", "Active Wear": "activeWear", "Activewear": "activeWear",
+    "Colors": "colors", "Whites": "whites", "AI Wash": "aiWash", "Hygiene Steam": "hygieneSteam",
+    "Rinse + Spin": "rinseSpin", "Rinse+Spin": "rinseSpin", "Spin Only": "spinOnly", "Drain/Spin": "drainSpin",
+    "Drum Clean": "drumClean", "Drum Clean+": "drumClean",
+}
+# Table_00 course BD is not in the table above; on EU washers it is Eco 40-60 (fixed 40 degrees, 3 rinses)
+SS_EXTRA = {"Table_00": {"bd": "Eco 40-60"}}
+
+
+def ss_course_codes(course: dict[str, Any], edit: dict[str, Any] | None = None) -> list[str]:
+    """Course codes the washer offers: editCourseList when filled in, else the first byte of each record of
+    supportedOptions (a 1 nibble header with the record width, then fixed width records), checked like the
+    localthings project does: distinct codes that include the selected course."""
+    raw = (edit or {}).get("x.com.samsung.da.editCourseList")
+    if isinstance(raw, str) and "_" in raw:
+        body = raw.split("_", 1)[1]
+        codes = [body[i:i + 2] for i in range(0, len(body) - 1, 2)]
+        if codes:
+            return codes
+    raw = course.get("x.com.samsung.da.supportedOptions")
+    hexstr = raw[0] if isinstance(raw, list) and raw else raw
+    if not isinstance(hexstr, str) or len(hexstr) < 3 or (len(hexstr) - 1) % 2:
+        return []
+    body = hexstr[1:]
+    total = len(body) // 2
+    current = ss_option(course.get(SS_OPTIONS), "Course")
+
+    def split(k: int) -> list[str] | None:
+        if k < 1 or total % k or total // k < 2:
+            return None
+        firsts = [body[i * k * 2:i * k * 2 + 2] for i in range(total // k)]
+        if len(set(firsts)) != len(firsts):
+            return None
+        if current is not None and current.lower() not in {f.lower() for f in firsts}:
+            return None
+        return firsts
+
+    try:
+        stated = split(1 + 2 * int(hexstr[0], 16))
+    except ValueError:
+        stated = None
+    if stated:
+        return stated
+    for k in range(1, total + 1):
+        got = split(k)
+        if got:
+            return got
+    return []
+
+
 SS_JOB = {"none": "none", "wash": "wash", "rinse": "rinse", "spin": "spin", "finish": "finish",
           "prewash": "preWash", "weightsensing": "weightSensing", "delaywash": "delayWash", "airwash": "airWash",
           "drying": "drying", "cooling": "cooling", "wrinkleprevent": "wrinklePrevent", "aiwash": "aIWash",
@@ -2117,7 +2175,20 @@ def ss_seconds(raw: Any) -> int | None:
 def ss_course_label(code: str | None, table: str | None) -> str | None:
     if not code:
         return None
-    return (SS_WASHER_COURSES.get(table or "") or {}).get(code.lower()) or f"Course {code.upper()}"
+    c = code.lower()
+    return ((SS_WASHER_COURSES.get(table or "") or {}).get(c) or (SS_EXTRA.get(table or "") or {}).get(c)
+            or f"Course {code.upper()}")
+
+
+def ss_programs(res: dict[str, Any]) -> dict[str, str]:
+    """{capability key: course code} for the courses of this washer that SmartThings can show."""
+    table = (res.get("/st/washercourse/vs/0") or {}).get("x.com.samsung.da.st.courseTable")
+    out: dict[str, str] = {}
+    for code in ss_course_codes(res.get("/course/vs/0") or {}, res.get("/wm/editcourse/vs/0")):
+        key = SS_COURSE_KEY.get(ss_course_label(code, table) or "")
+        if key and key not in out:
+            out[key] = code
+    return out
 
 
 def ss_washer_state(res: dict[str, Any]) -> dict[str, Any]:
@@ -2146,7 +2217,11 @@ def ss_washer_state(res: dict[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError):
         pct = None
     code = ss_option(course.get(SS_OPTIONS), "Course")
+    progs = ss_programs(res)
+    key = next((k for k, c in progs.items() if code and c.lower() == code.lower()), None)
     return {
+        "program": key or ("none" if not progs else None),
+        "programs": list(progs),
         "power": "on" if power else "off",
         "operation": "run" if running else ("pause" if paused else ("finished" if finished else "inactive")),
         "job": "finish" if finished else (SS_JOB.get(progress.lower(), "none") if (running or paused) else "none"),
@@ -2165,8 +2240,12 @@ class Samsung:
     samsung/appliances.json; give them a fixed IP. A washer switched off sleeps its wifi: it then shows as off."""
 
     POLL = 10
-    RESOURCES = (("operational", "state", "vs", "0"), ("power", "vs", "0"), ("power", "0"),
-                 ("remotectrl", "vs", "0"), ("course", "vs", "0"))
+    # small resources every POLL seconds; the course resource is large (several CoAP blocks) and the firmware
+    # stops answering for a while when it is read too often, so it is read at connect, every COURSE_EVERY seconds
+    # and right after a command
+    RESOURCES = (("operational", "state", "vs", "0"), ("power", "vs", "0"), ("remotectrl", "vs", "0"))
+    COURSE = (("course", "vs", "0"),)
+    COURSE_EVERY = 300
     ONCE = (("st", "washercourse", "vs", "0"),)
 
     def __init__(self, cfg: dict[str, Any]) -> None:
@@ -2179,6 +2258,18 @@ class Samsung:
         self.appliances = [a for a in apps if isinstance(a, dict) and a.get("host")]
         self.sessions: dict[str, Any] = {}
         self.locks: dict[str, asyncio.Lock] = {}
+        self.programs: dict[str, dict[str, str]] = {}   # host -> {capability key: course code}
+        self.wake: dict[str, asyncio.Event] = {}
+        self.executors: dict[str, Any] = {}
+
+    async def _call(self, host: str, fn, *args):
+        """Run a blocking library call on this appliance's own thread: the DTLS session is made, read and written
+        from one thread only."""
+        ex = self.executors.get(host)
+        if ex is None:
+            import concurrent.futures
+            ex = self.executors[host] = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="samsung")
+        return await asyncio.get_running_loop().run_in_executor(ex, lambda: fn(*args))
 
     @staticmethod
     def dev_id(host: str) -> str:
@@ -2194,22 +2285,40 @@ class Samsung:
         port = live.selected_port or (live.responder_ports[0] if live.responder_ports else None)
         if not port:
             raise ConnectionError("no answer (switched off?)")
-        sess = DtlsCoapSession(host, port, auth=CertificateAuth.from_files(str(cert_p), str(key_p)))
+        # a fixed local UDP port per appliance (like the smartthings-local bridge demo): a reconnect then comes from
+        # the same peer address, so the appliance replaces the old association instead of waiting for it to expire
+        local = 26849 + sorted(a["host"] for a in self.appliances).index(host) if any(
+            a["host"] == host for a in self.appliances) else None
+        sess = DtlsCoapSession(host, port, auth=CertificateAuth.from_files(str(cert_p), str(key_p)), local_port=local)
         sess.connect(timeout=12.0)
         sess.start_reader()
         return sess, port
 
     @staticmethod
-    def _read(sess, paths) -> dict[str, Any]:
+    def _read(sess, paths, timeout: float = 4.0) -> dict[str, Any]:
+        """GET each path; a path that times out is skipped (the firmware sometimes wedges on one resource for a
+        while). Raises only when nothing answered, so one slow resource does not tear the session down."""
         import cbor2
         out: dict[str, Any] = {}
+        errors = 0
+        last: Exception | None = None
         for path in paths:
-            code, body = sess.get(list(path))
+            try:
+                code, body = sess.get(list(path), timeout=timeout)
+            except Exception as ex:  # noqa: BLE001
+                errors += 1
+                last = ex
+                log.info("[samsung] GET /%s: %r", "/".join(path), ex)
+                if "closed" in str(ex).lower():
+                    raise
+                continue
             if code == 0x45 and body:
                 try:
                     out["/" + "/".join(path)] = cbor2.loads(body)
                 except Exception:  # noqa: BLE001
                     pass
+        if paths and errors == len(paths):
+            raise last or ConnectionError("no answer")
         return out
 
     @staticmethod
@@ -2217,7 +2326,8 @@ class Samsung:
         import cbor2
         code, _ = sess.post(list(path), cbor2.dumps(body))
         if code >> 5 != 2:
-            raise ValueError(f"appliance refused ({code >> 5}.{code & 0x1F:02d})")
+            raise ValueError(f"appliance refused ({code >> 5}.{code & 0x1F:02d}); starting, pausing and changing "
+                             "the course need Smart Control switched on at the washer")
 
     def _command(self, host: str):
         async def handler(cmd: str, value: Any) -> None:
@@ -2228,20 +2338,33 @@ class Samsung:
                 raise ValueError("washer not reachable (switched off?)")
             op = ("operational", "state", "vs", "0")
             body = {"run": {"x.com.samsung.da.state": "Run"}, "start": {"x.com.samsung.da.state": "Run"},
+                    "program": None,
                     "resume": {"x.com.samsung.da.state": "Run"}, "pause": {"x.com.samsung.da.state": "Pause"},
                     "stop": {"x.com.samsung.da.state": "Ready"}}.get(cmd)
             async with self.locks[host]:
+                if cmd in ("program", "start") and value:
+                    code = self.programs.get(host, {}).get(str(value))
+                    if not code:
+                        raise ValueError(f"program {value} not available on this washer")
+                    await self._call(host, self._write, sess, ("course", "vs", "0"), {SS_OPTIONS: [f"Course_{code}"]})
+                    if cmd == "program":
+                        body = None
                 if body is not None:
-                    await asyncio.to_thread(self._write, sess, op, body)
+                    await self._call(host, self._write, sess, op, body)
+                elif cmd == "program":
+                    pass
                 elif cmd in ("on", "off"):
                     try:
-                        await asyncio.to_thread(self._write, sess, ("power", "vs", "0"),
+                        await self._call(host, self._write, sess, ("power", "vs", "0"),
                                                 {"x.com.samsung.da.power": "On" if cmd == "on" else "Off"})
                     except ValueError:
-                        await asyncio.to_thread(self._write, sess, ("power", "0"), {"value": cmd == "on"})
+                        await self._call(host, self._write, sess, ("power", "0"), {"value": cmd == "on"})
                 else:
                     raise ValueError(f"unsupported command {cmd}")
-            log.info("[samsung] %s %s", host, cmd)
+            log.info("[samsung] %s %s %s", host, cmd, "" if value is None else value)
+            ev = self.wake.get(host)
+            if ev is not None:
+                ev.set()
         return handler
 
     async def _run_one(self, a: dict[str, Any]) -> None:
@@ -2250,26 +2373,40 @@ class Samsung:
         name = str(a.get("name") or "Samsung Washer")
         dev_id = self.dev_id(host)
         self.locks[host] = asyncio.Lock()
+        wake = self.wake[host] = asyncio.Event()
         handler = self._command(host)
         REG.upsert(dev_id, kind, name, ss_washer_state({}), online=True, handler=handler)
         once: dict[str, Any] = {}
+        cache: dict[str, Any] = {}
+        course_at, wake_cmd = 0.0, False
         last, fails, logged = None, 0, False
         while True:
             sess = self.sessions.get(host)
             try:
                 if sess is None:
-                    sess, port = await asyncio.to_thread(self._open, host)
+                    sess, port = await self._call(host, self._open, host)
                     self.sessions[host] = sess
+                    course_at = 0.0
                     log.info("[samsung] %s (%s): connected on port %s", name, host, port)
                     if not once:
-                        once = await asyncio.to_thread(self._read, sess, self.ONCE)
+                        once = await self._call(host, self._read, sess, self.ONCE)
                 async with self.locks[host]:
-                    res = await asyncio.to_thread(self._read, sess, self.RESOURCES)
+                    fresh = await self._call(host, self._read, sess, self.RESOURCES)
+                    if time.time() - course_at >= self.COURSE_EVERY or wake_cmd:
+                        try:
+                            fresh.update(await self._call(host, self._read, sess, self.COURSE, 8.0))
+                            course_at = time.time()
+                        except Exception as ex:  # noqa: BLE001
+                            log.info("[samsung] %s course: %r", name, ex)
+                wake_cmd = False
+                res = {**cache, **fresh}    # a resource that did not answer this time keeps its last value
+                cache = res
                 res.update(once)
                 if not logged:  # once, to learn this model's resources (no secrets in them)
                     logged = True
                     log.info("[samsung] %s resources: %s", name, _ss_short(res, 3000))
                 st = ss_washer_state(res)
+                self.programs[host] = ss_programs(res)
                 fails = 0
                 if st != last:
                     REG.upsert(dev_id, kind, name, st, online=True)
@@ -2278,12 +2415,12 @@ class Samsung:
                 fails += 1
                 if sess is not None:
                     try:
-                        await asyncio.to_thread(sess.close)
+                        await self._call(host, sess.close)
                     except Exception:  # noqa: BLE001
                         pass
                 self.sessions.pop(host, None)
-                if fails == 1 or fails % 30 == 0:
-                    log.info("[samsung] %s (%s): %s", name, host, ex)
+                if fails <= 3 or fails % 30 == 0:
+                    log.info("[samsung] %s (%s): %r", name, host, ex)
                 if fails >= 3:  # wifi of a switched off washer sleeps: show it as off, not as broken
                     st = ss_washer_state({})
                     if st != last:
@@ -2291,7 +2428,13 @@ class Samsung:
                         last = st
                 await asyncio.sleep(20 if fails < 10 else 60)
                 continue
-            await asyncio.sleep(self.POLL)
+            try:  # next read after POLL seconds, or right after a command
+                await asyncio.wait_for(wake.wait(), self.POLL)
+                await asyncio.sleep(1)
+                wake_cmd = True
+            except asyncio.TimeoutError:
+                pass
+            wake.clear()
 
     async def run(self) -> None:
         if not self.appliances:
@@ -3043,7 +3186,7 @@ async def demo_devices() -> None:
 
     washer = {"power": "on", "operation": "run", "job": "wash", "remainingTime": 2400,
               "completionTime": _iso_in(2400), "progress": 35, "remoteStartAllowed": True, "course": "Cotton",
-              "courseCode": "5b"}
+              "courseCode": "d0", "program": "cotton", "programs": ["cotton", "eco4060", "quick15", "wool"]}
 
     async def demo_washer(cmd, value):
         if cmd in ("on", "off"):
@@ -3052,6 +3195,8 @@ async def demo_devices() -> None:
             washer["operation"] = "run"
         elif cmd == "pause":
             washer["operation"] = "pause"
+        if cmd in ("program", "start") and value in washer["programs"]:
+            washer["program"] = value
         elif cmd == "stop":
             washer.update(operation="inactive", job="none", remainingTime=None, completionTime=None, progress=None)
         REG.upsert("demo-washer", "washer", "Demo washer", washer, True, demo_washer)

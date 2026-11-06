@@ -5,7 +5,7 @@
 --   dishwasher / oven (Home Connect, local) -> switch, dishwasher/ovenOperatingState, contactSensor (door),
 --                                        remoteControlStatus, oven temperature + setpoint, program list +
 --                                        start (custom applianceProgram), oven temperature + cooking time
---   washer (Samsung, local)          -> switch, washerOperatingState, remoteControlStatus
+--   washer (Samsung, local)          -> switch, washerOperatingState, remoteControlStatus, course list + start
 --   window (VELUX ACTIVE via HomeKit) -> windowShade, windowShadeLevel
 --   sensor (VELUX climate sensor)     -> temperature, humidity, CO2
 --   aircon (Fujitsu via FGLair)       -> switch, airConditionerMode (plus minHeat on units that have it, like the
@@ -70,7 +70,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-06i"
+local BUILD = "2026-11-06j"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -102,7 +102,7 @@ local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor =
                   aircon = "stoeckie-aircon-v3", car = "stoeckie-car-v2",
                   velux_lock = "stoeckie-velux-lock", rain = "stoeckie-rain-v4",
                   rainradar = "stoeckie-rainradar", dishwasher = "stoeckie-dishwasher-v2", oven = "stoeckie-oven-v2",
-                  washer = "stoeckie-washer" }
+                  washer = "stoeckie-washer-v2" }
 local MANUFACTURER = { dryer = "AEG", aircon = "Fujitsu", car = "Skoda", dishwasher = "Home Connect", oven = "Home Connect",
                        washer = "Samsung" }
 
@@ -426,6 +426,7 @@ local function emit_washer(dev, s)
   try_emit(dev, function() return washerOp.washerJobState[job]() end)
   if s.progress and washerOp.progress then try_emit(dev, function() return washerOp.progress(math.floor(s.progress)) end) end
   hc_completion(dev, s, washerOp)
+  hc_program(dev, s)
 end
 
 local function emit_oven(dev, s)
@@ -467,6 +468,7 @@ local function child_profile(key, device)
   if key == "buienradar" or key == "demo-rainradar" then
     return PROFILE.rainradar .. (rain_simple(device) and "-simple" or "")
   end
+  if key:match("^samsung%-") or key == "demo-washer" then return PROFILE.washer end  -- -v2: course list + Start
   -- -v2: program list, start button, oven temperature and cooking time
   if key:match("^homeconnect%-") or key == "demo-dishwasher" or key == "demo-oven" then
     if device:supports_capability(dishOp) then return PROFILE.dishwasher end
