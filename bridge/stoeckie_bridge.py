@@ -69,7 +69,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-06g"
+VERSION = "2026-11-06h"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -328,7 +328,7 @@ def aircon_state(dev) -> dict[str, Any]:
             return default
     mode = safe(lambda: _name(dev.op_mode), "off")
     lo, hi = safe(lambda: dev.temperature_range, (16.0, 30.0)) if mode not in ("off", "on") else (16.0, 30.0)
-    has_min = MIN_HEAT_PROP in safe(lambda: dev.properties_full, {})
+    has_min = min_heat_writable(dev)
     min_on = has_min and bool(safe(lambda: dev.get_property_value(MIN_HEAT_PROP), 0))
     modes = [m for m in (_name(x) for x in safe(lambda: dev.supported_op_modes, [])) if m not in ("off", "on")]
     if has_min:
@@ -368,6 +368,15 @@ VDIR_PROP, VNUM_PROP, VSWING_PROP = "af_vertical_direction", "af_vertical_num_di
 VDIR_MAX = 8
 
 
+def min_heat_writable(dev) -> bool:
+    """True when the unit has a Minimum Heat property that can be switched (some units only report it)."""
+    try:
+        prop = dev.properties_full.get(MIN_HEAT_PROP)
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(prop) and not prop.get("read_only")
+
+
 def vdir_count(dev) -> int:
     """Number of louver positions the unit reports, 0 if it has none."""
     try:
@@ -390,7 +399,12 @@ def describe_unit(dev) -> str:
         cap = "yes" if dev.has_capability(Capability.OP_MIN_HEAT) else "no"
     except Exception:  # noqa: BLE001
         cap = "?"
-    return f"min heat capability {cap}, properties: {', '.join(names)}"
+    try:
+        mh = dev.properties_full.get(MIN_HEAT_PROP)
+        mh_txt = "none" if not mh else ("read only" if mh.get("read_only") else "writable")
+    except Exception:  # noqa: BLE001
+        mh_txt = "?"
+    return f"min heat capability {cap}, min_heat property {mh_txt}, properties: {', '.join(names)}"
 
 
 class FGLair:
@@ -482,9 +496,9 @@ class FGLair:
     @staticmethod
     async def _min_heat(dev, on: bool, strict: bool = False) -> None:
         """Switch Minimum Heat; when switching it off, only write if it is on (other units: no-op)."""
-        if MIN_HEAT_PROP not in dev.properties_full:
+        if not min_heat_writable(dev):
             if on or strict:
-                raise ValueError("this unit has no Minimum Heat")
+                raise ValueError("this unit has no Minimum Heat that can be switched from the cloud")
             return
         if not on and not dev.get_property_value(MIN_HEAT_PROP):
             return
@@ -1667,6 +1681,36 @@ HC_TYPES = {"Dishwasher": "dishwasher", "Oven": "oven", "Washer": "washer", "Dry
 HC_OPERATION = {"Inactive": "inactive", "Ready": "ready", "DelayedStart": "delayedStart", "Run": "run",
                 "Pause": "pause", "ActionRequired": "actionRequired", "Finished": "finished", "Error": "error",
                 "Aborting": "aborting"}
+# Home Connect program name -> key of the SmartThings capability silvervalley08660.applianceProgram (labels EN/NL in
+# tools/presentation/gen_homeconnect.py). Programs not listed here are not offered in SmartThings.
+_HC_DW = "Dishcare.Dishwasher.Program."
+_HC_OV = "Cooking.Oven.Program."
+HC_PROGRAMS = {
+    _HC_DW + "Eco50": "eco50", _HC_DW + "Auto1": "auto1", _HC_DW + "Auto2": "auto2", _HC_DW + "Auto3": "auto3",
+    _HC_DW + "Intensiv70": "intensive70", _HC_DW + "Intensiv45": "intensive45", _HC_DW + "Quick45": "quick45",
+    _HC_DW + "Quick65": "quick65", _HC_DW + "Super60": "super60", _HC_DW + "Glas40": "glass40",
+    _HC_DW + "NightWash": "night", _HC_DW + "MachineCare": "machineCare", _HC_DW + "PreRinse": "preRinse",
+    "BSH.Common.Program.Favorite.001": "favorite",
+    _HC_OV + "HeatingMode.HotAir": "hotAir", _HC_OV + "HeatingMode.HotAirEco": "hotAirEco",
+    _HC_OV + "HeatingMode.TopBottomHeating": "topBottom", _HC_OV + "HeatingMode.TopBottomHeatingEco": "topBottomEco",
+    _HC_OV + "HeatingMode.HotAirGrilling": "hotAirGrill", _HC_OV + "HeatingMode.PizzaSetting": "pizza",
+    _HC_OV + "HeatingMode.SlowCook": "slowCook", _HC_OV + "HeatingMode.BottomHeating": "bottomHeat",
+    _HC_OV + "HeatingMode.KeepWarm": "keepWarm", _HC_OV + "HeatingMode.PreheatOvenware": "preheatOvenware",
+    _HC_OV + "HeatingMode.FrozenHeatupSpecial": "frozenFood", _HC_OV + "HeatingMode.GrillLargeArea": "grillLarge",
+    _HC_OV + "HeatingMode.GrillSmallArea": "grillSmall", _HC_OV + "HeatingMode.SabbathProgramme": "sabbath",
+    _HC_OV + "MicroCombiModes.HotAir": "microHotAir", _HC_OV + "MicroCombiModes.TopBottomHeating": "microTopBottom",
+    _HC_OV + "MicroCombiModes.HotAirGrilling": "microHotAirGrill",
+    _HC_OV + "MicroCombiModes.GrillLargeArea": "microGrillLarge",
+    _HC_OV + "MicroCombiModes.GrillSmallArea": "microGrillSmall",
+    _HC_OV + "Microwave.90Watt": "micro90", _HC_OV + "Microwave.180Watt": "micro180",
+    _HC_OV + "Microwave.360Watt": "micro360", _HC_OV + "Microwave.600Watt": "micro600",
+    _HC_OV + "Microwave.900Watt": "micro900", _HC_OV + "Microwave.Max": "microMax",
+    _HC_OV + "Cleaning.Drying": "drying",
+}
+HC_PROGRAM_NAME = {v: k for k, v in HC_PROGRAMS.items()}
+HC_DEFAULT = {"dishwasher": {"program": "eco50"}, "oven": {"program": "hotAir", "setpoint": 180, "duration": 0}}
+HC_SETPOINT = "Cooking.Oven.Option.SetpointTemperature"
+HC_DURATION = "BSH.Common.Option.Duration"
 
 
 def homeconnect_profiles(folder: Path = HC_DIR) -> list[dict[str, Any]]:
@@ -1716,8 +1760,53 @@ def _hc_val(group: dict, name: str) -> Any:
         return None
 
 
-def hc_state(app, kind: str) -> dict[str, Any]:
+def hc_programs(app) -> list[str]:
+    """Keys of the programs this appliance offers that can be started (not "select only", like pyrolysis)."""
+    out = []
+    for name, prog in (getattr(app, "programs", None) or {}).items():
+        key = HC_PROGRAMS.get(name)
+        if not key or key in out:
+            continue
+        if str(getattr(prog, "execution", "selectandstart")).lower().endswith("selectonly"):
+            continue
+        if getattr(prog, "available", None) is False:
+            continue
+        out.append(key)
+    return out
+
+
+def _hc_prog_key(prog) -> str | None:
+    try:
+        return HC_PROGRAMS.get(prog.name) if prog else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def hc_start_options(prog, kind: str, sel: dict[str, Any]) -> dict[int, Any]:
+    """Options for /ro/activeProgram: the writable options with a known value, plus (oven) the chosen temperature
+    and, when set, the cooking time. Keyed by option uid, as the library sends them."""
+    opts: dict[int, Any] = {}
+    for o in getattr(prog, "_options", None) or []:
+        name = getattr(o, "name", "")
+        if kind == "oven":
+            if name == HC_SETPOINT and sel.get("setpoint"):
+                opts[o.uid] = int(sel["setpoint"])
+            elif name == HC_DURATION and int(sel.get("duration") or 0) > 0:
+                opts[o.uid] = int(sel["duration"]) * 60
+            continue
+        try:
+            writable = str(getattr(o, "access", "")).lower() == "readwrite"
+            val = o.value_shadow
+        except Exception:  # noqa: BLE001
+            continue
+        if writable and val is not None and name != "BSH.Common.Option.StartInRelative":
+            opts[o.uid] = val
+    return opts
+
+
+def hc_state(app, kind: str, sel: dict[str, Any] | None = None) -> dict[str, Any]:
     """Flatten a homeconnect_websocket HomeAppliance into what the Edge driver needs."""
+    sel = sel or {}
     power = _hc_val(app.settings, "BSH.Common.Setting.PowerState")
     op = _hc_val(app.status, "BSH.Common.Status.OperationState")
     door = _hc_val(app.status, "BSH.Common.Status.DoorState")
@@ -1734,18 +1823,28 @@ def hc_state(app, kind: str) -> dict[str, Any]:
         "power": "on" if power == "On" else "off",
         "operation": HC_OPERATION.get(str(op), str(op).lower() if op else "inactive"),
         "door": str(door).lower() if door else None,                 # open closed locked
-        "program": active.split(".")[-1] if active else None,
+        "program": None,
         "remainingTime": int(remaining) if isinstance(remaining, (int, float)) else None,   # seconds
         "completionTime": _iso_in(float(remaining)) if isinstance(remaining, (int, float)) and running else None,
         "progress": int(progress) if isinstance(progress, (int, float)) else None,           # percent
         "remoteStartAllowed": bool(_hc_val(app.status, "BSH.Common.Status.RemoteControlStartAllowed")),
         "remoteControlActive": bool(_hc_val(app.status, "BSH.Common.Status.RemoteControlActive")),
     }
+    # program: the running one, else the one selected on the appliance, else the one chosen in SmartThings
+    key = HC_PROGRAMS.get(active) if active and running else None
+    if not key:
+        try:
+            key = _hc_prog_key(app.selected_program)
+        except Exception:  # noqa: BLE001
+            key = None
+    st["program"] = key or sel.get("program") or "none"
+    st["programs"] = hc_programs(app)
     if kind == "oven":
         t = _hc_val(app.status, "Cooking.Oven.Status.CurrentCavityTemperature")
-        sp = _hc_val(app.options, "Cooking.Oven.Option.SetpointTemperature")
+        sp = _hc_val(app.options, HC_SETPOINT)
         st["temperature"] = float(t) if isinstance(t, (int, float)) else None
-        st["setpoint"] = float(sp) if isinstance(sp, (int, float)) and running else None
+        st["setpoint"] = float(sp) if isinstance(sp, (int, float)) and running else float(sel.get("setpoint") or 180)
+        st["duration"] = int(sel.get("duration") or 0)    # minutes, 0 = no timer
     return st
 
 
@@ -1768,6 +1867,46 @@ class HomeConnect:
             pass
         self.h["hosts"] = hosts
         self.apps: dict[str, Any] = {}
+        self.kinds: dict[str, str] = {}
+        self.wake: dict[str, asyncio.Event] = {}
+        # program, oven temperature and cooking time chosen in SmartThings, per appliance (kept in config.json)
+        self.sel: dict[str, dict[str, Any]] = {k: dict(v) for k, v in (self.h.get("selection") or {}).items()}
+
+    def selection(self, ha_id: str) -> dict[str, Any]:
+        cur = self.sel.setdefault(ha_id, {})
+        for k, v in HC_DEFAULT.get(self.kinds.get(ha_id, ""), {}).items():
+            cur.setdefault(k, v)
+        return cur
+
+    def _save_selection(self) -> None:
+        cfg = load_config()
+        cfg.setdefault("homeconnect", {})["selection"] = self.sel
+        save_config(cfg)
+
+    async def _start(self, ha_id: str, app, key: str | None) -> None:
+        sel = self.selection(ha_id)
+        op = _hc_val(app.status, "BSH.Common.Status.OperationState")
+        if op == "Pause" and not key:
+            c = app.commands.get("BSH.Common.Command.ResumeProgram")
+            if c is not None:
+                await c.execute(1)
+                return
+        if not _hc_val(app.status, "BSH.Common.Status.RemoteControlStartAllowed"):
+            raise ValueError("remote start is not allowed: switch on Remote Start on the appliance first")
+        if key:
+            sel["program"] = key
+        key = sel.get("program")
+        prog = app.programs.get(HC_PROGRAM_NAME.get(key or "", "")) if key and key != "none" else None
+        if prog is None:
+            try:
+                prog = app.selected_program
+            except Exception:  # noqa: BLE001
+                prog = None
+        if prog is None:
+            raise ValueError(f"program {key} not available on this appliance")
+        opts = hc_start_options(prog, self.kinds.get(ha_id, ""), sel)
+        await prog.start(opts, override_options=True)
+        log.info("[homeconnect] %s start %s (%d options)", ha_id, _hc_prog_key(prog) or prog.name, len(opts))
 
     def _app_id(self) -> str:
         cfg = load_config()
@@ -1791,6 +1930,30 @@ class HomeConnect:
                 values = list((e.enum or {}).values())
                 target = "On" if cmd == "on" else ("Off" if "Off" in values else "Standby")
                 await e.set_value(target)
+            elif cmd == "program":
+                key = str(value or "")
+                if key not in HC_PROGRAM_NAME:
+                    raise ValueError(f"unknown program {key}")
+                self.selection(ha_id)["program"] = key
+                self._save_selection()
+                prog = app.programs.get(HC_PROGRAM_NAME[key])
+                if prog is not None and _hc_val(app.status, "BSH.Common.Status.RemoteControlActive"):
+                    try:  # also show it on the appliance; not possible on every appliance or in every state
+                        await prog.select()
+                    except Exception as ex:  # noqa: BLE001
+                        log.debug("[homeconnect] %s select %s: %s", ha_id, key, ex)
+            elif cmd == "setpoint":
+                self.selection(ha_id)["setpoint"] = max(30, min(300, int(round(float(value)))))
+                self._save_selection()
+            elif cmd == "duration":
+                self.selection(ha_id)["duration"] = max(0, min(1440, int(round(float(value)))))
+                self._save_selection()
+            elif cmd == "start":
+                if value and str(value) not in HC_PROGRAM_NAME:
+                    raise ValueError(f"unknown program {value}")
+                await self._start(ha_id, app, str(value) if value else None)
+                if value:
+                    self._save_selection()
             elif cmd in ("stop", "pause", "resume"):
                 name = {"stop": "BSH.Common.Command.AbortProgram", "pause": "BSH.Common.Command.PauseProgram",
                         "resume": "BSH.Common.Command.ResumeProgram"}[cmd]
@@ -1800,13 +1963,18 @@ class HomeConnect:
                 await c.execute(1)
             else:
                 raise ValueError(f"unsupported command {cmd}")
-            log.info("[homeconnect] %s %s", ha_id, cmd)
+            log.info("[homeconnect] %s %s %s", ha_id, cmd, "" if value is None else value)
+            ev = self.wake.get(ha_id)
+            if ev is not None:
+                ev.set()
         return handler
 
     async def _run_one(self, prof: dict[str, Any], app_id: str, session) -> None:
         from homeconnect_websocket import HomeAppliance, parse_device_description
         ha_id = prof["haId"]
         kind = HC_TYPES.get(prof.get("type"), "appliance")
+        self.kinds[ha_id] = kind
+        wake = self.wake[ha_id] = asyncio.Event()
         dev_id = f"homeconnect-{ha_id}"
         name = f"{prof.get('brand', '').title()} {prof.get('type', 'Appliance')}".strip()
         host = (self.h.get("hosts") or {}).get(ha_id) or hc_default_host(prof)
@@ -1834,7 +2002,7 @@ class HomeConnect:
         last = None
         while True:
             try:
-                st = hc_state(app, kind)
+                st = hc_state(app, kind, self.selection(ha_id))
                 if st != last:
                     REG.upsert(dev_id, kind, name, st, online=state["connected"])
                     last = st
@@ -1842,7 +2010,12 @@ class HomeConnect:
                     REG.set_online(dev_id, state["connected"])
             except Exception as ex:  # noqa: BLE001
                 log.debug("[homeconnect] %s: state: %s", name, ex)
-            await asyncio.sleep(self.POLL)
+            try:  # next check after POLL seconds, or right after a command
+                await asyncio.wait_for(wake.wait(), self.POLL)
+                await asyncio.sleep(0.5)
+            except asyncio.TimeoutError:
+                pass
+            wake.clear()
 
     async def run(self) -> None:
         profiles = homeconnect_profiles()
@@ -2503,12 +2676,13 @@ async def demo_devices() -> None:
     await demo_velux("refresh", None)
     rain = rain_summary([0.0] * 4 + [0.5, 1.2, 0.8] + [0.0] * 17)
     REG.upsert("demo-rainradar", "rainradar", "Demo rain radar", rain, True, dry)
-    dish = {"power": "on", "operation": "run", "door": "closed", "program": "Eco50", "remainingTime": 3600,
+    dish = {"power": "on", "operation": "run", "door": "closed", "program": "eco50", "remainingTime": 3600,
             "completionTime": _iso_in(3600), "progress": 40, "remoteStartAllowed": False,
-            "remoteControlActive": True}
-    oven = {"power": "on", "operation": "run", "door": "closed", "program": "HotAir", "remainingTime": 1200,
+            "remoteControlActive": True, "programs": ["eco50", "auto2", "quick45", "machineCare"]}
+    oven = {"power": "on", "operation": "run", "door": "closed", "program": "hotAir", "remainingTime": 1200,
             "completionTime": _iso_in(1200), "progress": 20, "remoteStartAllowed": False,
-            "remoteControlActive": True, "temperature": 165.0, "setpoint": 180.0}
+            "remoteControlActive": True, "temperature": 165.0, "setpoint": 180.0, "duration": 0,
+            "programs": ["hotAir", "topBottom", "pizza", "micro600"]}
 
     async def demo_hc(dev, st, cmd, value):
         if cmd in ("on", "off"):
@@ -2517,6 +2691,16 @@ async def demo_devices() -> None:
             st.update(operation="inactive", remainingTime=None, completionTime=None, progress=None)
         elif cmd in ("pause", "resume"):
             st["operation"] = "pause" if cmd == "pause" else "run"
+        elif cmd == "program" and value in st.get("programs", []):
+            st["program"] = value
+        elif cmd == "setpoint":
+            st["setpoint"] = float(value)
+        elif cmd == "duration":
+            st["duration"] = int(value)
+        elif cmd == "start":
+            if value in st.get("programs", []):
+                st["program"] = value
+            st["operation"] = "run"
         REG.upsert(dev, dev.split("-")[1], "Demo " + dev.split("-")[1], st, True,
                    lambda c, v, d=dev, s_=st: demo_hc(d, s_, c, v))
 

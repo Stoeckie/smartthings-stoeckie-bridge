@@ -3,7 +3,8 @@
 -- GET /stbridge/devices and creates/updates one child device per bridge device:
 --   dryer  (AEG via Electrolux API)  -> dryerOperatingState, remoteControlStatus, contactSensor (door)
 --   dishwasher / oven (Home Connect, local) -> switch, dishwasher/ovenOperatingState, contactSensor (door),
---                                        remoteControlStatus, oven temperature + setpoint
+--                                        remoteControlStatus, oven temperature + setpoint, program list +
+--                                        start (custom applianceProgram), oven temperature + cooking time
 --   window (VELUX ACTIVE via HomeKit) -> windowShade, windowShadeLevel
 --   sensor (VELUX climate sensor)     -> temperature, humidity, CO2
 --   aircon (Fujitsu via FGLair)       -> switch, airConditionerMode (plus minHeat on units that have it, like the
@@ -68,7 +69,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-06g"
+local BUILD = "2026-11-06h"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -91,11 +92,14 @@ local coolSetpoint = capabilities.thermostatCoolingSetpoint
 local acModeX = capabilities["silvervalley08660.airconMode"]
 local targetTemp = capabilities["silvervalley08660.targetTemperature"]
 local airflowDir = capabilities["silvervalley08660.airflowDirection"]  -- louver position 1..n (swing off)
+-- Home Connect: program list with start button, and oven temperature + cooking time (labels EN/NL)
+local hcProg = capabilities["silvervalley08660.applianceProgram"]
+local cookSet = capabilities["silvervalley08660.cookSettings"]
 
 local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor = "stoeckie-climate",
                   aircon = "stoeckie-aircon-v3", car = "stoeckie-car-v2",
                   velux_lock = "stoeckie-velux-lock", rain = "stoeckie-rain-v4",
-                  rainradar = "stoeckie-rainradar", dishwasher = "stoeckie-dishwasher", oven = "stoeckie-oven" }
+                  rainradar = "stoeckie-rainradar", dishwasher = "stoeckie-dishwasher-v2", oven = "stoeckie-oven-v2" }
 local MANUFACTURER = { dryer = "AEG", aircon = "Fujitsu", car = "Skoda", dishwasher = "Home Connect", oven = "Home Connect" }
 
 -- bridge value <-> SmartThings value
@@ -373,6 +377,15 @@ local function hc_common(dev, s)
   end
 end
 
+local function hc_program(dev, s)
+  if type(s.programs) == "table" and #s.programs > 0 then
+    local list = {}
+    for _, k in ipairs(s.programs) do list[#list + 1] = k end
+    emit_list(dev, "hcProgs", list, hcProg.supportedPrograms)
+  end
+  if s.program then try_emit(dev, function() return hcProg.program(tostring(s.program)) end) end
+end
+
 local function hc_completion(dev, s, cap)
   if not s.completionTime then return end
   local new = iso_secs(s.completionTime)
@@ -392,6 +405,7 @@ local function emit_dishwasher(dev, s)
   try_emit(dev, function() return dishOp.dishwasherJobState[job]() end)
   if s.progress then try_emit(dev, function() return dishOp.progress(math.floor(s.progress)) end) end
   hc_completion(dev, s, dishOp)
+  hc_program(dev, s)
 end
 
 local function emit_oven(dev, s)
@@ -407,7 +421,12 @@ local function emit_oven(dev, s)
   if s.temperature then
     try_emit(dev, function() return capabilities.temperatureMeasurement.temperature({ value = s.temperature, unit = "C" }) end)
   end
-  if s.setpoint then try_emit(dev, function() return ovenSetpoint.ovenSetpoint(math.floor(s.setpoint)) end) end
+  if s.setpoint then
+    try_emit(dev, function() return ovenSetpoint.ovenSetpoint(math.floor(s.setpoint)) end)
+    try_emit(dev, function() return cookSet.temperature({ value = math.floor(s.setpoint), unit = "C" }) end)
+  end
+  if s.duration then try_emit(dev, function() return cookSet.duration({ value = math.floor(s.duration), unit = "min" }) end) end
+  hc_program(dev, s)
 end
 
 local EMIT = { dryer = emit_dryer, window = emit_window, sensor = emit_sensor, aircon = emit_aircon, car = emit_car,
@@ -427,6 +446,11 @@ local function child_profile(key, device)
   if key:match("^fglair%-") or key == "demo-aircon" then return PROFILE.aircon end
   if key == "buienradar" or key == "demo-rainradar" then
     return PROFILE.rainradar .. (rain_simple(device) and "-simple" or "")
+  end
+  -- -v2: program list, start button, oven temperature and cooking time
+  if key:match("^homeconnect%-") or key == "demo-dishwasher" or key == "demo-oven" then
+    if device:supports_capability(dishOp) then return PROFILE.dishwasher end
+    if device:supports_capability(ovenOp) then return PROFILE.oven end
   end
 end
 
@@ -609,7 +633,7 @@ local function handle_hc_machine(driver, device, cmd)
   local want = cmd.args.state or cmd.args.machineState
   if want == "stop" or want == "ready" then send(driver, device, "stop")
   elseif want == "pause" or want == "paused" then send(driver, device, "pause")
-  elseif want == "run" or want == "running" then send(driver, device, "resume") end
+  elseif want == "run" or want == "running" then send(driver, device, "start") end  -- resumes when paused
 end
 
 local function handle_switch_on(driver, device, cmd)
@@ -666,10 +690,10 @@ local function device_init(driver, device)
     device:emit_event(windowShade.supportedWindowShadeCommands({ "open", "close", "pause" }, { visibility = { displayed = false } }))
   end
   if device:supports_capability(dishOp) then
-    device:emit_event(dishOp.supportedMachineStates({ "stop" }, { visibility = { displayed = false } }))
+    device:emit_event(dishOp.supportedMachineStates({ "run", "stop" }, { visibility = { displayed = false } }))
   end
   if device:supports_capability(ovenOp) then
-    device:emit_event(ovenOp.supportedMachineStates({ "ready", "paused" }, { visibility = { displayed = false } }))
+    device:emit_event(ovenOp.supportedMachineStates({ "ready", "running", "paused" }, { visibility = { displayed = false } }))
   end
   if device:supports_capability(dryerOp) then
     device:emit_event(dryerOp.supportedMachineStates({ "run", "pause", "stop" }, { visibility = { displayed = false } }))
@@ -855,6 +879,24 @@ local driver = Driver("stoeckie-bridge-local", {
     [ovenOp.ID] = {
       [ovenOp.commands.setMachineState.NAME] = handle_hc_machine,
       [ovenOp.commands.stop.NAME] = function(driver, device) send(driver, device, "stop") end,
+    },
+    [ovenSetpoint.ID] = {
+      [ovenSetpoint.commands.setOvenSetpoint.NAME] = function(driver, device, cmd)
+        send(driver, device, "setpoint", tonumber(cmd.args.setpoint))
+      end,
+    },
+    [hcProg.ID] = {
+      [hcProg.commands.setProgram.NAME] = function(driver, device, cmd) send(driver, device, "program", cmd.args.program) end,
+      [hcProg.commands.startProgram.NAME] = function(driver, device, cmd) send(driver, device, "start", cmd.args.program) end,
+      [hcProg.commands.start.NAME] = function(driver, device) send(driver, device, "start") end,
+    },
+    [cookSet.ID] = {
+      [cookSet.commands.setTemperature.NAME] = function(driver, device, cmd)
+        send(driver, device, "setpoint", tonumber(cmd.args.temperature))
+      end,
+      [cookSet.commands.setDuration.NAME] = function(driver, device, cmd)
+        send(driver, device, "duration", tonumber(cmd.args.duration))
+      end,
     },
     [dryerOp.ID] = {
       [dryerOp.commands.setMachineState.NAME] = handle_machine_state,

@@ -240,6 +240,36 @@ def test_min_heat(fake, monkeypatch):
     asyncio.run(main())
 
 
+def test_min_heat_read_only(fake, monkeypatch):
+    """A unit that only reports min_heat (read only in the cloud) gets no Minimum Heat mode or switch."""
+    fake.props["min_heat"] = (0, "integer", True)
+    async def main():
+        runner, base = await start(fake)
+        patch_urls(monkeypatch, base)
+        monkeypatch.setattr(sb.asyncio, "sleep", _fast_sleep)
+        sb.REG.devices.clear()
+        fg = sb.FGLair({"fglair": {"username": "a@b.nl", "password": "goed", "region": "eu"}})
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            fg.api = fg._new_api(session)
+            await fg.api.async_sign_in()
+            await fg._sync()
+            st = sb.REG.devices["fglair-AC000W000000001"]["state"]
+            assert "minheat" not in st["supportedModes"] and st["minHeat"] is None
+            assert "min_heat property read only" in sb.describe_unit(fg.devices["AC000W000000001"])
+            h = sb.REG.handlers["fglair-AC000W000000001"]
+            n = len(fake.sets)
+            await h("mode", "cool")  # no attempt to write the read only property
+            assert [x[0] for x in fake.sets[n:]] == ["operation_mode"]
+            try:
+                await h("mode", "minheat")
+                raise AssertionError("expected ValueError")
+            except ValueError:
+                pass
+        await runner.cleanup()
+    asyncio.run(main())
+
+
 def test_airflow_direction(fake, monkeypatch):
     """Louver position: reported 1..count, setting it switches vertical swing off first."""
     fake.props["af_vertical_direction"] = (3, "integer", False)

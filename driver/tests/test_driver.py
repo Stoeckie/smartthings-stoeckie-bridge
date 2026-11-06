@@ -37,7 +37,8 @@ for _, id in ipairs({ "windowShade", "windowShadeLevel", "refresh", "dryerOperat
                       "airConditionerMode", "airConditionerFanMode", "fanOscillationMode",
                       "thermostatCoolingSetpoint", "lock", "waterSensor", "relativeHumidityMeasurement", "rainSensor", "precipitationSensor",
                       "silvervalley08660.airconMode", "silvervalley08660.targetTemperature",
-                      "silvervalley08660.airflowDirection", "dishwasherOperatingState", "ovenOperatingState",
+                      "silvervalley08660.airflowDirection", "silvervalley08660.applianceProgram",
+                      "silvervalley08660.cookSettings", "dishwasherOperatingState", "ovenOperatingState",
                       "ovenSetpoint", "temperatureMeasurement", "remoteControlStatus" }) do caps[id].ID = id end
 package.loaded["st.capabilities"] = caps
 package.loaded["st.driver"] = function(name, tmpl) DRIVER = tmpl; return { run = function() end } end
@@ -457,3 +458,21 @@ def test_homeconnect_appliances(bridge):
     st = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{bridge}/stbridge/devices", timeout=5).read())
     by = {d["id"]: d["state"] for d in st["devices"]}
     assert by["demo-oven"]["operation"] == "inactive" and by["demo-dishwasher"]["power"] == "off"
+    assert "cap.silvervalley08660.applianceProgram.supportedPrograms" in opaths
+    assert "cap.silvervalley08660.cookSettings.temperature" in opaths
+    h = 'DRIVER.capability_handlers["silvervalley08660.applianceProgram"]'
+    c = 'DRIVER.capability_handlers["silvervalley08660.cookSettings"]'
+    lua.execute(f'{c}.setTemperature(DRIVER_OBJ, OVEN, {{ args = {{ temperature = 200 }} }})')
+    lua.execute(f'{c}.setDuration(DRIVER_OBJ, OVEN, {{ args = {{ duration = 45 }} }})')
+    lua.execute(f'{h}.startProgram(DRIVER_OBJ, OVEN, {{ args = {{ program = "pizza" }} }})')
+    lua.execute(f'{h}.setProgram(DRIVER_OBJ, DISH, {{ args = {{ program = "quick45" }} }})')
+    lua.execute('DRIVER.capability_handlers.dishwasherOperatingState.setMachineState(DRIVER_OBJ, DISH, { args = { state = "run" } })')
+    st = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{bridge}/stbridge/devices", timeout=5).read())
+    by = {d["id"]: d["state"] for d in st["devices"]}
+    assert by["demo-oven"]["program"] == "pizza" and by["demo-oven"]["setpoint"] == 200.0
+    assert by["demo-oven"]["duration"] == 45 and by["demo-oven"]["operation"] == "run"
+    assert by["demo-dishwasher"]["program"] == "quick45" and by["demo-dishwasher"]["operation"] == "run"
+    lua.execute('DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)')
+    vals = {oven.events[i].path: oven.events[i].arg for i in range(1, len(oven.events) + 1)}
+    assert vals.get("cap.silvervalley08660.applianceProgram.program") == "pizza"
+    assert lua.eval("OVEN").new_profile in (None, "stoeckie-oven-v2")

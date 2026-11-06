@@ -1,4 +1,4 @@
-name: stoeckie-oven
+name: stoeckie-oven-v2
 components:
   - id: main
     capabilities:
@@ -14,7 +14,14 @@ components:
         version: 1
       - id: remoteControlStatus
         version: 1
+      - id: silvervalley08660.applianceProgram
+        version: 1
+      - id: silvervalley08660.cookSettings
+        version: 1
       - id: refresh
         version: 1
     categories:
       - name: Oven
+metadata:
+  vid: 8d63ce9f-158f-34a4-ab42-c1210fdfb18b
+  mnmn: SmartThingsCommunity
