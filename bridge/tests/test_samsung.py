@@ -148,3 +148,74 @@ def test_tv_helpers():
     assert [t["host"] for t in tv.tvs] == ["192.168.1.30"] and tv.dev_id("192.168.1.30") == "samsungtv-192-168-1-30"
     ss = sb.Samsung({"samsung": {"appliances": [{"host": "192.168.1.30", "type": "tv"}, {"host": "192.168.1.9"}]}})
     assert [a["host"] for a in ss.appliances] == ["192.168.1.9"]
+
+
+def _off_test(monkeypatch, state):
+    """The washer answers, then stops answering (switched off): offline, and off when it was not washing."""
+    import asyncio
+    import cbor2
+    sb.REG.devices.clear()
+    calls = {"n": 0}
+
+    class Sess:
+        def get(self, path, timeout=10):
+            calls["n"] += 1
+            if calls["n"] > 6:
+                raise TimeoutError("session operation timed out")
+            data = {"operational/state/vs/0": {"x.com.samsung.da.state": state, "x.com.samsung.da.progress": "Wash",
+                                               "x.com.samsung.da.remainingTime": "00:30:00"},
+                    "power/vs/0": {"x.com.samsung.da.power": "On"},
+                    "remotectrl/vs/0": {"x.com.samsung.da.remoteControlEnabled": "true"}}.get("/".join(path), {})
+            return 0x45, cbor2.dumps(data)
+
+        def ping(self):
+            pass
+
+        def close(self):
+            pass
+
+    opened = {"n": 0}
+
+    def fake_open(host):
+        opened["n"] += 1
+        if opened["n"] > 1:
+            raise ConnectionError("no answer (switched off?)")
+        return Sess(), 49155
+
+    ss = sb.Samsung({"samsung": {"appliances": [{"host": "192.168.1.9", "name": "W"}]}})
+    monkeypatch.setattr(ss, "_open", fake_open)
+    monkeypatch.setattr(sb.Samsung, "HOT_EVERY", 0.01)
+    monkeypatch.setattr(sb.Samsung, "LIVENESS", 0.1)
+    monkeypatch.setattr(sb.Samsung, "RETRY", 0.01)
+    seen = []
+    first = []
+    orig = sb.REG.upsert
+
+    def rec(dev_id, kind, name, state, online=True, handler=None):
+        first.append((online, dict(state)))
+        orig(dev_id, kind, name, state, online=online, handler=handler)
+    monkeypatch.setattr(sb.REG, "upsert", rec)
+
+    async def main():
+        t = asyncio.create_task(ss._run_one({"host": "192.168.1.9", "name": "W"}))
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            d = sb.REG.devices.get("samsung-192-168-1-9")
+            if d:
+                seen.append((d["online"], dict(d["state"])))
+        t.cancel()
+    asyncio.run(main())
+    seen.insert(0, first[0])
+    return seen, sb.REG.devices["samsung-192-168-1-9"]
+
+
+def test_washer_off_when_idle(monkeypatch):
+    seen, d = _off_test(monkeypatch, "Ready")
+    assert seen[0] == (False, {})  # not shown as off before the first answer
+    assert any(o and s.get("power") == "on" and s.get("remoteStartAllowed") for o, s in seen)
+    assert d["online"] is False and d["state"]["power"] == "off" and d["state"]["remoteStartAllowed"] is False
+
+
+def test_washer_keeps_state_when_lost_during_wash(monkeypatch):
+    seen, d = _off_test(monkeypatch, "Run")
+    assert d["online"] is False and d["state"]["operation"] == "run" and d["state"]["power"] == "on"

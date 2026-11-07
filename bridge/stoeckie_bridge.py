@@ -69,7 +69,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-07b"
+VERSION = "2026-11-07c"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -2234,6 +2234,11 @@ def ss_washer_state(res: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# what a washer that does not answer any more (switched off) shows, when it was not washing
+SS_OFF = {"power": "off", "remoteStartAllowed": False, "operation": "inactive", "job": "none", "remainingTime": None,
+          "completionTime": None, "progress": None}
+
+
 class Samsung:
     """Samsung appliances on the LAN (OCF over CoAP-DTLS, library smartthings-local). Washers for now.
     Appliances come from config ("samsung": {"appliances": [{"host": ip, "type": "washer", "name": ...}]}) or
@@ -2243,6 +2248,7 @@ class Samsung:
     HOT_EVERY = 4      # operational state (this washer answers slowly when asked every second)
     PING = 25          # CoAP ping, keeps the session alive
     LIVENESS = 60      # no answer at all this long: new session
+    RETRY = 30         # wait before a new session after a failure
     # small resources every POLL seconds; the course resource is large (several CoAP blocks) and the firmware
     # stops answering for a while when it is read too often, so it is read at connect, every COURSE_EVERY seconds
     # and right after a command
@@ -2396,7 +2402,9 @@ class Samsung:
         self.locks[host] = asyncio.Lock()
         wake = self.wake[host] = asyncio.Event()
         handler = self._command(host)
-        REG.upsert(dev_id, kind, name, ss_washer_state({}), online=True, handler=handler)
+        # offline and without a state until the first answer: a bridge restart then does not show the washer as
+        # switched off with no course for a moment
+        REG.upsert(dev_id, kind, name, {}, online=False, handler=handler)
         once: dict[str, Any] = {}
         cache: dict[str, Any] = {}
         last, fails, logged = None, 0, False
@@ -2411,9 +2419,14 @@ class Samsung:
                         log.info("[samsung] %s (%s): %r", name, host, ex)
                     if fails >= 2:
                         # no answer: switched off (its wifi sleeps) or another local client holds the only session.
-                        # The bridge can not tell these apart, so the device shows offline instead of a wrong state.
-                        REG.set_online(dev_id, False)
-                    await asyncio.sleep(30 if fails < 10 else 60)
+                        # The device shows offline. When it was not washing, it also shows off and without remote
+                        # control (a switched off washer can not be started); during a wash the last state stays.
+                        if last and last.get("operation") not in ("run", "pause"):
+                            last = {**last, **SS_OFF}
+                            REG.upsert(dev_id, kind, name, last, online=False)
+                        else:
+                            REG.set_online(dev_id, False)
+                    await asyncio.sleep(self.RETRY if fails < 10 else 2 * self.RETRY)
                     continue
                 self.sessions[host] = sess
                 REG.set_online(dev_id, True)
@@ -2475,7 +2488,7 @@ class Samsung:
                 except Exception:  # noqa: BLE001
                     pass
                 self.sessions.pop(host, None)
-                await asyncio.sleep(30)
+                await asyncio.sleep(self.RETRY)
                 continue
             try:  # next read after HOT_EVERY seconds, or right after a command
                 await asyncio.wait_for(wake.wait(), self.HOT_EVERY)
