@@ -69,7 +69,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-07c"
+VERSION = "2026-11-07d"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -2419,10 +2419,11 @@ class Samsung:
                         log.info("[samsung] %s (%s): %r", name, host, ex)
                     if fails >= 2:
                         # no answer: switched off (its wifi sleeps) or another local client holds the only session.
-                        # The device shows offline. When it was not washing, it also shows off and without remote
-                        # control (a switched off washer can not be started); during a wash the last state stays.
-                        if last and last.get("operation") not in ("run", "pause"):
-                            last = {**last, **SS_OFF}
+                        # The device shows offline. When it was not washing (or did not answer at all since the
+                        # bridge started), it also shows off and without remote control (a switched off washer can not
+                        # be started); when the connection drops during a wash the last state stays.
+                        if not last or last.get("operation") not in ("run", "pause"):
+                            last = {**(last or {}), **SS_OFF}
                             REG.upsert(dev_id, kind, name, last, online=False)
                         else:
                             REG.set_online(dev_id, False)

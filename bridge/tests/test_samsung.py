@@ -219,3 +219,23 @@ def test_washer_off_when_idle(monkeypatch):
 def test_washer_keeps_state_when_lost_during_wash(monkeypatch):
     seen, d = _off_test(monkeypatch, "Run")
     assert d["online"] is False and d["state"]["operation"] == "run" and d["state"]["power"] == "on"
+
+
+def test_washer_off_after_restart_without_answer(monkeypatch):
+    """Bridge starts while the washer is switched off: offline and off, not the last state from before."""
+    import asyncio
+    sb.REG.devices.clear()
+    ss = sb.Samsung({"samsung": {"appliances": [{"host": "192.168.1.9", "name": "W"}]}})
+
+    def no_answer(host):
+        raise ConnectionError("no answer (switched off?)")
+    monkeypatch.setattr(ss, "_open", no_answer)
+    monkeypatch.setattr(sb.Samsung, "RETRY", 0.01)
+
+    async def main():
+        t = asyncio.create_task(ss._run_one({"host": "192.168.1.9", "name": "W"}))
+        await asyncio.sleep(0.2)
+        t.cancel()
+    asyncio.run(main())
+    d = sb.REG.devices["samsung-192-168-1-9"]
+    assert d["online"] is False and d["state"]["power"] == "off" and d["state"]["remoteStartAllowed"] is False
