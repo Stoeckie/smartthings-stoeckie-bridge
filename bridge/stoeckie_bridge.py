@@ -11,7 +11,9 @@ Sources
     (library roombapy-prime). Only read, twice a day; the robot itself is controlled locally by the hub.
   * Rain radar (optional): rain now and the next 2 hours for an address with a radius, every 5 minutes. Buienradar in
     the Netherlands and Belgium (5 minute steps), Open-Meteo elsewhere (15 minute steps). Addresses: PDOK (NL
-    postcode) or OpenStreetMap Nominatim (anywhere).
+    postcode) or OpenStreetMap Nominatim (anywhere). The same device also shows the outdoor dew point now and the
+    highest dew point in the next 48 hours (Open-Meteo hourly forecast, refreshed every hour), for routines that
+    have to look ahead (e.g. keep a crawl space dryer on when humid air is coming).
   * Home Connect (optional, local): Bosch / Siemens / Neff dishwashers, ovens and more over their own local
     websocket (library homeconnect-websocket, Python 3.13+). Keys and descriptions come once from the Home Connect
     cloud with the Home Connect Profile Downloader; put its zips in the homeconnect folder next to config.json.
@@ -31,8 +33,9 @@ LAN API (default port 8787, no auth, LAN only)
       velux_lock: lock | unlock | refresh | settings {poll_seconds}
       rain:    refresh (VELUX gateway rain sensor)
       dishwasher / oven (Home Connect): on | off | stop | pause | resume (oven) | refresh
-      rainradar: refresh | settings {postcode, housenumber, address, location, radius_m, threshold, provider}
-               (state: raining, rainRate mm/h, minutesUntilRain, minutesOfRain, intensity, summary)
+      rainradar: refresh | settings {postcode, housenumber, address, location, radius_m, threshold, provider,
+               humid_hours} (state: raining, rainRate mm/h, minutesUntilRain, minutesOfRain, intensity, summary,
+               dewPointNow, dewPointMax and dewPointMaxAt over the next humid_hours hours, humidSummary)
   POST /stbridge/buienradar               body {"enabled": true} (from the bridge device)
   GET  /stbridge/irobot/<blid>[?refresh=1] -> {"name", "favorites": [{name, id, command, params}], "updated"}
   POST /stbridge/srp                      body {"nonce", "box"} (signed and encrypted, paired hubs only)
@@ -69,7 +72,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-07d"
+VERSION = "2026-11-07e"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -1327,6 +1330,36 @@ PDOK_URL = "https://api.pdok.nl/bzk/locatieserver/search/v3_1/free"  # Dutch add
 OPENMETEO_URL = "https://api.open-meteo.com/v1/forecast"  # worldwide, 15 minute steps (CC BY 4.0, no key)
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"  # addresses worldwide (OpenStreetMap, ODbL)
 RAIN_PROVIDERS = ("auto", "buienradar", "openmeteo")
+HUMID_POLL = 3600  # dew point forecast: the weather models are updated hourly
+HUMID_HOURS = 48   # default look-ahead for the highest dew point
+
+
+def humid_summary(data: Any, hours: int = HUMID_HOURS, now: dt.datetime | None = None) -> dict[str, Any]:
+    """Open-Meteo hourly + current dew point -> dew point now and the highest one in the next `hours` hours."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    h = (data or {}).get("hourly") or {}
+    rows = []
+    for t, dew in zip(h.get("time") or [], h.get("dew_point_2m") or []):
+        start = dt.datetime.fromisoformat(t).replace(tzinfo=dt.timezone.utc)
+        if dew is None or start + dt.timedelta(hours=1) <= now:  # hour is over
+            continue
+        rows.append((start, float(dew)))
+        if len(rows) >= hours:
+            break
+    if not rows:
+        return {}
+    cur = (data or {}).get("current") or {}
+    dnow = float(cur["dew_point_2m"]) if cur.get("dew_point_2m") is not None else rows[0][1]
+    at, dmax = max(rows, key=lambda r: r[1])
+    when = at.astimezone().strftime("%a %H:%M")  # bridge pc local time
+    out = {"dewPointNow": round(dnow, 1), "dewPointMax": round(max(dmax, dnow), 1), "dewPointMaxAt": at.isoformat(),
+           "humidHours": hours,
+           "humidSummary": f"Dew point now {dnow:.1f} C, highest {dmax:.1f} C ({when}) in the next {hours} h"}
+    if cur.get("relative_humidity_2m") is not None:
+        out["humidityNow"] = cur["relative_humidity_2m"]
+    if cur.get("temperature_2m") is not None:
+        out["temperatureNow"] = cur["temperature_2m"]
+    return out
 
 
 def in_benelux(lat: float, lon: float) -> bool:
@@ -1386,6 +1419,7 @@ def buienradar_settings(v: dict[str, Any], current: dict[str, Any]) -> dict[str,
         out["provider"] = v["provider"]
     out["radius_m"] = current.get("radius_m", int(float(current.get("radius_km") or 0) * 1000))
     out["threshold"] = current.get("threshold", RAIN_THRESHOLD)
+    out["humid_hours"] = current.get("humid_hours", HUMID_HOURS)
     if "postcode" in v:
         out["postcode"] = normalize_postcode(v.get("postcode"))
     if "housenumber" in v:
@@ -1393,7 +1427,7 @@ def buienradar_settings(v: dict[str, Any], current: dict[str, Any]) -> dict[str,
     if "location" in v:
         loc = parse_location(v.get("location"))
         out["location"] = f"{loc[0]}, {loc[1]}" if loc else None
-    for key, lo, hi, cast in (("radius_m", 0, 25000, int), ("threshold", 0.05, 5.0, float)):
+    for key, lo, hi, cast in (("radius_m", 0, 25000, int), ("threshold", 0.05, 5.0, float), ("humid_hours", 6, 72, int)):
         try:
             if v.get(key) not in (None, ""):
                 out[key] = max(lo, min(hi, cast(float(str(v[key]).replace(",", ".")))))
@@ -1540,6 +1574,38 @@ class Buienradar:
         self.session = None
         self.wake = asyncio.Event()
         self.error: str | None = None
+        self.humid: dict[str, Any] = {}
+        self.humid_key: tuple | None = None
+        self.humid_next = 0.0  # next dew point forecast fetch (time.time())
+        self.humid_ok = 0.0    # last good fetch
+
+    async def _fetch_humid(self, lat: float, lon: float, hours: int) -> dict[str, Any]:
+        """Dew point forecast for one point (Open-Meteo, hourly; in NL the KNMI model)."""
+        params = {"latitude": f"{lat:.4f}", "longitude": f"{lon:.4f}", "timezone": "UTC",
+                  "hourly": "dew_point_2m", "current": "dew_point_2m,temperature_2m,relative_humidity_2m",
+                  "forecast_hours": str(hours + 1)}
+        async with self.session.get(OPENMETEO_URL, params=params,
+                                    headers={"User-Agent": f"stoeckie-bridge/{VERSION}"}) as r:
+            if r.status != 200:
+                raise RuntimeError(f"Open-Meteo HTTP {r.status}")
+            return humid_summary(await r.json(content_type=None), hours)
+
+    async def _humid_state(self, lat: float, lon: float) -> dict[str, Any]:
+        """Hourly; a failure never stops the rain radar (the last values stay up to 3 hours)."""
+        hours = int(self.b.get("humid_hours") or HUMID_HOURS)
+        key = (round(lat, 4), round(lon, 4), hours)
+        now = time.time()
+        if key != self.humid_key or now >= self.humid_next:
+            try:
+                self.humid = await self._fetch_humid(lat, lon, hours)
+                self.humid_key, self.humid_ok, self.humid_next = key, now, now + HUMID_POLL
+                log.info("[buienradar] %s", self.humid.get("humidSummary", "no dew point forecast"))
+            except Exception as ex:  # noqa: BLE001
+                log.warning("[buienradar] dew point forecast failed: %s", ex)
+                self.humid_next = now + 600
+                if now - self.humid_ok > 3 * HUMID_POLL:
+                    self.humid = {}
+        return self.humid
 
     async def _fetch(self, lat: float, lon: float) -> list[float]:
         async with self.session.get(BUIENRADAR_URL, params={"lat": f"{lat:.2f}", "lon": f"{lon:.2f}"},
@@ -1563,7 +1629,7 @@ class Buienradar:
         return {"postcode": b.get("postcode"), "housenumber": b.get("housenumber"), "address": b.get("address"),
                 "place": b.get("place"),
                 "lat": b.get("lat"), "lon": b.get("lon"), "radiusM": b.get("radius_m", 0),
-                "threshold": b.get("threshold", RAIN_THRESHOLD)}
+                "threshold": b.get("threshold", RAIN_THRESHOLD), "humidHours": b.get("humid_hours", HUMID_HOURS)}
 
     async def _locate(self) -> None:
         """Postcode + house number (NL) or an address (anywhere) -> lat/lon (once, stored in config.json)."""
@@ -1615,6 +1681,7 @@ class Buienradar:
         rates = [max(s[i] for s in series) for i in range(n)]  # heaviest rain anywhere in the radius
         state = rain_summary(rates, float(self.b.get("threshold") or RAIN_THRESHOLD))
         state.update(points=len(series), provider=provider, **self._settings_state())
+        state.update(await self._humid_state(lat, lon))
         name = "Buienradar" if provider == "buienradar" else "Rain radar"
         REG.upsert("buienradar", "rainradar", name, state, True, self._command())
         log.info("[buienradar] %s (%d point(s), radius %g m)", state["summary"], len(series), radius)
@@ -3330,7 +3397,7 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             b["enabled"] = bool(body["enabled"])
             changed = True
         settings = {k: body[k] for k in ("postcode", "housenumber", "address", "location", "radius_m", "threshold",
-                                         "provider") if k in body}
+                                         "provider", "humid_hours") if k in body}
         if settings:
             new = buienradar_settings(settings, b)
             if any(b.get(k) != new.get(k) for k in new):
@@ -3452,6 +3519,7 @@ async def demo_devices() -> None:
 
     await demo_velux("refresh", None)
     rain = rain_summary([0.0] * 4 + [0.5, 1.2, 0.8] + [0.0] * 17)
+    rain.update(dewPointNow=7.4, dewPointMax=11.2, humidHours=48)
     REG.upsert("demo-rainradar", "rainradar", "Demo rain radar", rain, True, dry)
     dish = {"power": "on", "operation": "run", "door": "closed", "program": "eco50", "remainingTime": 3600,
             "completionTime": _iso_in(3600), "progress": 40, "remoteStartAllowed": False,

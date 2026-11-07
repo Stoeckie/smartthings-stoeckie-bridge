@@ -65,7 +65,8 @@ function NEW_DEVICE(info)
               events = {}, state = "online",
               profile = { components = { main = { id = "main" }, outdoor = { id = "outdoor" }, plug = { id = "plug" },
                                          climate = { id = "climate" }, status = { id = "status" },
-                                         rain = { id = "rain" }, graph = { id = "graph" } } } }
+                                         rain = { id = "rain" }, graph = { id = "graph" },
+                                         dewNow = { id = "dewNow" }, dewMax = { id = "dewMax" } } } }
   function d:get_field(k) return self.fields[k] end
   function d:set_field(k, v) self.fields[k] = v end
   function d:emit_event(e) self.events[#self.events + 1] = { comp = "main", path = e.path, arg = e.arg } end
@@ -348,6 +349,9 @@ def test_rainradar(bridge):
     assert ev["main:cap.silvervalley08660.rainForecast.minutesUntilRain"]["value"] == 20
     assert ev["main:cap.silvervalley08660.rainForecast.minutesOfRain"]["value"] == 15
     assert ev["main:cap.silvervalley08660.rainForecast.summary"].startswith("Rain in 20 min")
+    # dew point now and the highest in the next 48 h, each in its own component
+    assert ev["dewNow:cap.temperatureMeasurement.temperature"]["value"] == 7.4
+    assert ev["dewMax:cap.temperatureMeasurement.temperature"]["value"] == 11.2
     # simple mode: other profile, only rain or dry
     lua.execute('''
       RR.preferences = { rainMode = "simple" }
@@ -356,9 +360,10 @@ def test_rainradar(bridge):
       DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
     ''')
     rr = lua.eval("RR")
-    assert rr.new_profile == "stoeckie-rainradar-simple"
-    paths = [rr.events[i].path for i in range(1, len(rr.events) + 1)]
-    assert paths == ["cap.rainSensor.rain.undetected"]
+    assert rr.new_profile == "stoeckie-rainradar-v2-simple"
+    paths = [f"{rr.events[i].comp}:{rr.events[i].path}" for i in range(1, len(rr.events) + 1)]
+    assert sorted(paths) == ["dewMax:cap.temperatureMeasurement.temperature",
+                             "dewNow:cap.temperatureMeasurement.temperature", "main:cap.rainSensor.rain.undetected"]
 
 
 def test_dryer_no_completion_time_spam(bridge):

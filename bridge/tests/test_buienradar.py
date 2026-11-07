@@ -158,6 +158,23 @@ def test_openmeteo_and_provider():
     assert sb.rain_provider({"lat": 52.35, "lon": 5.62, "provider": "openmeteo"}) == "openmeteo"
     s = sb.buienradar_settings({"address": "Rue de Rivoli 1, Paris", "provider": "x"}, {})
     assert s["address"] == "Rue de Rivoli 1, Paris" and s["provider"] == "auto" and s["lat"] is None
+    assert s["humid_hours"] == 48
+    assert sb.buienradar_settings({"humid_hours": "24"}, {})["humid_hours"] == 24
+    assert sb.buienradar_settings({"humid_hours": "500"}, {})["humid_hours"] == 72
+
+
+def test_dew_point_forecast():
+    import datetime as dt
+    now = dt.datetime(2026, 11, 7, 14, 30, tzinfo=dt.timezone.utc)
+    times = [(dt.datetime(2026, 11, 7, 13) + dt.timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M") for i in range(60)]
+    dew = [20.0] + [2.0 + (i % 24) * 0.3 for i in range(59)]  # 13:00 is over and must not count
+    data = {"hourly": {"time": times, "dew_point_2m": dew},
+            "current": {"dew_point_2m": 2.3, "temperature_2m": 7.6, "relative_humidity_2m": 69}}
+    s = sb.humid_summary(data, 48, now)
+    assert (s["dewPointNow"], s["dewPointMax"], s["humidHours"]) == (2.3, 8.9, 48)
+    assert s["humidityNow"] == 69 and s["dewPointMaxAt"].startswith("2026-11-08T13:00")
+    assert sb.humid_summary(data, 6, now)["dewPointMax"] == 3.5
+    assert sb.humid_summary({}, 48, now) == {}
 
 
 def test_source_abroad(monkeypatch):
@@ -171,10 +188,17 @@ def test_source_abroad(monkeypatch):
 
         async def openmeteo(req):
             lats = req.query["latitude"].split(",")
-            asked["points"] = len(lats)
+            if "minutely_15" in req.query:
+                asked["points"] = len(lats)
             now = sb.dt.datetime.now(sb.dt.timezone.utc).replace(second=0, microsecond=0)
             q = now - sb.dt.timedelta(minutes=now.minute % 15)
             times = [(q + sb.dt.timedelta(minutes=15 * i)).strftime("%Y-%m-%dT%H:%M") for i in range(9)]
+            if "hourly" in req.query:  # dew point forecast
+                asked["hours"] = req.query["forecast_hours"]
+                h = now.replace(minute=0)
+                ht = [(h + sb.dt.timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M") for i in range(49)]
+                return web.json_response({"hourly": {"time": ht, "dew_point_2m": [5.0] * 10 + [9.5] + [5.0] * 38},
+                                          "current": {"dew_point_2m": 5.2}})
             one = {"minutely_15": {"time": times, "precipitation": [0.0, 0.0, 0.3, 0.3] + [0.0] * 5}}
             return web.json_response([one] * len(lats) if len(lats) > 1 else one)
 
@@ -200,6 +224,7 @@ def test_source_abroad(monkeypatch):
         assert d["name"] == "Rain radar" and st["provider"] == "openmeteo" and st["place"] == "Paris, France"
         assert asked["points"] == 17 and "stoeckie-bridge" in asked["ua"]
         assert st["summary"].startswith("Rain in") and 15 <= st["minutesUntilRain"] <= 30
+        assert (st["dewPointNow"], st["dewPointMax"], asked["hours"]) == (5.2, 9.5, "49")
         task.cancel()
         await runner.cleanup()
 

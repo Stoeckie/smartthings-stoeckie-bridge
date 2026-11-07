@@ -8,7 +8,7 @@ One small bridge brings cloud-only appliances into SmartThings:
 | **Fujitsu FGLair** air conditioners | on/off, mode, setpoint, fan, swing, room and outdoor temperature (outdoor only on units with an outdoor sensor; others switch to a layout without it by themselves), Minimum Heat (as a mode, on units that have it) | [smartthings-fujitsu-fglair](https://github.com/Stoeckie/smartthings-fujitsu-fglair) |
 | **Škoda** cars (official MyŠkoda public API) | battery, charging on/off and power, charging cable, climate, at home, doors | [smartthings-skoda-bridge](https://github.com/Stoeckie/smartthings-skoda-bridge) |
 | **VELUX ACTIVE** departure mode (optional) | lock and unlock (departure mode: all windows and blinds blocked); rain sensor as its own device | windows: [VELUX ACTIVE (HomeKit local)](https://github.com/Stoeckie/smartthings-velux-active-local) |
-| **Rain radar** (optional) | rain now and the next 2 hours at your address with a radius: rain or dry, mm/h, minutes until rain, how long it rains. Buienradar in NL/BE, Open-Meteo worldwide | |
+| **Rain radar** (optional) | rain now and the next 2 hours at your address with a radius: rain or dry, mm/h, minutes until rain, how long it rains. Buienradar in NL/BE, Open-Meteo worldwide. Plus the outdoor dew point now and the highest in the next 48 hours (Open-Meteo) | |
 | **Home Connect** (Bosch, Siemens, Neff) dishwasher and oven, local (optional) | on/off, running, remaining time, progress, door, oven temperature; choose and start programs, oven temperature and cooking time; stop, pause, resume. No cloud after setup | [below](#home-connect-bosch--siemens--neff-local) |
 | **Samsung** washer, local (optional, experimental) | on/off, running, phase, remaining time, progress; start, pause, stop. No cloud | [below](#samsung-washer-local-experimental) |
 | **Samsung TV** | not through the bridge: use the Edge driver [Samsung TV (local)](https://github.com/Stoeckie/smartthings-samsung-tv-local), which runs on the hub itself (power, volume, mute, input, channel). The older TV support in the bridge still works but is no longer developed | [smartthings-samsung-tv-local](https://github.com/Stoeckie/smartthings-samsung-tv-local) |
@@ -94,8 +94,16 @@ Rain at your address, now and the next two hours, refreshed every 5 minutes. Sou
    * **Rain from (mm/h)**: default 0.1.
    * **Source**: Auto, Buienradar or Open-Meteo.
    * **Show**: **Detail** (default): `rainSensor` (rain detected or not), `precipitationSensor` (none, possible, light, moderate, heavy, violent) and the custom capability `silvervalley08660.rainForecast`: rain now (mm/h), rain starts in (minutes, 999 = no rain in the next 2 hours), rain lasts (minutes) and a short summary in English, all usable in routines, e.g. *rain starts in less than 15 minutes → close the windows*. **Rain or dry only**: just `rainSensor`.
+   * **Dew point forecast (hours)**: look-ahead for *Dew point max*, 6 to 72, default 48.
 
-The setup page has the same fields; the last change wins. Data: [Buienradar](https://www.buienradar.nl) (free for personal use), [Open-Meteo](https://open-meteo.com) (CC BY 4.0); addresses: [PDOK](https://www.pdok.nl), [OpenStreetMap Nominatim](https://nominatim.org) (© OpenStreetMap contributors, ODbL).
+The same device also has two values for routines that look ahead, both from the Open-Meteo hourly forecast (in the Netherlands the KNMI model), refreshed every hour for the same location:
+
+* **Dew point now**: outdoor dew point (°C).
+* **Dew point max (forecast)**: the highest outdoor dew point in the next 48 hours (setting above).
+
+Buienradar's free feed only has humidity as a station measurement, not as a forecast, so this part always comes from Open-Meteo. Example (a dryer in a crawl space, switched at most once a day because it runs on after switching off): at 14:00 switch it **on** when the crawl space humidity is 85% or more, or when *Dew point max* is 11 °C or more (humid air on its way); switch it **off** when the humidity is 80% or less **and** *Dew point max* is 8 °C or less. Air with a dew point of 8 °C is about 80% humid at 11 °C, so ventilation then dries the crawl space by itself.
+
+The setup page has the same fields (except the dew point look-ahead); the last change wins. Data: [Buienradar](https://www.buienradar.nl) (free for personal use), [Open-Meteo](https://open-meteo.com) (CC BY 4.0); addresses: [PDOK](https://www.pdok.nl), [OpenStreetMap Nominatim](https://nominatim.org) (© OpenStreetMap contributors, ODbL).
 
 ## Battery history graph (car)
 

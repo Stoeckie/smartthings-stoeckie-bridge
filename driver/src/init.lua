@@ -15,7 +15,8 @@
 --   velux_lock (VELUX departure mode) -> lock (locked = away: all windows and blinds blocked)
 --   rain   (VELUX gateway rain sensor) -> rainSensor (detected = raining)
 --   rainradar (Buienradar / Open-Meteo) -> rainSensor; detail: precipitationSensor + rainForecast (mm/h, minutes until
---                                       rain, minutes of rain, summary)
+--                                       rain, minutes of rain, summary); components dewNow / dewMax: outdoor dew
+--                                       point now and the highest in the next 48 h (temperatureMeasurement, routines)
 local Driver = require "st.driver"
 local capabilities = require "st.capabilities"
 
@@ -71,7 +72,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-07a"
+local BUILD = "2026-11-07b"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -103,7 +104,7 @@ local washerProg = capabilities["silvervalley08660.washerProgram"]   -- Samsung 
 local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor = "stoeckie-climate",
                   aircon = "stoeckie-aircon-v3", car = "stoeckie-car-v2",
                   velux_lock = "stoeckie-velux-lock", rain = "stoeckie-rain-v4",
-                  rainradar = "stoeckie-rainradar", dishwasher = "stoeckie-dishwasher-v2", oven = "stoeckie-oven-v2",
+                  rainradar = "stoeckie-rainradar-v2", dishwasher = "stoeckie-dishwasher-v2", oven = "stoeckie-oven-v2",
                   washer = "stoeckie-washer-v3", tv = "stoeckie-tv" }
 local MANUFACTURER = { dryer = "AEG", aircon = "Fujitsu", car = "Skoda", dishwasher = "Home Connect", oven = "Home Connect",
                        washer = "Samsung", tv = "Samsung" }
@@ -371,7 +372,22 @@ local rainForecast = capabilities["silvervalley08660.rainForecast"]
 
 local function rain_simple(dev) return (dev.preferences or {}).rainMode == "simple" end
 
+-- dew point now and the highest in the next hours, each in its own component (usable as routine conditions)
+local function emit_dew(dev, s)
+  for comp, key in pairs({ dewNow = "dewPointNow", dewMax = "dewPointMax" }) do
+    local c = dev.profile.components[comp]
+    local v = tonumber(s[key])
+    if c and v then
+      local ok, err = pcall(function()
+        dev:emit_component_event(c, capabilities.temperatureMeasurement.temperature({ value = v, unit = "C" }))
+      end)
+      if not ok then log.warn("[stbridge] " .. dev.label .. ": " .. tostring(err)) end
+    end
+  end
+end
+
 local function emit_rainradar(dev, s)
+  emit_dew(dev, s)
   if s.raining ~= nil then
     try_emit(dev, function() return s.raining and capabilities.rainSensor.rain.detected() or capabilities.rainSensor.rain.undetected() end)
   end
@@ -518,6 +534,8 @@ end
 local function profile_marker(want)
   if want:sub(1, #PROFILE.aircon) == PROFILE.aircon then return airflowDir end
   if want == PROFILE.washer then return washerProg end
+  -- -v2: dew point components
+  if want:sub(1, #PROFILE.rainradar) == PROFILE.rainradar then return capabilities.temperatureMeasurement end
   if want == PROFILE.dishwasher then return hcProg end
   if want == PROFILE.oven then return cookSet end
 end
@@ -759,7 +777,7 @@ local function push_rain_settings(driver, device)
   if p.postcode == nil and p.location == nil and p.address == nil then return end
   send(driver, device, "settings", { postcode = p.postcode or "", housenumber = p.houseNumber or "",
     address = p.address or "", location = p.location or "", radius_m = p.radiusMeters,
-    threshold = p.rainThreshold, provider = p.provider or "auto" })
+    threshold = p.rainThreshold, provider = p.provider or "auto", humid_hours = p.humidHours })
 end
 
 local function device_init(driver, device)
@@ -834,7 +852,8 @@ local function info_changed(driver, device, event, args)
     send(driver, device, "settings", { poll_seconds = p.pollSeconds })
   end
   -- Buienradar settings: pass them to the bridge (it looks up the postcode)
-  local rkeys = { "postcode", "houseNumber", "address", "location", "radiusMeters", "rainThreshold", "provider" }
+  local rkeys = { "postcode", "houseNumber", "address", "location", "radiusMeters", "rainThreshold", "provider",
+    "humidHours" }
   local rchanged = false
   for _, k in ipairs(rkeys) do if p[k] ~= nil and p[k] ~= old[k] then rchanged = true end end
   if rchanged then push_rain_settings(driver, device) end

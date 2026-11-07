@@ -1,17 +1,23 @@
-name: stoeckie-rainradar
+name: stoeckie-rainradar-v2-simple
 components:
   - id: main
     capabilities:
       - id: rainSensor
         version: 1
-      - id: precipitationSensor
-        version: 1
-      - id: silvervalley08660.rainForecast
-        version: 1
       - id: refresh
         version: 1
     categories:
       - name: RainSensor
+  - id: dewNow
+    label: Dew point now
+    capabilities:
+      - id: temperatureMeasurement
+        version: 1
+  - id: dewMax
+    label: Dew point max (forecast)
+    capabilities:
+      - id: temperatureMeasurement
+        version: 1
 preferences:
   - name: rainMode
     title: Show
@@ -83,3 +89,12 @@ preferences:
         buienradar: "Buienradar (NL/BE)"
         openmeteo: "Open-Meteo (worldwide)"
       default: "auto"
+  - name: humidHours
+    title: Dew point forecast (hours)
+    description: "Dew point max: the highest outdoor dew point in the next hours (Open-Meteo, hourly). For routines that look ahead, e.g. keep a crawl space dryer on when humid air is coming. 6 to 72, default 48."
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 6
+      maximum: 72
+      default: 48
