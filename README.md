@@ -130,7 +130,7 @@ Samsung appliances normally only work through the Samsung cloud. Many of them al
 2. Create `samsung\appliances.json` next to `config.json` (Windows: `C:\StoeckieBridge\samsung`, Docker: the data volume): `[{"host": "192.168.1.60", "type": "washer", "name": "Washer"}]`
 3. Restart the bridge. Check first with `python stoeckie_bridge.py --samsung-probe 192.168.1.60` (read only): it finds the port, makes one session and reads a few state values.
 
-The bridge makes a client certificate once (in the `samsung` folder; it never leaves that folder). SmartThings gets: on/off, running/paused/stopped, cycle phase (wash, rinse, spin, finish), remaining time, progress, remote control; choose a course (the courses your washer reports), start (needs remote control switched on at the washer), pause, stop. The washer answers slowly under load, so the main state is read every 4 s and the rest less often. A washer that is switched off usually turns its wifi off too: it then shows as off.
+The bridge makes a client certificate once (in the `samsung` folder; it never leaves that folder). SmartThings gets: on/off, running/paused/stopped, cycle phase (wash, rinse, spin, finish), remaining time, progress, remote control; choose a course (the courses your washer reports), start (needs remote control switched on at the washer), pause, stop. The washer answers slowly under load, so the main state is read every 4 s and the rest less often. A washer that is switched off usually turns its wifi off too: it then shows as offline until it is switched on again. Note: these washers accept any client on the LAN that uses the published client UUID, so keep them on a separate IoT network if you can.
 
 ## VELUX ACTIVE departure mode
 
