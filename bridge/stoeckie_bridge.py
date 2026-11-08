@@ -72,7 +72,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-08c"
+VERSION = "2026-11-09a"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -3286,7 +3286,7 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             raise web.HTTPFound(f"https://{host}:{https_port}/setup")
         k = load_config().get("skoda") or {}
         rb = load_config().get("buienradar") or {}
-        page = (SETUP_HTML.replace("{status}", status_text()).replace("{version}", "version " + VERSION)
+        page = (SETUP_HTML.replace("{version}", "version " + VERSION).replace("{status}", status_text())
                 .replace("{skoda_poll}", html.escape(str(k.get("poll_minutes", 10))))
                 .replace("{skoda_temp}", html.escape(str(k.get("climate_temp", 21))))
                 .replace("{fglair_poll}", html.escape(str((load_config().get("fglair") or {}).get("poll_seconds", 60))))
@@ -3516,8 +3516,10 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
                 REG.diag[dev_id] = {k: str(v)[:60] for k, v in list(body["value"].items())[:8]}
             return web.json_response({"ok": True})
         if cmd != "refresh":
-            REG.note_command(dev_id, cmd, body.get("value"))
-            log.info("[api] %s: %s %s", dev_id, cmd, "" if body.get("value") is None else body.get("value"))
+            # settings carry an address or postcode: not in the log or on the setup page
+            shown = None if cmd == "settings" or body.get("value") is None else body.get("value")
+            REG.note_command(dev_id, cmd, shown)
+            log.info("[api] %s: %s %s", dev_id, cmd, "" if shown is None else shown)
         try:
             await handler(cmd, body.get("value"))
         except Exception as ex:  # noqa: BLE001

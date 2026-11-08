@@ -24,12 +24,23 @@ SRC = HERE.parent / "src"
 BRIDGE = HERE.parents[1] / "bridge" / "stoeckie_bridge.py"
 
 HARNESS = r'''
-local function capmock(path)
+-- a call like cap.switch.switch.on() or cap.thermostatCoolingSetpoint.coolingSetpoint({ value = 21 }) gives an
+-- event shaped like the hub's: { capability = { ID = .. }, attribute = { NAME = .. }, value = { value = .. } },
+-- plus path/arg for the assertions
+local function capmock(path, segs)
+  segs = segs or { "cap" }
   return setmetatable({}, {
     __index = function(t, k)
-      if k == "NAME" then return path:match("([^.]+)$") end
-      local v = capmock(path .. "." .. k); rawset(t, k, v); return v end,
-    __call = function(_, a, b) return { path = path, arg = a } end })
+      if k == "NAME" then return segs[#segs] end
+      local s = {}
+      for i, x in ipairs(segs) do s[i] = x end
+      s[#s + 1] = k  -- one segment, also for a namespaced id like silvervalley08660.airconMode
+      local v = capmock(path .. "." .. k, s); rawset(t, k, v); return v end,
+    __call = function(_, a, b)
+      local val = a
+      if type(val) ~= "table" then val = { value = segs[4] or a } end
+      return { path = path, arg = a, capability = { ID = segs[2] }, attribute = { NAME = segs[3] }, value = val,
+               visibility = b and b.visibility } end })
 end
 local caps = capmock("cap")
 for _, id in ipairs({ "windowShade", "windowShadeLevel", "refresh", "dryerOperatingState", "switch", "battery",
@@ -58,6 +69,8 @@ package.loaded["cosock"] = { socket = { sleep = function() end }, asyncify = fun
   spawn = function(fn) fn() end }
 
 DEVICES = {}
+DELAYED = {}
+function RUN_DELAYED() local l = DELAYED; DELAYED = {}; for _, f in ipairs(l) do f() end end
 function NEW_DEVICE(info)
   local d = { id = info.id or ("dev" .. (#DEVICES + 1)), fields = {}, preferences = info.preferences or {},
               device_network_id = info.device_network_id, parent_device_id = info.parent_device_id,
@@ -74,15 +87,17 @@ function NEW_DEVICE(info)
     if opts and opts.persist and type(v) == "table" then v = setmetatable({}, { __index = v }) end
     self.fields[k] = v
   end
-  function d:emit_event(e) self.events[#self.events + 1] = { comp = "main", path = e.path, arg = e.arg } end
-  function d:emit_component_event(c, e) self.events[#self.events + 1] = { comp = c.id, path = e.path, arg = e.arg } end
+  d.latest = {}  -- comp:path -> last emitted arg (what the app shows), survives events resets in the tests
+  function d:emit_event(e) self.events[#self.events + 1] = { comp = "main", path = e.path, arg = e.arg }; self.latest["main:" .. e.path] = e.value end
+  function d:emit_component_event(c, e) self.events[#self.events + 1] = { comp = c.id, path = e.path, arg = e.arg }; self.latest[c.id .. ":" .. e.path] = e.value end
   function d:online() self.state = "online" end
   function d:offline() self.state = "offline" end
   function d:supports_capability() return false end
   function d:get_latest_state() return nil end
   function d:try_update_metadata(m) self.new_profile = m.profile end
   function d:get_parent_device() for _, p in ipairs(DEVICES) do if p.id == self.parent_device_id then return p end end end
-  d.thread = { cancel_timer = function() end, call_with_delay = function() return {} end }
+  -- delayed functions are collected; a test runs them with RUN_DELAYED()
+  d.thread = { cancel_timer = function() end, call_with_delay = function(_, _, fn) DELAYED[#DELAYED + 1] = fn; return {} end }
   DEVICES[#DEVICES + 1] = d
   return d
 end
@@ -178,6 +193,13 @@ def test_aircon_flow(bridge):
             out[f"{e.comp}:{e.path}"] = arg
         return out
 
+    def app_shows(key):
+        """What the app shows for an attribute: the last emitted value (unchanged values are not emitted again)."""
+        arg = py(ac.latest[key])
+        if isinstance(arg, dict) and "value" in arg:
+            arg = arg["value"]
+        return arg
+
     ev = events()
     assert ev["main:cap.switch.switch.on"] is None
     assert ev["main:cap.airConditionerMode.airConditionerMode"] == "heat"
@@ -214,9 +236,8 @@ def test_aircon_flow(bridge):
     assert state()["power"] == "on"
     lua.execute(f'{h}.airConditionerMode.setAirConditionerMode(DRIVER_OBJ, AC, {{ args = {{ mode = "minHeat" }} }})')
     assert state()["minHeat"] is True and state()["mode"] == "minheat" and state()["power"] == "on"
-    lua.execute("AC.events = {}")
     lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
-    assert events()["main:cap.airConditionerMode.airConditionerMode"] == "minHeat"
+    assert app_shows("main:cap.airConditionerMode.airConditionerMode") == "minHeat"
     lua.execute(f'{h}["silvervalley08660.airconMode"].setMode(DRIVER_OBJ, AC, {{ args = {{ mode = "fanOnly" }} }})')
     assert state()["minHeat"] is False and state()["mode"] == "fan"
     lua.execute(f'{h}["silvervalley08660.targetTemperature"].setTemperature(DRIVER_OBJ, AC, {{ args = {{ temperature = 22.5 }} }})')
@@ -228,9 +249,13 @@ def test_aircon_flow(bridge):
     lua.execute("AC.events = {}")
     lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
     ev = events()
-    assert ev["main:cap.airConditionerMode.airConditionerMode"] == "fanOnly"
-    assert ev["main:cap.fanOscillationMode.fanOscillationMode"] == "vertical"
+    assert app_shows("main:cap.airConditionerMode.airConditionerMode") == "fanOnly"
+    assert app_shows("main:cap.fanOscillationMode.fanOscillationMode") == "vertical"
     assert "main:cap.airConditionerMode.supportedAcModes" not in ev  # unchanged list is not re-emitted
+    # unchanged values are not emitted again at all (the hub would drop them, the cloud rate limit counts them)
+    lua.execute("AC.events = {}")
+    lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
+    assert events() == {}
 
     # the app sends the shown value when a list is opened and closed without a choice: nothing may be sent
     # (a mode command switches a Fujitsu unit on)
@@ -259,21 +284,23 @@ def test_aircon_flow(bridge):
     # the next poll keeps showing the kept changes, not the values of the unit
     lua.execute("AC.events = {}")
     lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
-    ev = events()
-    assert ev["main:cap.silvervalley08660.airconMode.mode"] == "cool"
-    assert ev["main:cap.silvervalley08660.targetTemperatureF.temperature"] == 72
+    assert app_shows("main:cap.silvervalley08660.airconMode.mode") == "cool"
+    assert app_shows("main:cap.silvervalley08660.targetTemperatureF.temperature") == 72
+    assert "main:cap.silvervalley08660.airconMode.mode" not in events()  # no flip back to the unit's value
     # the same value again (list opened and closed) is still nothing
     lua.execute(f'{h}["silvervalley08660.airconMode"].setMode(DRIVER_OBJ, AC, {{ args = {{ mode = "cool" }} }})')
     assert state()["power"] == "off"
-    # switching on sends the kept changes
+    # switching on sends the kept mode at once and the other kept changes a few seconds later
+    lua.execute("DELAYED = {}")
     lua.execute(f'{h}.switch.on(DRIVER_OBJ, AC)')
+    s = state()
+    assert (s["power"], s["mode"], s["hDir"]) == ("on", "cool", before["hDir"])
+    lua.execute("RUN_DELAYED()")
     s = state()
     assert (s["power"], s["mode"], s["setpoint"], s["hDir"]) == ("on", "cool", 22.0, 5)
     assert lua.eval("AC.fields.ac_pending") is None
-    lua.execute("AC.events = {}")
     lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
-    ev = events()
-    assert ev["main:cap.silvervalley08660.targetTemperatureF.temperature"] == 72
+    assert app_shows("main:cap.silvervalley08660.targetTemperatureF.temperature") == 72
     lua.execute(f'{h}["silvervalley08660.targetTemperatureF"].setTemperature(DRIVER_OBJ, AC, {{ args = {{ temperature = 68 }} }})')
     assert state()["setpoint"] == 20.0
     # setting "Changes while off: Send now": a change while off goes out right away (and switches the unit on)
@@ -283,6 +310,16 @@ def test_aircon_flow(bridge):
     lua.execute(f'{h}["silvervalley08660.airconMode"].setMode(DRIVER_OBJ, AC, {{ args = {{ mode = "heat" }} }})')
     assert (state()["power"], state()["mode"]) == ("on", "heat")
     lua.execute('AC.preferences.offChanges = nil')
+    # switched off again before the delayed sends: they are dropped (else the unit would switch on again)
+    lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
+    lua.execute(f'{h}.switch.off(DRIVER_OBJ, AC)')
+    lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
+    lua.execute(f'{h}.airConditionerFanMode.setFanMode(DRIVER_OBJ, AC, {{ args = {{ fanMode = "low" }} }})')
+    lua.execute("DELAYED = {}")
+    lua.execute(f'{h}.switch.on(DRIVER_OBJ, AC)')
+    lua.execute(f'{h}.switch.off(DRIVER_OBJ, AC)')
+    lua.execute("RUN_DELAYED()")
+    assert state()["power"] == "off" and state()["fan"] != "low"
     # a list opened right after switching off (before the next poll) does not switch the unit on again
     lua.execute(f'{h}.switch.off(DRIVER_OBJ, AC)')
     lua.execute(f'{h}["silvervalley08660.airconMode"].setMode(DRIVER_OBJ, AC, {{ args = {{ mode = "dry" }} }})')
@@ -299,7 +336,7 @@ def test_aircon_flow(bridge):
     with urllib.request.urlopen(f"http://127.0.0.1:{bridge}/setup") as r:
         page = r.read().decode()
     assert "Demo air conditioner in SmartThings: driver" in page and "stoeckie-aircon-v3-f-h" in page
-    assert "last commands from SmartThings" in page and "version 2026-11-08c" in page
+    assert "last commands from SmartThings" in page and "version 2026-11-09a" in page
 
 
 def test_aircon_unit_setting(bridge):
@@ -459,9 +496,11 @@ def test_rainradar(bridge):
     ''')
     rr = lua.eval("RR")
     assert rr.new_profile == "stoeckie-rainradar-v3-simple"
+    # unchanged values are not emitted again; what the app shows stays rain or dry plus the dew points
     paths = [f"{rr.events[i].comp}:{rr.events[i].path}" for i in range(1, len(rr.events) + 1)]
-    assert sorted(paths) == ["dewMax:cap.temperatureMeasurement.temperature",
-                             "dewNow:cap.temperatureMeasurement.temperature", "main:cap.rainSensor.rain.undetected"]
+    assert paths == []
+    latest = sorted(k for k in rr.latest.keys())
+    assert "main:cap.rainSensor.rain.undetected" in latest and "dewMax:cap.temperatureMeasurement.temperature" in latest
 
 
 def test_dryer_no_completion_time_spam(bridge):
@@ -518,8 +557,9 @@ def test_pairing_signed_api():
           for _, d in ipairs(DEVICES) do d.events = {} end
           DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
           N = 0
-          for _, d in ipairs(DEVICES) do N = N + #d.events end
+          for _, d in ipairs(DEVICES) do for _ in pairs(d.latest) do N = N + 1 end end
         ''')
+        # the children have their state (unchanged values are not emitted again, so count what the app shows)
         assert lua.eval("N") > 0 and lua.eval("PARENT.state") == "online"
         # a wrong token: the bridge refuses and the hub does not accept an unproven new token
         lua.execute('''

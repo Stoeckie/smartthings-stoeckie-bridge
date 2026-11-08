@@ -86,7 +86,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-08g"
+local BUILD = "2026-11-08l"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -173,9 +173,70 @@ end
 
 -- state -> events --------------------------------------------------------------
 
+-- Every poll (10 s, 2 s for 40 s after a command) reads all devices. Emitting every attribute each time was
+-- about 6 events a second for one bridge; the hub then stopped passing events of a device to the cloud (seen
+-- 2026-11-08: the switch stayed "on" in the app while the driver emitted "off"). So an event only goes out when
+-- its value changed. The hub itself drops an event whose value it already has, so a value the cloud missed would
+-- stay wrong for ever: the first event after a driver start is sent with state_change, which the hub always
+-- passes on. The bridge device setting "Resend all values every (minutes)" does the same periodically; it is off
+-- by default, because a forced event also fires routines and notifications again (like a button press does).
+local stjson = require "st.json"
+local EMIT_REFRESH = 0                -- default off; setting "Resend all values every (minutes)" of the bridge device
+local REFRESH_BY_PARENT = {}          -- parent device.id -> seconds (set at every poll from that setting)
+local EMIT_CACHE = {}  -- device.id -> key -> { v = encoded value, t = time }; plain memory, not a device field
+local function refresh_secs(dev)
+  return REFRESH_BY_PARENT[dev.parent_device_id or dev.id] or EMIT_REFRESH
+end
+-- spread the resends of one device over up to 5 minutes instead of all at once
+local function jitter(key, secs)
+  local span = math.max(1, math.min(300, math.floor(secs / 2)))
+  local n = 0
+  for i = 1, #key do n = (n + key:byte(i)) % span end
+  return n
+end
+-- a capability event on the hub is { capability = <capability>, attribute = <attribute>, value = { value = .., unit = .. } }
+-- (seen in the hub log 2026-11-08); older notes name the state field "state", so both are accepted
+local function ev_state(ev) return ev.value ~= nil and ev.value or ev.state end
+local function ev_key(comp, ev)
+  if type(ev) ~= "table" then return nil end
+  local cap = ev.capability_id or ev.capability
+  if type(cap) == "table" then cap = cap.ID or cap.id end
+  local attr = ev.attribute_id or ev.attribute
+  if type(attr) == "table" then attr = attr.NAME or attr.name end
+  if type(cap) ~= "string" or type(attr) ~= "string" or ev_state(ev) == nil then return nil end
+  return (comp and comp.id or "main") .. "/" .. cap .. "/" .. attr
+end
+local function push(dev, comp, ev)
+  local key, val = ev_key(comp, ev), nil
+  if key then
+    local ok, s = pcall(stjson.encode, { ev_state(ev), ev.visibility })
+    val = ok and s or nil
+  end
+  if not EMIT_CACHE[dev.id] then
+    EMIT_CACHE[dev.id] = {}
+    if key then log.info("[stbridge] " .. tostring(dev.label) .. ": event shape ok (" .. key .. ")")
+    else
+      local ks = {}
+      if type(ev) == "table" then for k in pairs(ev) do ks[#ks + 1] = tostring(k) end end
+      log.warn("[stbridge] " .. tostring(dev.label) .. ": unknown event shape, no filtering: " .. table.concat(ks, ","))
+    end
+  end
+  if key and val then
+    local cache = EMIT_CACHE[dev.id]
+    local c, now = cache[key], os.time()
+    local refresh = refresh_secs(dev)
+    if c and c.v == val and (refresh <= 0 or now - c.t < refresh + jitter(key, refresh)) then return end
+    if not c or c.v == val then ev.state_change = true end
+    if comp then dev:emit_component_event(comp, ev) else dev:emit_event(ev) end
+    cache[key] = { v = val, t = now }  -- only after the emit went through: a refused event is tried again
+    return
+  end
+  if comp then dev:emit_component_event(comp, ev) else dev:emit_event(ev) end
+end
+
 -- emit one event; an unknown enum value only skips that event, not the rest
 local function try_emit(dev, make)
-  local ok, err = pcall(function() dev:emit_event(make()) end)
+  local ok, err = pcall(function() push(dev, nil, make()) end)
   if not ok then log.warn("[stbridge] " .. dev.label .. ": " .. tostring(err)) end
   return ok
 end
@@ -228,24 +289,24 @@ local function emit_window(dev, s)
   local pos = tonumber(s.position)
   if pos == nil then return end
   pos = math.max(0, math.min(100, math.floor(pos + 0.5)))
-  dev:emit_event(windowShadeLevel.shadeLevel(pos))
+  push(dev, nil, windowShadeLevel.shadeLevel(pos))
   local ps = s.positionState
-  if ps == "opening" then dev:emit_event(windowShade.windowShade.opening())
-  elseif ps == "closing" then dev:emit_event(windowShade.windowShade.closing())
-  elseif pos >= 99 then dev:emit_event(windowShade.windowShade.open())
-  elseif pos <= 1 then dev:emit_event(windowShade.windowShade.closed())
-  else dev:emit_event(windowShade.windowShade.partially_open()) end
+  if ps == "opening" then push(dev, nil, windowShade.windowShade.opening())
+  elseif ps == "closing" then push(dev, nil, windowShade.windowShade.closing())
+  elseif pos >= 99 then push(dev, nil, windowShade.windowShade.open())
+  elseif pos <= 1 then push(dev, nil, windowShade.windowShade.closed())
+  else push(dev, nil, windowShade.windowShade.partially_open()) end
 end
 
 local function emit_sensor(dev, s)
   if s.temperature then
-    dev:emit_event(capabilities.temperatureMeasurement.temperature({ value = tonumber(s.temperature), unit = "C" }))
+    push(dev, nil, capabilities.temperatureMeasurement.temperature({ value = tonumber(s.temperature), unit = "C" }))
   end
   if s.humidity then
-    dev:emit_event(capabilities.relativeHumidityMeasurement.humidity(math.floor(tonumber(s.humidity) + 0.5)))
+    push(dev, nil, capabilities.relativeHumidityMeasurement.humidity(math.floor(tonumber(s.humidity) + 0.5)))
   end
   if s.co2 then
-    dev:emit_event(capabilities.carbonDioxideMeasurement.carbonDioxide({ value = tonumber(s.co2), unit = "ppm" }))
+    push(dev, nil, capabilities.carbonDioxideMeasurement.carbonDioxide({ value = tonumber(s.co2), unit = "ppm" }))
   end
 end
 
@@ -274,8 +335,7 @@ local sync_profile -- defined with the polling code below
 local send_diag -- defined with the commands below
 
 -- changes kept while an air conditioner is off. Stored as a JSON string: on the hub a persisted Lua table
--- with string keys comes back as an empty table (seen 2026-11-08), a string survives as it is.
-local stjson = require "st.json"
+-- reads back as a proxy whose fields work but next()/pairs() see nothing (seen 2026-11-08); a string is safe.
 local function get_pending(dev)
   local v = dev:get_field("ac_pending")
   if type(v) ~= "string" or v == "" then return nil end
@@ -381,7 +441,7 @@ local function emit_aircon(dev, s)
   if s.outdoorTemperature and dev.profile.components.outdoor then
     local t = tonumber(s.outdoorTemperature)
     local ok, err = pcall(function()
-      dev:emit_component_event(dev.profile.components.outdoor,
+      push(dev, dev.profile.components.outdoor,
         capabilities.temperatureMeasurement.temperature({ value = t, unit = "C" }))
     end)
     if not ok then log.warn("[stbridge] " .. dev.label .. " outdoor: " .. tostring(err)) end
@@ -399,7 +459,7 @@ end
 local function comp_emit(dev, id, make)
   local c = dev.profile and dev.profile.components and dev.profile.components[id]
   if not c then return end
-  local ok, err = pcall(function() dev:emit_component_event(c, make()) end)
+  local ok, err = pcall(function() push(dev, c, make()) end)
   if not ok then log.warn("[stbridge] " .. dev.label .. " " .. id .. ": " .. tostring(err)) end
 end
 
@@ -471,7 +531,7 @@ local function emit_dew(dev, s)
     local v = tonumber(s[key])
     if c and v then
       local ok, err = pcall(function()
-        dev:emit_component_event(c, capabilities.temperatureMeasurement.temperature({ value = v, unit = "C" }))
+        push(dev, c, capabilities.temperatureMeasurement.temperature({ value = v, unit = "C" }))
       end)
       if not ok then log.warn("[stbridge] " .. dev.label .. ": " .. tostring(err)) end
     end
@@ -485,7 +545,7 @@ local function emit_wind(dev, s)
   for _, a in ipairs({ { "speed", "windSpeed", "km/h" }, { "gust", "windGust", "km/h" }, { "direction", "windDirection", "°" } }) do
     local v = tonumber(s[a[2]])
     if v then
-      local ok, err = pcall(function() dev:emit_component_event(c, windKmh[a[1]]({ value = v, unit = a[3] })) end)
+      local ok, err = pcall(function() push(dev, c, windKmh[a[1]]({ value = v, unit = a[3] })) end)
       if not ok then log.warn("[stbridge] " .. dev.label .. ": " .. tostring(err)) end
     end
   end
@@ -639,23 +699,28 @@ local function child_profile(key, device)
 end
 
 -- a capability that only the newest profile of a kind has: when the device lacks it, the switch did not happen
-local function profile_marker(want)
+local function profile_markers(want)
   if want:sub(1, #PROFILE.aircon) == PROFILE.aircon then
-    if want:sub(-2) == "-h" then return hAirflow end
-    return want:sub(-2) == "-f" and targetTempF or airflowDir
+    local m = { airflowDir }
+    if want:find("-f", 1, true) then m[#m + 1] = targetTempF end
+    if want:find("-h", 1, true) then m[#m + 1] = hAirflow end
+    return m
   end
-  if want == PROFILE.washer then return washerProg end
+  if want == PROFILE.washer then return { washerProg } end
   -- -v2: dew point components, -v3: wind component
-  if want:sub(1, #PROFILE.rainradar) == PROFILE.rainradar then return windKmh or capabilities.temperatureMeasurement end
-  if want == PROFILE.dishwasher then return hcProg end
-  if want == PROFILE.oven then return cookSet end
+  if want:sub(1, #PROFILE.rainradar) == PROFILE.rainradar then return { windKmh or capabilities.temperatureMeasurement } end
+  if want == PROFILE.dishwasher then return { hcProg } end
+  if want == PROFILE.oven then return { cookSet } end
+  return {}
 end
 
 sync_profile = function(device)
   local want = child_profile(device.parent_assigned_child_key or "", device)
   if not want then return end
-  local marker = profile_marker(want)
-  local missing = marker ~= nil and not device:supports_capability(marker)
+  local missing = false
+  for _, marker in ipairs(profile_markers(want)) do
+    if marker ~= nil and not device:supports_capability(marker) then missing = true end
+  end
   local same = device:get_field("profile") == want
   if same and not missing then return end
   local tries = 0
@@ -736,6 +801,8 @@ local function maybe_rescan(driver, parent)
 end
 
 local function poll(driver, parent)
+  local rm = tonumber((parent.preferences or {}).resyncMinutes)
+  REFRESH_BY_PARENT[parent.id] = (rm and rm >= 1) and math.floor(rm * 60) or EMIT_REFRESH
   local ip, port = bridge_addr(parent)
   if not ip then
     maybe_rescan(driver, parent)
@@ -851,6 +918,13 @@ end
 -- order in which changes kept while an air conditioner was off are sent after switching on (mode first: on a
 -- Fujitsu a mode command also switches the unit on; a louver position after swing, as it ends swing)
 local PENDING_ORDER = { "setpoint", "fan", "swing", "vdir", "hdir" }
+local PENDING_DELAY = 8
+local PENDING_TIMER = {}  -- device.id -> timer of the delayed sends
+local unit_off            -- defined with the other air conditioner helpers below
+local function cancel_pending_timer(device)
+  local tm = PENDING_TIMER[device.id]
+  if tm then pcall(function() device.thread:cancel_timer(tm) end); PENDING_TIMER[device.id] = nil end
+end
 local function handle_switch_on(driver, device, cmd)
   local c = cmd and cmd.component
   if c == "climate" then send(driver, device, "climate_on"); return end
@@ -860,11 +934,22 @@ local function handle_switch_on(driver, device, cmd)
     device:set_field("ac_shown", nil)
     log.info("[stbridge] " .. device.label .. ": switching on with the changes made while off")
     -- a mode switches a Fujitsu on; Minimum Heat is a separate setting, so switch on first
-    if not pend.mode or pend.mode.value == "minheat" then send(driver, device, "on") end
-    if pend.mode then send(driver, device, pend.mode.what, pend.mode.value) end
-    for _, k in ipairs(PENDING_ORDER) do
-      local x = pend[k]
-      if x then send(driver, device, x.what, x.value) end
+    local rest = {}
+    if pend.mode and pend.mode.value ~= "minheat" then
+      send(driver, device, pend.mode.what, pend.mode.value)
+    else
+      send(driver, device, "on")
+      if pend.mode then rest[#rest + 1] = pend.mode end
+    end
+    -- the other settings a few seconds later: sent right after "on" the unit ignored them (seen 2026-11-08)
+    for _, k in ipairs(PENDING_ORDER) do if pend[k] then rest[#rest + 1] = pend[k] end end
+    cancel_pending_timer(device)
+    if #rest > 0 then
+      PENDING_TIMER[device.id] = device.thread:call_with_delay(PENDING_DELAY, function()
+        PENDING_TIMER[device.id] = nil
+        if unit_off(device) then return end  -- switched off again in the meantime
+        for _, x in ipairs(rest) do send(driver, device, x.what, x.value) end
+      end)
     end
     return
   end
@@ -875,6 +960,7 @@ end
 local function handle_switch_off(driver, device, cmd)
   local c = cmd and cmd.component
   if c ~= "climate" then
+    cancel_pending_timer(device)
     if device:get_field("ac_pending") then set_pending(device, nil) end
     -- off right away for the check in ac_change (the next poll confirms it), so a list opened just after
     -- switching off does not switch the unit on again
@@ -887,8 +973,10 @@ end
 local function lock_cmd(driver, device, cmd)
   if send(driver, device, cmd) then return end
   local cur = device:get_latest_state("main", capabilities.lock.ID, capabilities.lock.lock.NAME)
-  try_emit(device, function()
-    return cur == "unlocked" and capabilities.lock.lock.unlocked() or capabilities.lock.lock.locked()
+  pcall(function()
+    local ev = cur == "unlocked" and capabilities.lock.lock.unlocked() or capabilities.lock.lock.locked()
+    ev.state_change = true
+    device:emit_event(ev)
   end)
 end
 local function handle_lock(driver, device) lock_cmd(driver, device, "lock") end
@@ -915,7 +1003,7 @@ local function unchanged(device, key, value)
   end
   return false
 end
-local function unit_off(device)
+unit_off = function(device)
   local shown = device:get_field("ac_shown")
   if type(shown) == "table" and shown.power then return shown.power == "off" end
   local ok, v = pcall(device.get_latest_state, device, "main", capabilities.switch.ID, capabilities.switch.switch.NAME)
@@ -963,9 +1051,15 @@ local function ac_change(driver, device, key, shown, what, value)
   if unit_off(device) and (device.preferences or {}).offChanges ~= "send" then
     local pend = get_pending(device) or {}
     pend[key] = { what = what, value = value, shown = shown }
+    if key == "vdir" or key == "hdir" then pend.swing = nil end      -- a position ends swing
+    if key == "swing" then pend.vdir, pend.hdir = nil, nil end
     set_pending(device, pend)
     local s = device:get_field("ac_shown")
-    if type(s) == "table" then s[key] = shown end
+    if type(s) == "table" then
+      s[key] = shown
+      if key == "vdir" or key == "hdir" then s.swing = nil end
+      if key == "swing" then s.vdir, s.hdir = nil, nil end
+    end
     show_setting(device, key, shown)
     log.info(string.format("[stbridge] %s: unit is off, %s %s kept until it is switched on", device.label, key,
       tostring(shown)))
@@ -1019,16 +1113,19 @@ end
 send_diag = function(dev)
   local want = child_profile and child_profile(dev.parent_assigned_child_key or "", dev) or "?"
   local unit = ac_unit_f(dev) and (dev:supports_capability(targetTempF) and "F" or "F (profile switch pending)") or "C"
+  local horizontal = dev:get_field("hasHDir") and "positions reported" or "no positions reported"
+  if not hAirflow then horizontal = horizontal .. ", capability missing on this hub"
+  elseif dev:supports_capability(hAirflow) then horizontal = horizontal .. ", control shown" end
   local d = { build = BUILD, profile = tostring(dev:get_field("profile") or want), unit = unit,
-    unitSetting = tostring((dev.preferences or {}).temperatureUnit or "auto"),
-    horizontal = hAirflow and dev:supports_capability(hAirflow) and "yes" or "no" }
+    unitSetting = tostring((dev.preferences or {}).temperatureUnit or "auto"), horizontal = horizontal }
   local enc = d.build .. d.profile .. d.unit .. d.unitSetting .. d.horizontal
   if dev:get_field("diag_sent") == enc then return end
   local parent = dev:get_parent_device()
   if not parent then return end
   local ip, port = bridge_addr(parent)
-  local ok, res = pcall(api.command, ip, port, dev.parent_assigned_child_key, "diag", d)
-  if ok and res then dev:set_field("diag_sent", enc) end
+  -- one attempt per change, also when the bridge is older and refuses "diag" (tried again at the next start)
+  dev:set_field("diag_sent", enc)
+  pcall(api.command, ip, port, dev.parent_assigned_child_key, "diag", d)
 end
 
 -- lifecycle -----------------------------------------------------------------------
@@ -1103,6 +1200,7 @@ local function info_changed(driver, device, event, args)
     schedule_poll(driver, device)
     return
   end
+  device:set_field("profileTries", 0) -- a changed setting earns new attempts
   sync_profile(device) -- battery graph option changed: other profile
   -- car settings: pass them to the bridge
   local old = args and args.old_st_store and args.old_st_store.preferences or {}

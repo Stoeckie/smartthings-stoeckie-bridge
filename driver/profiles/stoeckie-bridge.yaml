@@ -45,6 +45,15 @@ preferences:
       minimum: 3
       maximum: 600
       default: 10
+  - name: resyncMinutes
+    title: Resend all values every (minutes)
+    description: "Values only go to SmartThings when they change. This often all values are sent again, so a value the cloud missed is corrected. SmartThings allows about 12 events a minute per device; an air conditioner has about 15 values, so stay at 5 or more."
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 1
+      maximum: 240
+      default: 15
   - name: rainRadar
     title: Rain radar (Buienradar / Open-Meteo)
     description: "On: a rain radar device appears (rain now and the next 2 hours; Buienradar in NL/BE, Open-Meteo worldwide). Set the address and radius in that device's settings."
