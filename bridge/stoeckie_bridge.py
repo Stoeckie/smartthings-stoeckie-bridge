@@ -28,7 +28,7 @@ LAN API (default port 8787, no auth, LAN only)
   POST /stbridge/devices/<id>/command    body {"cmd": "...", "value": ...}
       dryer:   run | pause | resume | stop | refresh
       aircon:  on | off | mode (auto cool dry fan heat) | setpoint (C) | fan (quiet low medium high auto)
-               | swing (off vertical horizontal both) | refresh | settings {poll_seconds}
+               | swing (off vertical horizontal both) | vdir n | hdir n | refresh | settings {poll_seconds}
       car:     on | off (charging) | climate_on | climate_off | limit (percent) | refresh
       velux_lock: lock | unlock | refresh | settings {poll_seconds}
       rain:    refresh (VELUX gateway rain sensor)
@@ -72,7 +72,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-08a"
+VERSION = "2026-11-08b"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -340,6 +340,8 @@ def aircon_state(dev) -> dict[str, Any]:
         mode = "minheat"
     vnum = vdir_count(dev)
     vdir = safe(lambda: int(dev.get_property_value(VDIR_PROP)), None) if vnum else None
+    hnum = hdir_count(dev)
+    hdir = safe(lambda: int(dev.get_property_value(HDIR_PROP)), None) if hnum else None
     return {
         "power": "off" if mode == "off" else "on",
         "mode": mode,                                   # off on auto cool dry fan heat minheat
@@ -359,6 +361,9 @@ def aircon_state(dev) -> dict[str, Any]:
         # louver position 1..vDirCount when swing is off (None: unit has no positions)
         "vDir": vdir if vdir and 1 <= vdir <= vnum else None,
         "vDirCount": vnum or None,
+        # same for the horizontal louvers (left/right)
+        "hDir": hdir if hdir and 1 <= hdir <= hnum else None,
+        "hDirCount": hnum or None,
     }
 
 
@@ -368,6 +373,8 @@ MIN_HEAT_PROP = "min_heat"
 # Vertical airflow direction (louver position when swing is off): position 1..count, written as raw properties
 # because the library has no setter for it.
 VDIR_PROP, VNUM_PROP, VSWING_PROP = "af_vertical_direction", "af_vertical_num_dir", "af_vertical_swing"
+# Horizontal airflow direction (left/right louvers), same scheme; units without horizontal louvers report 0
+HDIR_PROP, HNUM_PROP, HSWING_PROP = "af_horizontal_direction", "af_horizontal_num_dir", "af_horizontal_swing"
 VDIR_MAX = 8
 
 
@@ -380,15 +387,19 @@ def min_heat_writable(dev) -> bool:
     return bool(prop) and not prop.get("read_only")
 
 
-def vdir_count(dev) -> int:
-    """Number of louver positions the unit reports, 0 if it has none."""
+def vdir_count(dev, dir_prop: str = VDIR_PROP, num_prop: str = VNUM_PROP) -> int:
+    """Number of louver positions the unit reports, 0 if it has none (vertical; horizontal with the H props)."""
     try:
         props = dev.properties_full
-        if VDIR_PROP not in props or VNUM_PROP not in props:
+        if dir_prop not in props or num_prop not in props:
             return 0
-        return max(0, min(VDIR_MAX, int(dev.get_property_value(VNUM_PROP) or 0)))
+        return max(0, min(VDIR_MAX, int(dev.get_property_value(num_prop) or 0)))
     except Exception:  # noqa: BLE001
         return 0
+
+
+def hdir_count(dev) -> int:
+    return vdir_count(dev, HDIR_PROP, HNUM_PROP)
 
 
 def describe_unit(dev) -> str:
@@ -542,6 +553,13 @@ class FGLair:
                     if dev.get_property_value(VSWING_PROP):  # a fixed position ends vertical swing
                         await dev.async_set_property_value(VSWING_PROP, 0)
                     await dev.async_set_property_value(VDIR_PROP, n)
+                elif cmd == "hdir":
+                    n, count = int(value), hdir_count(dev)
+                    if not 1 <= n <= count:
+                        raise ValueError(f"horizontal airflow direction must be 1..{count}")
+                    if dev.get_property_value(HSWING_PROP):  # a fixed position ends horizontal swing
+                        await dev.async_set_property_value(HSWING_PROP, 0)
+                    await dev.async_set_property_value(HDIR_PROP, n)
                 elif cmd == "minheat":  # older drivers (2026-11-06b) used a separate switch
                     await self._min_heat(dev, str(value).lower() in ("on", "1", "true"), strict=True)
                 elif cmd == "swing":
@@ -3503,7 +3521,7 @@ async def demo_devices() -> None:
           "fan": "auto", "swing": "off", "supportedModes": ["auto", "cool", "dry", "fan", "heat"],
           "supportedFans": ["quiet", "low", "medium", "high", "auto"],
           "supportedSwings": ["off", "vertical"], "setpointRange": [16.0, 30.0], "model": "DEMO",
-          "minHeat": False, "vDir": 2, "vDirCount": 4}
+          "minHeat": False, "vDir": 2, "vDirCount": 4, "hDir": 3, "hDirCount": 5}
     ac["supportedModes"].append("minheat")
 
     async def aircon(cmd, value):
@@ -3521,6 +3539,8 @@ async def demo_devices() -> None:
             ac[cmd] = str(value)
         elif cmd == "vdir" and ac["vDirCount"] and 1 <= int(value) <= ac["vDirCount"]:
             ac["vDir"], ac["swing"] = int(value), "off"
+        elif cmd == "hdir" and ac["hDirCount"] and 1 <= int(value) <= ac["hDirCount"]:
+            ac["hDir"], ac["swing"] = int(value), "off"
         elif cmd == "minheat":
             ac["minHeat"] = str(value).lower() in ("on", "1", "true")
             ac["power"], ac["mode"] = "on", "minheat" if ac["minHeat"] else "heat"

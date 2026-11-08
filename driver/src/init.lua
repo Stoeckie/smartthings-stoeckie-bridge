@@ -86,7 +86,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-08c"
+local BUILD = "2026-11-08d"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -111,6 +111,7 @@ local acModeX = capabilities["silvervalley08660.airconMode"]
 local targetTemp = capabilities["silvervalley08660.targetTemperature"]
 local targetTempF = capabilities["silvervalley08660.targetTemperatureF"] -- same, in °F (profiles ...-f)
 local airflowDir = capabilities["silvervalley08660.airflowDirection"]  -- louver position 1..n (swing off)
+local hAirflow = (function() local ok, c = pcall(function() return capabilities["silvervalley08660.horizontalAirflow"] end); return ok and c or nil end)() -- left/right louvers (profiles ...-h)
 local windKmh = (function() local ok, c = pcall(function() return capabilities["silvervalley08660.windSpeedKmh"] end); return ok and c or nil end)() -- wind on the rain radar device (km/h)
 -- Home Connect: program list with start button, and oven temperature + cooking time (labels EN/NL)
 local hcProg = capabilities["silvervalley08660.applianceProgram"]
@@ -297,13 +298,26 @@ local function emit_aircon(dev, s)
   -- what the app shows now: a command with the same value (the app sends one when you open a list and go
   -- back without choosing) must not switch the unit on
   dev:set_field("ac_shown", { mode = m, fan = s.fan, swing = SWING_TO_ST[s.swing or ""],
-    vdir = tonumber(s.vDir) and tostring(math.floor(s.vDir)) or nil, setpoint = tonumber(s.setpoint) })
+    vdir = tonumber(s.vDir) and tostring(math.floor(s.vDir)) or nil,
+    hdir = tonumber(s.hDir) and tostring(math.floor(s.hDir)) or nil, setpoint = tonumber(s.setpoint) })
   local n = tonumber(s.vDirCount) or 0
   if n > 0 then
     local list = {}
     for i = 1, math.min(n, 8) do list[#list + 1] = tostring(i) end
     emit_list(dev, "vDirs", list, airflowDir.supportedPositions)
     if tonumber(s.vDir) then try_emit(dev, function() return airflowDir.position(tostring(math.floor(s.vDir))) end) end
+  end
+  -- horizontal louvers (left/right): only units that report positions get the profile with this control
+  local hn = tonumber(s.hDirCount) or 0
+  if (hn > 0) ~= (dev:get_field("hasHDir") == true) then
+    dev:set_field("hasHDir", hn > 0, { persist = true })
+    sync_profile(dev)
+  end
+  if hn > 0 and hAirflow and dev:supports_capability(hAirflow) then
+    local list = {}
+    for i = 1, math.min(hn, 8) do list[#list + 1] = tostring(i) end
+    emit_list(dev, "hDirs", list, hAirflow.supportedPositions)
+    if tonumber(s.hDir) then try_emit(dev, function() return hAirflow.position(tostring(math.floor(s.hDir))) end) end
   end
   local r = s.setpointRange
   if type(r) == "table" and r[1] and r[2] then
@@ -569,7 +583,9 @@ local function child_profile(key, device)
   -- -v3 the airflow direction (louver position)
   -- -in: units without an outdoor temperature (an empty outdoor value made the app warn about missing status)
   if key:match("^fglair%-") or key == "demo-aircon" then
+    -- -h: units with horizontal louver positions (left/right)
     return PROFILE.aircon .. (device:get_field("noOutdoor") and "-in" or "") .. (ac_unit_f(device) and "-f" or "")
+      .. ((device:get_field("hasHDir") and hAirflow) and "-h" or "")
   end
   if key == "buienradar" or key == "demo-rainradar" then
     return PROFILE.rainradar .. (rain_simple(device) and "-simple" or "")
@@ -585,7 +601,10 @@ end
 
 -- a capability that only the newest profile of a kind has: when the device lacks it, the switch did not happen
 local function profile_marker(want)
-  if want:sub(1, #PROFILE.aircon) == PROFILE.aircon then return want:sub(-2) == "-f" and targetTempF or airflowDir end
+  if want:sub(1, #PROFILE.aircon) == PROFILE.aircon then
+    if want:sub(-2) == "-h" then return hAirflow end
+    return want:sub(-2) == "-f" and targetTempF or airflowDir
+  end
   if want == PROFILE.washer then return washerProg end
   -- -v2: dew point components, -v3: wind component
   if want:sub(1, #PROFILE.rainradar) == PROFILE.rainradar then return windKmh or capabilities.temperatureMeasurement end
@@ -1153,6 +1172,12 @@ local driver = Driver("stoeckie-bridge-local", {
     },
     [acFan.ID] = {
       [acFan.commands.setFanMode.NAME] = handle_fan_mode,
+    },
+    ["silvervalley08660.horizontalAirflow"] = {
+      setPosition = function(driver, device, cmd)
+        if unchanged(device, "hdir", tostring(cmd.args.position)) then return end
+        ac_send(driver, device, "hdir", tonumber(cmd.args.position))
+      end,
     },
     [oscillation.ID] = {
       [oscillation.commands.setFanOscillationMode.NAME] = handle_oscillation,

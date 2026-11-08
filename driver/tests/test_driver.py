@@ -185,7 +185,7 @@ def test_aircon_flow(bridge):
     assert ev["main:cap.thermostatCoolingSetpoint.coolingSetpointRange"]["minimum"] == 16.0
     # Minimum Heat is one of the modes (like in the FGLair app), no extra switch or profile
     assert "minHeat" in ev["main:cap.airConditionerMode.supportedAcModes"]
-    assert ac.new_profile in (None, "stoeckie-aircon-v3")
+    assert ac.new_profile == "stoeckie-aircon-v3-h"  # the demo unit has horizontal louvers
     assert ev["main:cap.silvervalley08660.airflowDirection.position"] == "2"
     assert ev["main:cap.silvervalley08660.airflowDirection.supportedPositions"] == ["1", "2", "3", "4"]
     assert ev["main:cap.silvervalley08660.targetTemperature.temperature"] == 21.0
@@ -235,11 +235,14 @@ def test_aircon_flow(bridge):
     lua.execute(f'{h}["silvervalley08660.airconMode"].setMode(DRIVER_OBJ, AC, {{ args = {{ mode = "{shown}" }} }})')
     lua.execute(f'{h}["silvervalley08660.airflowDirection"].setPosition(DRIVER_OBJ, AC, {{ args = {{ position = "4" }} }})')
     lua.execute(f'{h}.airConditionerFanMode.setFanMode(DRIVER_OBJ, AC, {{ args = {{ fanMode = "quiet" }} }})')
+    # horizontal louvers (left/right) go to the bridge as "hdir"
+    lua.execute(f'{h}["silvervalley08660.horizontalAirflow"].setPosition(DRIVER_OBJ, AC, {{ args = {{ position = "5" }} }})')
+    assert state()["hDir"] == 5
     assert state()["power"] == "off"
     # Fahrenheit: a °F value from a US location is converted and switches the device to the °F profile
     lua.execute(f'{h}.thermostatCoolingSetpoint.setCoolingSetpoint(DRIVER_OBJ, AC, {{ args = {{ setpoint = 72 }} }})')
     assert state()["setpoint"] == 22.0
-    assert lua.eval("AC.new_profile") == "stoeckie-aircon-v3-f"
+    assert lua.eval("AC.new_profile") == "stoeckie-aircon-v3-f-h"
     lua.execute("AC.events = {}")
     lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
     ev = events()
