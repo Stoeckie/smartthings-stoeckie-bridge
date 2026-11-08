@@ -68,7 +68,12 @@ function NEW_DEVICE(info)
                                          rain = { id = "rain" }, graph = { id = "graph" },
                                          dewNow = { id = "dewNow" }, dewMax = { id = "dewMax" } } } }
   function d:get_field(k) return self.fields[k] end
-  function d:set_field(k, v) self.fields[k] = v end
+  -- like the hub: a persisted table comes back as a proxy: fields can be read, but next() and pairs() see
+  -- nothing (seen on a hub 2026-11-08: next() of a persisted table was nil right after set_field)
+  function d:set_field(k, v, opts)
+    if opts and opts.persist and type(v) == "table" then v = setmetatable({}, { __index = v }) end
+    self.fields[k] = v
+  end
   function d:emit_event(e) self.events[#self.events + 1] = { comp = "main", path = e.path, arg = e.arg } end
   function d:emit_component_event(c, e) self.events[#self.events + 1] = { comp = c.id, path = e.path, arg = e.arg } end
   function d:online() self.state = "online" end
@@ -235,20 +240,90 @@ def test_aircon_flow(bridge):
     lua.execute(f'{h}["silvervalley08660.airconMode"].setMode(DRIVER_OBJ, AC, {{ args = {{ mode = "{shown}" }} }})')
     lua.execute(f'{h}["silvervalley08660.airflowDirection"].setPosition(DRIVER_OBJ, AC, {{ args = {{ position = "4" }} }})')
     lua.execute(f'{h}.airConditionerFanMode.setFanMode(DRIVER_OBJ, AC, {{ args = {{ fanMode = "quiet" }} }})')
-    # horizontal louvers (left/right) go to the bridge as "hdir"
-    lua.execute(f'{h}["silvervalley08660.horizontalAirflow"].setPosition(DRIVER_OBJ, AC, {{ args = {{ position = "5" }} }})')
-    assert state()["hDir"] == 5
     assert state()["power"] == "off"
+    # a change while the unit is off is kept (a Fujitsu switches on with any command) and shown in the app
+    before = state()
+    lua.execute("AC.events = {}")
+    lua.execute(f'{h}["silvervalley08660.horizontalAirflow"].setPosition(DRIVER_OBJ, AC, {{ args = {{ position = "5" }} }})')
+    lua.execute(f'{h}["silvervalley08660.airconMode"].setMode(DRIVER_OBJ, AC, {{ args = {{ mode = "cool" }} }})')
     # Fahrenheit: a °F value from a US location is converted and switches the device to the °F profile
     lua.execute(f'{h}.thermostatCoolingSetpoint.setCoolingSetpoint(DRIVER_OBJ, AC, {{ args = {{ setpoint = 72 }} }})')
-    assert state()["setpoint"] == 22.0
+    s = state()
+    assert s["power"] == "off" and s["mode"] == before["mode"] and s["setpoint"] == before["setpoint"]
+    assert s["hDir"] == before["hDir"]
+    ev = events()
+    assert ev["main:cap.silvervalley08660.airconMode.mode"] == "cool"
+    assert ev["main:cap.silvervalley08660.horizontalAirflow.position"] == "5"
+    assert ev["main:cap.thermostatCoolingSetpoint.coolingSetpoint"] == 22.0
     assert lua.eval("AC.new_profile") == "stoeckie-aircon-v3-f-h"
+    # the next poll keeps showing the kept changes, not the values of the unit
+    lua.execute("AC.events = {}")
+    lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
+    ev = events()
+    assert ev["main:cap.silvervalley08660.airconMode.mode"] == "cool"
+    assert ev["main:cap.silvervalley08660.targetTemperatureF.temperature"] == 72
+    # the same value again (list opened and closed) is still nothing
+    lua.execute(f'{h}["silvervalley08660.airconMode"].setMode(DRIVER_OBJ, AC, {{ args = {{ mode = "cool" }} }})')
+    assert state()["power"] == "off"
+    # switching on sends the kept changes
+    lua.execute(f'{h}.switch.on(DRIVER_OBJ, AC)')
+    s = state()
+    assert (s["power"], s["mode"], s["setpoint"], s["hDir"]) == ("on", "cool", 22.0, 5)
+    assert lua.eval("AC.fields.ac_pending") is None
     lua.execute("AC.events = {}")
     lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
     ev = events()
     assert ev["main:cap.silvervalley08660.targetTemperatureF.temperature"] == 72
     lua.execute(f'{h}["silvervalley08660.targetTemperatureF"].setTemperature(DRIVER_OBJ, AC, {{ args = {{ temperature = 68 }} }})')
     assert state()["setpoint"] == 20.0
+    # setting "Changes while off: Send now": a change while off goes out right away (and switches the unit on)
+    lua.execute(f'{h}.switch.off(DRIVER_OBJ, AC)')
+    lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
+    lua.execute('AC.preferences.offChanges = "send"')
+    lua.execute(f'{h}["silvervalley08660.airconMode"].setMode(DRIVER_OBJ, AC, {{ args = {{ mode = "heat" }} }})')
+    assert (state()["power"], state()["mode"]) == ("on", "heat")
+    lua.execute('AC.preferences.offChanges = nil')
+    # a list opened right after switching off (before the next poll) does not switch the unit on again
+    lua.execute(f'{h}.switch.off(DRIVER_OBJ, AC)')
+    lua.execute(f'{h}["silvervalley08660.airconMode"].setMode(DRIVER_OBJ, AC, {{ args = {{ mode = "dry" }} }})')
+    assert state()["power"] == "off"
+    lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
+    # switched off while changes were kept: they are dropped
+    lua.execute(f'{h}.switch.off(DRIVER_OBJ, AC)')
+    lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
+    lua.execute(f'{h}.airConditionerFanMode.setFanMode(DRIVER_OBJ, AC, {{ args = {{ fanMode = "high" }} }})')
+    assert json.loads(lua.eval("AC.fields.ac_pending"))["fan"]["value"] == "high"
+    lua.execute(f'{h}.switch.off(DRIVER_OBJ, AC)')
+    assert lua.eval("AC.fields.ac_pending") is None
+    # the driver reports what it shows to the bridge (setup page)
+    with urllib.request.urlopen(f"http://127.0.0.1:{bridge}/setup") as r:
+        page = r.read().decode()
+    assert "Demo air conditioner in SmartThings: driver" in page and "stoeckie-aircon-v3-f-h" in page
+    assert "last commands from SmartThings" in page and "version 2026-11-08c" in page
+
+
+def test_aircon_unit_setting(bridge):
+    """Setting Temperature unit to °F switches the device to the profile with the °F slider."""
+    lua = lua53.LuaRuntime(unpack_returned_tuples=True)
+    lua.execute(f'package.path = "{SRC}/?.lua;{HERE}/?.lua;" .. package.path')
+    lua.globals().py_http = py_http
+    lua.execute(HARNESS)
+    lua.execute(f'dofile("{SRC}/init.lua")')
+    lua.execute(f'''
+      PARENT = NEW_DEVICE({{ id = "p1", label = "Bridge", device_network_id = "stbridge-test1",
+                            preferences = {{ ipAddress = "127.0.0.1", port = "{bridge}" }} }})
+      DRIVER.lifecycle_handlers.init(DRIVER_OBJ, PARENT)
+      DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
+      DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
+      for _, d in ipairs(DEVICES) do if d.parent_assigned_child_key == "demo-aircon" then AC = d end end
+    ''')
+    assert lua.eval("AC.new_profile") == "stoeckie-aircon-v3-h"
+    lua.execute('AC.preferences.temperatureUnit = "F"; DRIVER.lifecycle_handlers.infoChanged(DRIVER_OBJ, AC, "infoChanged", '
+                '{ old_st_store = { preferences = { temperatureUnit = "auto" } } })')
+    assert lua.eval("AC.new_profile") == "stoeckie-aircon-v3-f-h"
+    lua.execute('AC.preferences.temperatureUnit = "C"; DRIVER.lifecycle_handlers.infoChanged(DRIVER_OBJ, AC, "infoChanged", '
+                '{ old_st_store = { preferences = { temperatureUnit = "F" } } })')
+    assert lua.eval("AC.new_profile") == "stoeckie-aircon-v3-h"
 
 
 def test_car_flow(bridge):

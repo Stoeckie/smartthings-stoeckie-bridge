@@ -72,7 +72,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-08b"
+VERSION = "2026-11-08c"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -131,6 +131,14 @@ class Registry:
     def __init__(self) -> None:
         self.devices: dict[str, dict[str, Any]] = {}
         self.handlers: dict[str, Any] = {}  # id -> async fn(cmd, value)
+        self.diag: dict[str, dict[str, Any]] = {}       # id -> what the Edge driver reports (build, profile, unit)
+        self.commands: dict[str, list[str]] = {}        # id -> last commands from SmartThings (for the setup page)
+        self.info: dict[str, str] = {}                  # id -> extra line for the setup page (e.g. louver properties)
+
+    def note_command(self, dev_id: str, cmd: str, value: Any) -> None:
+        lst = self.commands.setdefault(dev_id, [])
+        lst.append(time.strftime("%H:%M:%S") + " " + cmd + ("" if value is None else " " + str(value)[:40]))
+        del lst[:-5]
 
     def upsert(self, dev_id: str, dev_type: str, name: str, state: dict[str, Any],
                online: bool = True, handler=None) -> None:
@@ -402,6 +410,16 @@ def hdir_count(dev) -> int:
     return vdir_count(dev, HDIR_PROP, HNUM_PROP)
 
 
+def louver_info(dev) -> str:
+    """Setup page: louver positions the bridge found, and the airflow property names the unit has."""
+    try:
+        names = sorted(str(k) for k in dev.properties_full.keys() if str(k).startswith("af_"))
+    except Exception:  # noqa: BLE001
+        names = []
+    return (f"vertical positions {vdir_count(dev) or 'none'}, horizontal positions {hdir_count(dev) or 'none'}; "
+            f"airflow properties: {', '.join(names) or 'none'}")
+
+
 def describe_unit(dev) -> str:
     """One log line per unit: property names and the min heat capability bit (no values)."""
     try:
@@ -477,6 +495,7 @@ class FGLair:
             if dsn not in self.described:
                 self.described.add(dsn)
                 log.info("[fglair] unit %s: %s", dsn, describe_unit(dev))
+            REG.info["fglair-" + dsn] = louver_info(dev)
             if time.time() - self.last_sense.get(dsn, 0) >= self.REFRESH_EVERY:
                 self.last_sense[dsn] = time.time()
                 await dev.refresh_sensed_temp()
@@ -2994,7 +3013,7 @@ SETUP_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 label{display:block;margin:14px 0 4px;font-weight:600}input,textarea,select{width:100%;box-sizing:border-box;padding:8px;
 font:13px ui-monospace,monospace}textarea{height:90px}button{margin-top:18px;padding:10px 18px;font-size:15px}
 .st{padding:10px;border-radius:6px;background:#f2f2f2;margin:12px 0}h3{margin-top:36px}</style></head><body>
-<h2>Stoeckie Bridge</h2><div class="st">{status}</div>
+<h2>Stoeckie Bridge <small>{version}</small></h2><div class="st">{status}</div>
 <p>Everything you enter here is stored only locally, in config.json on this computer.</p>
 <h3>Pair the SmartThings hub</h3>
 <p>After pairing, the bridge only accepts signed requests from the paired hub. Press Pair; the hub pairs by itself
@@ -3179,6 +3198,16 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
                 f"{d['name']} ({d['state'].get('mode')}, {d['state'].get('setpoint')} C)" for d in acs))
         else:
             lines.append("FGLair set up, no air conditioner found yet (see bridge.log).")
+        for d in acs:  # details per unit (also for the demo unit)
+            if REG.info.get(d["id"]):
+                lines.append(f"{d['name']}: {REG.info[d['id']]}")
+            g = REG.diag.get(d["id"])
+            if g:
+                lines.append(f"{d['name']} in SmartThings: driver {g.get('build', '?')}, profile {g.get('profile', '?')}, "
+                             f"set temperature in {g.get('unit', '?')} (setting {g.get('unitSetting', '?')}), "
+                             f"horizontal airflow {g.get('horizontal', '?')}")
+            if REG.commands.get(d["id"]):
+                lines.append(f"{d['name']} last commands from SmartThings: " + "; ".join(REG.commands[d["id"]]))
         k = cfg.get("skoda") or {}
         cars = [d for d in REG.devices.values() if d["type"] == "car"]
         if skoda_configured(k):
@@ -3257,7 +3286,7 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             raise web.HTTPFound(f"https://{host}:{https_port}/setup")
         k = load_config().get("skoda") or {}
         rb = load_config().get("buienradar") or {}
-        page = (SETUP_HTML.replace("{status}", status_text())
+        page = (SETUP_HTML.replace("{status}", status_text()).replace("{version}", "version " + VERSION)
                 .replace("{skoda_poll}", html.escape(str(k.get("poll_minutes", 10))))
                 .replace("{skoda_temp}", html.escape(str(k.get("climate_temp", 21))))
                 .replace("{fglair_poll}", html.escape(str((load_config().get("fglair") or {}).get("poll_seconds", 60))))
@@ -3481,8 +3510,16 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             body = await req.json()
         except Exception:  # noqa: BLE001
             body = {}
+        cmd = str(body.get("cmd", ""))
+        if cmd == "diag":  # the driver tells what it shows (driver build, profile, unit); only for the setup page
+            if isinstance(body.get("value"), dict):
+                REG.diag[dev_id] = {k: str(v)[:60] for k, v in list(body["value"].items())[:8]}
+            return web.json_response({"ok": True})
+        if cmd != "refresh":
+            REG.note_command(dev_id, cmd, body.get("value"))
+            log.info("[api] %s: %s %s", dev_id, cmd, "" if body.get("value") is None else body.get("value"))
         try:
-            await handler(str(body.get("cmd", "")), body.get("value"))
+            await handler(cmd, body.get("value"))
         except Exception as ex:  # noqa: BLE001
             log.error("command %s on %s failed: %s", body, dev_id, ex)
             return web.json_response({"error": str(ex)}, status=500)

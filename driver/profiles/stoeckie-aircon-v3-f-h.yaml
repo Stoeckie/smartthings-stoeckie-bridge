@@ -42,6 +42,16 @@ preferences:
         C: "°C"
         F: "°F"
       default: auto
+  - name: offChanges
+    title: Changes while off
+    description: "Fujitsu units switch on with any change. Keep: a change made while the unit is off is shown and sent when you switch it on. Send now: sent right away (the unit switches on)."
+    required: false
+    preferenceType: enumeration
+    definition:
+      options:
+        keep: Keep until switched on
+        send: Send now (switches on)
+      default: keep
   - name: pollSeconds
     title: Update every (seconds)
     description: "How often the bridge reads the air conditioners from the FGLair cloud. Applies to all of them. 30 to 600, also on the bridge setup page."
@@ -52,5 +62,5 @@ preferences:
       maximum: 600
       default: 60
 metadata:
-  vid: VID_V3_F_H
+  vid: c069c5eb-5c7e-3e7f-b6fe-c6d281257a54
   mnmn: SmartThingsCommunity

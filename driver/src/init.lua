@@ -86,7 +86,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-08d"
+local BUILD = "2026-11-08g"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -271,8 +271,42 @@ end
 
 local sync_profile -- defined with the polling code below
 
+local send_diag -- defined with the commands below
+
+-- changes kept while an air conditioner is off. Stored as a JSON string: on the hub a persisted Lua table
+-- with string keys comes back as an empty table (seen 2026-11-08), a string survives as it is.
+local stjson = require "st.json"
+local function get_pending(dev)
+  local v = dev:get_field("ac_pending")
+  if type(v) ~= "string" or v == "" then return nil end
+  local ok, t = pcall(stjson.decode, v)
+  if ok and type(t) == "table" and (t.mode or t.setpoint or t.fan or t.swing or t.vdir or t.hdir) then return t end
+  return nil
+end
+local function set_pending(dev, t)
+  dev:set_field("ac_pending", t and stjson.encode(t) or nil, { persist = true })
+end
+
 local function emit_aircon(dev, s)
   try_emit(dev, function() return s.power == "off" and capabilities.switch.switch.off() or capabilities.switch.switch.on() end)
+  -- changes made while the unit is off are kept until it is switched on (see ac_change): show them, not the
+  -- values of the unit, else the app jumps back. Once the unit is on (also from the remote or FGLair) they go.
+  local pend = get_pending(dev)
+  if s.power ~= "off" then
+    if pend or dev:get_field("ac_pending") then set_pending(dev, nil) end
+    pend = nil
+  elseif pend then
+    local c = {}
+    for k, v in pairs(s) do c[k] = v end
+    if pend.setpoint then c.setpoint = pend.setpoint.shown end
+    if pend.fan then c.fan = pend.fan.shown end
+    if pend.swing then c.swing = SWING_FROM_ST[pend.swing.shown] or c.swing end
+    if pend.vdir then c.vDir = tonumber(pend.vdir.shown) end
+    if pend.hdir then c.hDir = tonumber(pend.hdir.shown) end
+    s = c
+  else
+    pend = nil
+  end
   local modes = map_list(s.supportedModes, AC_MODE_TO_ST)
   local m = AC_MODE_TO_ST[s.mode or ""]
   if m then
@@ -282,6 +316,7 @@ local function emit_aircon(dev, s)
     -- its status information yet" (and on some phones the old mode list): keep the last mode
     m = dev:get_field("lastAcMode") or (modes[1] and (modes[#modes] == "minHeat" and "heat" or modes[1])) or "auto"
   end
+  if pend and pend.mode then m = pend.mode.shown end
   try_emit(dev, function() return acMode.airConditionerMode(m) end)
   try_emit(dev, function() return acModeX.mode(m) end)
   emit_list(dev, "acModes", modes, acMode.supportedAcModes)
@@ -289,15 +324,18 @@ local function emit_aircon(dev, s)
   emit_list(dev, "acModesX", modes, acModeX.supportedModes)
   if s.setpoint then
     try_emit(dev, function() return coolSetpoint.coolingSetpoint({ value = tonumber(s.setpoint), unit = "C" }) end)
-    if ac_unit_f(dev) then
+    local f = ac_unit_f(dev)
+    if f then
       try_emit(dev, function() return targetTempF.temperature({ value = c_to_f(tonumber(s.setpoint)), unit = "F" }) end)
-    else
+    end
+    -- °C slider: also while a °F profile switch has not happened yet, so it never shows an old value
+    if not f or not dev:supports_capability(targetTempF) then
       try_emit(dev, function() return targetTemp.temperature({ value = tonumber(s.setpoint), unit = "C" }) end)
     end
   end
   -- what the app shows now: a command with the same value (the app sends one when you open a list and go
   -- back without choosing) must not switch the unit on
-  dev:set_field("ac_shown", { mode = m, fan = s.fan, swing = SWING_TO_ST[s.swing or ""],
+  dev:set_field("ac_shown", { power = s.power == "off" and "off" or "on", mode = m, fan = s.fan, swing = SWING_TO_ST[s.swing or ""],
     vdir = tonumber(s.vDir) and tostring(math.floor(s.vDir)) or nil,
     hdir = tonumber(s.hDir) and tostring(math.floor(s.hDir)) or nil, setpoint = tonumber(s.setpoint) })
   local n = tonumber(s.vDirCount) or 0
@@ -355,6 +393,7 @@ local function emit_aircon(dev, s)
   if sw then try_emit(dev, function() return oscillation.fanOscillationMode(sw) end) end
   emit_list(dev, "acSwings", map_list(s.supportedSwings, SWING_TO_ST), oscillation.supportedFanOscillationModes)
   emit_list(dev, "acSwingsA", map_list(s.supportedSwings, SWING_TO_ST), oscillation.availableFanOscillationModes)
+  if send_diag then send_diag(dev) end
 end
 
 local function comp_emit(dev, id, make)
@@ -809,12 +848,39 @@ local function handle_hc_machine(driver, device, cmd)
   elseif want == "run" or want == "running" then send(driver, device, "start") end  -- resumes when paused
 end
 
+-- order in which changes kept while an air conditioner was off are sent after switching on (mode first: on a
+-- Fujitsu a mode command also switches the unit on; a louver position after swing, as it ends swing)
+local PENDING_ORDER = { "setpoint", "fan", "swing", "vdir", "hdir" }
 local function handle_switch_on(driver, device, cmd)
   local c = cmd and cmd.component
-  send(driver, device, c == "climate" and "climate_on" or "on")
+  if c == "climate" then send(driver, device, "climate_on"); return end
+  local pend = get_pending(device)
+  if pend then
+    set_pending(device, nil)
+    device:set_field("ac_shown", nil)
+    log.info("[stbridge] " .. device.label .. ": switching on with the changes made while off")
+    -- a mode switches a Fujitsu on; Minimum Heat is a separate setting, so switch on first
+    if not pend.mode or pend.mode.value == "minheat" then send(driver, device, "on") end
+    if pend.mode then send(driver, device, pend.mode.what, pend.mode.value) end
+    for _, k in ipairs(PENDING_ORDER) do
+      local x = pend[k]
+      if x then send(driver, device, x.what, x.value) end
+    end
+    return
+  end
+  local s = device:get_field("ac_shown")
+  if type(s) == "table" then s.power = "on" end
+  send(driver, device, "on")
 end
 local function handle_switch_off(driver, device, cmd)
   local c = cmd and cmd.component
+  if c ~= "climate" then
+    if device:get_field("ac_pending") then set_pending(device, nil) end
+    -- off right away for the check in ac_change (the next poll confirms it), so a list opened just after
+    -- switching off does not switch the unit on again
+    local s = device:get_field("ac_shown")
+    if type(s) == "table" then s.power = "off" end
+  end
   send(driver, device, c == "climate" and "climate_off" or "off")
 end
 -- a refused lock command (e.g. unlock without the gateway key): show the real state again instead of a spinner
@@ -827,29 +893,94 @@ local function lock_cmd(driver, device, cmd)
 end
 local function handle_lock(driver, device) lock_cmd(driver, device, "lock") end
 local function handle_unlock(driver, device) lock_cmd(driver, device, "unlock") end
-local function unchanged(device, key, value)
+-- what the app shows for each setting (fallback when the last poll is not known yet)
+local SHOWN_STATE = {
+  mode = { "silvervalley08660.airconMode", "mode" }, fan = { "airConditionerFanMode", "fanMode" },
+  swing = { "fanOscillationMode", "fanOscillationMode" }, vdir = { "silvervalley08660.airflowDirection", "position" },
+  hdir = { "silvervalley08660.horizontalAirflow", "position" }, setpoint = { "thermostatCoolingSetpoint", "coolingSetpoint" },
+}
+local function shown_value(device, key)
   local shown = device:get_field("ac_shown")
-  if type(shown) == "table" and shown[key] ~= nil and shown[key] == value then
+  if type(shown) == "table" and shown[key] ~= nil then return shown[key] end
+  local a = SHOWN_STATE[key]
+  if not a then return nil end
+  local ok, v = pcall(device.get_latest_state, device, "main", a[1], a[2])
+  return ok and v or nil
+end
+local function unchanged(device, key, value)
+  local v = shown_value(device, key)
+  if v ~= nil and (v == value or (key == "setpoint" and tonumber(v) == tonumber(value))) then
     log.info(string.format("[stbridge] %s: %s already %s, nothing sent", device.label, key, tostring(value)))
     return true
   end
   return false
 end
--- after a command the shown state is stale until the next poll (a position also ends swing, etc.)
-local function ac_send(driver, device, what, value)
-  device:set_field("ac_shown", nil)
-  return send(driver, device, what, value)
+local function unit_off(device)
+  local shown = device:get_field("ac_shown")
+  if type(shown) == "table" and shown.power then return shown.power == "off" end
+  local ok, v = pcall(device.get_latest_state, device, "main", capabilities.switch.ID, capabilities.switch.switch.NAME)
+  return ok and v == "off"
+end
+-- show a setting right away (a change kept while off, which the unit does not report)
+local function show_setting(device, key, v)
+  if key == "mode" then
+    try_emit(device, function() return acMode.airConditionerMode(v) end)
+    try_emit(device, function() return acModeX.mode(v) end)
+  elseif key == "fan" then try_emit(device, function() return acFan.fanMode(v) end)
+  elseif key == "swing" then try_emit(device, function() return oscillation.fanOscillationMode(v) end)
+  elseif key == "vdir" then try_emit(device, function() return airflowDir.position(v) end)
+  elseif key == "hdir" and hAirflow then try_emit(device, function() return hAirflow.position(v) end)
+  elseif key == "setpoint" then
+    try_emit(device, function() return coolSetpoint.coolingSetpoint({ value = v, unit = "C" }) end)
+    if ac_unit_f(device) and device:supports_capability(targetTempF) then
+      try_emit(device, function() return targetTempF.temperature({ value = c_to_f(v), unit = "F" }) end)
+    else
+      try_emit(device, function() return targetTemp.temperature({ value = v, unit = "C" }) end)
+    end
+  end
+end
+-- after a command the unit reports back at the next poll; until then the app shows the new value
+local function ac_send(driver, device, what, value, key, shown)
+  local s = device:get_field("ac_shown")
+  if type(s) == "table" and key then
+    s[key] = shown
+    if key == "vdir" or key == "hdir" then s.swing = nil end    -- a position ends swing
+    if key == "swing" then s.vdir, s.hdir = nil, nil end
+    if key == "mode" then s.power = "on" end                    -- a mode command switches a Fujitsu on
+  end
+  local ok = send(driver, device, what, value)
+  if not ok then device:set_field("ac_shown", nil) end
+  return ok
+end
+-- every setting of an air conditioner goes through here:
+-- * the same value as shown (the app sends that when a list is opened and closed without a choice): nothing
+-- * the unit is off: on a Fujitsu a command switches it on, so keep the change and send it when it is switched
+--   on (setting "Changes while off": "Send now" sends right away)
+local function ac_change(driver, device, key, shown, what, value)
+  log.info(string.format("[stbridge] %s: command %s %s (unit %s)", device.label, key, tostring(shown),
+    unit_off(device) and "off" or "on"))
+  if unchanged(device, key, shown) then return end
+  if unit_off(device) and (device.preferences or {}).offChanges ~= "send" then
+    local pend = get_pending(device) or {}
+    pend[key] = { what = what, value = value, shown = shown }
+    set_pending(device, pend)
+    local s = device:get_field("ac_shown")
+    if type(s) == "table" then s[key] = shown end
+    show_setting(device, key, shown)
+    log.info(string.format("[stbridge] %s: unit is off, %s %s kept until it is switched on", device.label, key,
+      tostring(shown)))
+    return
+  end
+  ac_send(driver, device, what, value, key, shown)
 end
 local function handle_ac_mode(driver, device, cmd)
   local m = AC_MODE_FROM_ST[cmd.args.mode or ""]
   if not m then log.warn("[stbridge] unsupported AC mode " .. tostring(cmd.args.mode)); return end
-  if unchanged(device, "mode", AC_MODE_TO_ST[m]) then return end
-  ac_send(driver, device, "mode", m)
+  ac_change(driver, device, "mode", AC_MODE_TO_ST[m], "mode", m)
 end
 local function send_setpoint(driver, device, c)
   if not c then return end
-  if unchanged(device, "setpoint", c) then return end
-  ac_send(driver, device, "setpoint", c)
+  ac_change(driver, device, "setpoint", c, "setpoint", c)
 end
 -- standard setpoint (routines, other apps): °C, or °F from a US location (then the device switches to °F)
 local function handle_setpoint(driver, device, cmd)
@@ -869,13 +1000,35 @@ local function handle_setpoint_f(driver, device, cmd)
   if v then send_setpoint(driver, device, f_to_c(v)) end
 end
 local function handle_fan_mode(driver, device, cmd)
-  if unchanged(device, "fan", cmd.args.fanMode) then return end
-  ac_send(driver, device, "fan", cmd.args.fanMode)
+  ac_change(driver, device, "fan", cmd.args.fanMode, "fan", cmd.args.fanMode)
 end
 local function handle_oscillation(driver, device, cmd)
   local m = SWING_FROM_ST[cmd.args.fanOscillationMode or ""]
-  if not m or unchanged(device, "swing", cmd.args.fanOscillationMode) then return end
-  ac_send(driver, device, "swing", m)
+  if not m then return end
+  ac_change(driver, device, "swing", cmd.args.fanOscillationMode, "swing", m)
+end
+local function handle_vdir(driver, device, cmd)
+  local n = tonumber(cmd.args.position)
+  if n then ac_change(driver, device, "vdir", tostring(math.floor(n)), "vdir", math.floor(n)) end
+end
+local function handle_hdir(driver, device, cmd)
+  local n = tonumber(cmd.args.position)
+  if n then ac_change(driver, device, "hdir", tostring(math.floor(n)), "hdir", math.floor(n)) end
+end
+-- what the driver shows, for the bridge setup page (driver build, profile, °C/°F): only sent when it changes
+send_diag = function(dev)
+  local want = child_profile and child_profile(dev.parent_assigned_child_key or "", dev) or "?"
+  local unit = ac_unit_f(dev) and (dev:supports_capability(targetTempF) and "F" or "F (profile switch pending)") or "C"
+  local d = { build = BUILD, profile = tostring(dev:get_field("profile") or want), unit = unit,
+    unitSetting = tostring((dev.preferences or {}).temperatureUnit or "auto"),
+    horizontal = hAirflow and dev:supports_capability(hAirflow) and "yes" or "no" }
+  local enc = d.build .. d.profile .. d.unit .. d.unitSetting .. d.horizontal
+  if dev:get_field("diag_sent") == enc then return end
+  local parent = dev:get_parent_device()
+  if not parent then return end
+  local ip, port = bridge_addr(parent)
+  local ok, res = pcall(api.command, ip, port, dev.parent_assigned_child_key, "diag", d)
+  if ok and res then dev:set_field("diag_sent", enc) end
 end
 
 -- lifecycle -----------------------------------------------------------------------
@@ -1165,19 +1318,13 @@ local driver = Driver("stoeckie-bridge-local", {
       [targetTempF.commands.setTemperature.NAME] = handle_setpoint_f,
     },
     [airflowDir.ID] = {
-      [airflowDir.commands.setPosition.NAME] = function(driver, device, cmd)
-        if unchanged(device, "vdir", tostring(cmd.args.position)) then return end
-        ac_send(driver, device, "vdir", tonumber(cmd.args.position))
-      end,
+      [airflowDir.commands.setPosition.NAME] = handle_vdir,
     },
     [acFan.ID] = {
       [acFan.commands.setFanMode.NAME] = handle_fan_mode,
     },
     ["silvervalley08660.horizontalAirflow"] = {
-      setPosition = function(driver, device, cmd)
-        if unchanged(device, "hdir", tostring(cmd.args.position)) then return end
-        ac_send(driver, device, "hdir", tonumber(cmd.args.position))
-      end,
+      setPosition = handle_hdir,
     },
     [oscillation.ID] = {
       [oscillation.commands.setFanOscillationMode.NAME] = handle_oscillation,
