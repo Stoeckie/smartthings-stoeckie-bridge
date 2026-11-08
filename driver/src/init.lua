@@ -22,11 +22,17 @@ local capabilities = require "st.capabilities"
 
 -- Connection status as a capability, so routines can notify when this device loses its connection
 -- (SmartThings itself has no "device offline" trigger for routines).
--- Short drops (a reconnect, one missed poll) are ignored: Offline is only emitted after CONN_GRACE seconds down.
+-- Short drops (a reconnect, one missed poll) are ignored: Offline is only emitted after the "Offline after" setting (default 5 min) down.
 -- Every drop is remembered (time, duration, reason) and shown as "Last drop" once the connection is back.
 local conn_cap = capabilities["silvervalley08660.connectionStatus"]
 local drop_cap = capabilities["silvervalley08660.connectionLog"]
-local CONN_GRACE = 120
+local CONN_GRACE = 300
+local function conn_grace(dev)
+  -- setting "Offline after (minutes)": a router or network update at night takes a few minutes
+  local m = tonumber(dev.preferences and dev.preferences.offlineAfter)
+  if m and m >= 1 then return math.floor(m * 60) end
+  return CONN_GRACE
+end
 local function emit_conn(dev, v)
   if dev:get_field("conn_status") == v then return end
   local ok = pcall(function() dev:emit_event(conn_cap.status(v)) end)
@@ -69,7 +75,7 @@ local function set_conn(dev, up, reason)
   local since = os.time()
   dev:set_field("conn_down_since", since)
   local ok = pcall(function()
-    dev.thread:call_with_delay(CONN_GRACE, function()
+    dev.thread:call_with_delay(conn_grace(dev), function()
       if dev:get_field("conn_down_since") == since then emit_conn(dev, "offline") end
     end)
   end)
@@ -80,7 +86,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-08a"
+local BUILD = "2026-11-08b"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -103,6 +109,7 @@ local coolSetpoint = capabilities.thermostatCoolingSetpoint
 -- (the standard cooling setpoint is called "Cooling setpoint" in the app, also in heat mode)
 local acModeX = capabilities["silvervalley08660.airconMode"]
 local targetTemp = capabilities["silvervalley08660.targetTemperature"]
+local targetTempF = capabilities["silvervalley08660.targetTemperatureF"] -- same, in °F (profiles ...-f)
 local airflowDir = capabilities["silvervalley08660.airflowDirection"]  -- louver position 1..n (swing off)
 -- Home Connect: program list with start button, and oven temperature + cooking time (labels EN/NL)
 local hcProg = capabilities["silvervalley08660.applianceProgram"]
@@ -123,6 +130,18 @@ local AC_MODE_FROM_ST = { auto = "auto", cool = "cool", dry = "dry", fanOnly = "
                           minHeat = "minheat" }
 local SWING_TO_ST = { off = "fixed", vertical = "vertical", horizontal = "horizontal", both = "all" }
 local SWING_FROM_ST = { fixed = "off", vertical = "vertical", horizontal = "horizontal", all = "both" }
+
+-- Temperature unit of an air conditioner: the bridge works in °C. A US location shows °F: the standard
+-- capabilities are converted by the app, the custom "Set temperature" slider is not, so a °F device gets a
+-- profile with a °F slider (...-f). Setting "Temperature unit": auto (°F once a °F value arrives), C or F.
+local function ac_unit_f(device)
+  local p = device.preferences and device.preferences.temperatureUnit
+  if p == "F" then return true end
+  if p == "C" then return false end
+  return device:get_field("unitF") == true
+end
+local function c_to_f(c) return math.floor(c * 9 / 5 + 32 + 0.5) end
+local function f_to_c(f) return math.floor(((f - 32) * 5 / 9) * 2 + 0.5) / 2 end
 
 local state = {}       -- parent device.id -> { poll_timer, fast_until }
 local discovered = {}  -- dni -> { ip, port, info }
@@ -268,8 +287,16 @@ local function emit_aircon(dev, s)
   emit_list(dev, "acModesX", modes, acModeX.supportedModes)
   if s.setpoint then
     try_emit(dev, function() return coolSetpoint.coolingSetpoint({ value = tonumber(s.setpoint), unit = "C" }) end)
-    try_emit(dev, function() return targetTemp.temperature({ value = tonumber(s.setpoint), unit = "C" }) end)
+    if ac_unit_f(dev) then
+      try_emit(dev, function() return targetTempF.temperature({ value = c_to_f(tonumber(s.setpoint)), unit = "F" }) end)
+    else
+      try_emit(dev, function() return targetTemp.temperature({ value = tonumber(s.setpoint), unit = "C" }) end)
+    end
   end
+  -- what the app shows now: a command with the same value (the app sends one when you open a list and go
+  -- back without choosing) must not switch the unit on
+  dev:set_field("ac_shown", { mode = m, fan = s.fan, swing = SWING_TO_ST[s.swing or ""],
+    vdir = tonumber(s.vDir) and tostring(math.floor(s.vDir)) or nil, setpoint = tonumber(s.setpoint) })
   local n = tonumber(s.vDirCount) or 0
   if n > 0 then
     local list = {}
@@ -527,7 +554,7 @@ local function child_profile(key, device)
   -- -v3 the airflow direction (louver position)
   -- -in: units without an outdoor temperature (an empty outdoor value made the app warn about missing status)
   if key:match("^fglair%-") or key == "demo-aircon" then
-    return PROFILE.aircon .. (device:get_field("noOutdoor") and "-in" or "")
+    return PROFILE.aircon .. (device:get_field("noOutdoor") and "-in" or "") .. (ac_unit_f(device) and "-f" or "")
   end
   if key == "buienradar" or key == "demo-rainradar" then
     return PROFILE.rainradar .. (rain_simple(device) and "-simple" or "")
@@ -543,7 +570,7 @@ end
 
 -- a capability that only the newest profile of a kind has: when the device lacks it, the switch did not happen
 local function profile_marker(want)
-  if want:sub(1, #PROFILE.aircon) == PROFILE.aircon then return airflowDir end
+  if want:sub(1, #PROFILE.aircon) == PROFILE.aircon then return want:sub(-2) == "-f" and targetTempF or airflowDir end
   if want == PROFILE.washer then return washerProg end
   -- -v2: dew point components
   if want:sub(1, #PROFILE.rainradar) == PROFILE.rainradar then return capabilities.temperatureMeasurement end
@@ -766,17 +793,55 @@ local function lock_cmd(driver, device, cmd)
 end
 local function handle_lock(driver, device) lock_cmd(driver, device, "lock") end
 local function handle_unlock(driver, device) lock_cmd(driver, device, "unlock") end
+local function unchanged(device, key, value)
+  local shown = device:get_field("ac_shown")
+  if type(shown) == "table" and shown[key] ~= nil and shown[key] == value then
+    log.info(string.format("[stbridge] %s: %s already %s, nothing sent", device.label, key, tostring(value)))
+    return true
+  end
+  return false
+end
+-- after a command the shown state is stale until the next poll (a position also ends swing, etc.)
+local function ac_send(driver, device, what, value)
+  device:set_field("ac_shown", nil)
+  return send(driver, device, what, value)
+end
 local function handle_ac_mode(driver, device, cmd)
   local m = AC_MODE_FROM_ST[cmd.args.mode or ""]
-  if m then send(driver, device, "mode", m) else log.warn("[stbridge] unsupported AC mode " .. tostring(cmd.args.mode)) end
+  if not m then log.warn("[stbridge] unsupported AC mode " .. tostring(cmd.args.mode)); return end
+  if unchanged(device, "mode", AC_MODE_TO_ST[m]) then return end
+  ac_send(driver, device, "mode", m)
 end
+local function send_setpoint(driver, device, c)
+  if not c then return end
+  if unchanged(device, "setpoint", c) then return end
+  ac_send(driver, device, "setpoint", c)
+end
+-- standard setpoint (routines, other apps): °C, or °F from a US location (then the device switches to °F)
 local function handle_setpoint(driver, device, cmd)
-  send(driver, device, "setpoint", tonumber(cmd.args.setpoint or cmd.args.temperature))
+  local v = tonumber(cmd.args.setpoint or cmd.args.temperature)
+  if not v then return end
+  if v > 40 then
+    if device:get_field("unitF") ~= true then
+      device:set_field("unitF", true, { persist = true })
+      if sync_profile then sync_profile(device) end
+    end
+    v = f_to_c(v)
+  end
+  send_setpoint(driver, device, v)
 end
-local function handle_fan_mode(driver, device, cmd) send(driver, device, "fan", cmd.args.fanMode) end
+local function handle_setpoint_f(driver, device, cmd)
+  local v = tonumber(cmd.args.temperature)
+  if v then send_setpoint(driver, device, f_to_c(v)) end
+end
+local function handle_fan_mode(driver, device, cmd)
+  if unchanged(device, "fan", cmd.args.fanMode) then return end
+  ac_send(driver, device, "fan", cmd.args.fanMode)
+end
 local function handle_oscillation(driver, device, cmd)
   local m = SWING_FROM_ST[cmd.args.fanOscillationMode or ""]
-  if m then send(driver, device, "swing", m) end
+  if not m or unchanged(device, "swing", cmd.args.fanOscillationMode) then return end
+  ac_send(driver, device, "swing", m)
 end
 
 -- lifecycle -----------------------------------------------------------------------
@@ -1062,9 +1127,13 @@ local driver = Driver("stoeckie-bridge-local", {
     [targetTemp.ID] = {
       [targetTemp.commands.setTemperature.NAME] = handle_setpoint,
     },
+    [targetTempF.ID] = {
+      [targetTempF.commands.setTemperature.NAME] = handle_setpoint_f,
+    },
     [airflowDir.ID] = {
       [airflowDir.commands.setPosition.NAME] = function(driver, device, cmd)
-        send(driver, device, "vdir", tonumber(cmd.args.position))
+        if unchanged(device, "vdir", tostring(cmd.args.position)) then return end
+        ac_send(driver, device, "vdir", tonumber(cmd.args.position))
       end,
     },
     [acFan.ID] = {

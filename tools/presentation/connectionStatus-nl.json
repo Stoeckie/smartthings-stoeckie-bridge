@@ -1,0 +1,1 @@
+{"tag": "nl", "label": "Verbinding", "attributes": {"status": {"label": "Verbindingsstatus", "displayTemplate": "Verbinding van {{device.label}} is {{value}}", "i18n": {"value": {"online": {"label": "Verbonden"}, "offline": {"label": "Offline"}}}}}}

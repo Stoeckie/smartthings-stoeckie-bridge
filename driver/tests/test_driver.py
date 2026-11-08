@@ -36,7 +36,7 @@ for _, id in ipairs({ "windowShade", "windowShadeLevel", "refresh", "dryerOperat
                       "powerMeter", "presenceSensor", "contactSensor",
                       "airConditionerMode", "airConditionerFanMode", "fanOscillationMode",
                       "thermostatCoolingSetpoint", "lock", "waterSensor", "relativeHumidityMeasurement", "rainSensor", "precipitationSensor",
-                      "silvervalley08660.airconMode", "silvervalley08660.targetTemperature",
+                      "silvervalley08660.airconMode", "silvervalley08660.targetTemperature", "silvervalley08660.targetTemperatureF",
                       "silvervalley08660.airflowDirection", "silvervalley08660.applianceProgram",
                       "silvervalley08660.cookSettings", "silvervalley08660.washerProgram", "dishwasherOperatingState", "ovenOperatingState",
                       "washerOperatingState", "audioVolume", "audioMute", "mediaInputSource", "tvChannel",
@@ -226,6 +226,26 @@ def test_aircon_flow(bridge):
     assert ev["main:cap.airConditionerMode.airConditionerMode"] == "fanOnly"
     assert ev["main:cap.fanOscillationMode.fanOscillationMode"] == "vertical"
     assert "main:cap.airConditionerMode.supportedAcModes" not in ev  # unchanged list is not re-emitted
+
+    # the app sends the shown value when a list is opened and closed without a choice: nothing may be sent
+    # (a mode command switches a Fujitsu unit on)
+    lua.execute(f'{h}.switch.off(DRIVER_OBJ, AC)')
+    lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
+    shown = lua.eval('AC.fields.ac_shown.mode')
+    lua.execute(f'{h}["silvervalley08660.airconMode"].setMode(DRIVER_OBJ, AC, {{ args = {{ mode = "{shown}" }} }})')
+    lua.execute(f'{h}["silvervalley08660.airflowDirection"].setPosition(DRIVER_OBJ, AC, {{ args = {{ position = "4" }} }})')
+    lua.execute(f'{h}.airConditionerFanMode.setFanMode(DRIVER_OBJ, AC, {{ args = {{ fanMode = "quiet" }} }})')
+    assert state()["power"] == "off"
+    # Fahrenheit: a °F value from a US location is converted and switches the device to the °F profile
+    lua.execute(f'{h}.thermostatCoolingSetpoint.setCoolingSetpoint(DRIVER_OBJ, AC, {{ args = {{ setpoint = 72 }} }})')
+    assert state()["setpoint"] == 22.0
+    assert lua.eval("AC.new_profile") == "stoeckie-aircon-v3-f"
+    lua.execute("AC.events = {}")
+    lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
+    ev = events()
+    assert ev["main:cap.silvervalley08660.targetTemperatureF.temperature"] == 72
+    lua.execute(f'{h}["silvervalley08660.targetTemperatureF"].setTemperature(DRIVER_OBJ, AC, {{ args = {{ temperature = 68 }} }})')
+    assert state()["setpoint"] == 20.0
 
 
 def test_car_flow(bridge):

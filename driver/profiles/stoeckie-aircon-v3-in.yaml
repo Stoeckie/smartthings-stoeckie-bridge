@@ -25,6 +25,17 @@ components:
     categories:
       - name: AirConditioner
 preferences:
+  - name: temperatureUnit
+    title: Temperature unit
+    description: "Unit of the Set temperature slider. Auto: °C, and °F once SmartThings sends a °F value (US locations)."
+    required: false
+    preferenceType: enumeration
+    definition:
+      options:
+        auto: Auto
+        C: "°C"
+        F: "°F"
+      default: auto
   - name: pollSeconds
     title: Update every (seconds)
     description: "How often the bridge reads the air conditioners from the FGLair cloud. Applies to all of them. 30 to 600, also on the bridge setup page."

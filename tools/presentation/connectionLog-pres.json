@@ -1,0 +1,1 @@
+{"dashboard": {"states": [], "actions": []}, "detailView": [{"label": "{{i18n.attributes.lastDrop.label}}", "displayType": "state", "state": {"label": "{{lastDrop.value}}"}}], "automation": {"conditions": [], "actions": []}}

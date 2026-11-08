@@ -11,6 +11,15 @@ components:
     categories:
       - name: Bridges
 preferences:
+  - name: offlineAfter
+    title: Offline after (minutes)
+    description: "Connection only turns Offline after this many minutes without contact, so a short network outage (e.g. a router update at night) gives no notification."
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 1
+      maximum: 120
+      default: 5
   - name: ipAddress
     title: Bridge IP address
     description: Leave on "auto" (found by scanning). Fill in the pc's IP only if the scan does not find it.

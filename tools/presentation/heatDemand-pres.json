@@ -1,0 +1,1 @@
+{"dashboard": {"states": [], "actions": []}, "detailView": [{"label": "{{i18n.attributes.rooms.label}}", "displayType": "state", "state": {"label": "{{summary.value}}"}}], "automation": {"conditions": [{"label": "{{i18n.attributes.rooms.label}}", "displayType": "numberField", "numberField": {"value": "rooms.value", "valueType": "integer"}}], "actions": []}}

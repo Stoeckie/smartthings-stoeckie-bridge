@@ -1,0 +1,1 @@
+{"tag": "en", "label": "Connection log", "attributes": {"lastDrop": {"label": "Last drop", "displayTemplate": "Last connection drop of {{device.label}}: {{value}}"}}}

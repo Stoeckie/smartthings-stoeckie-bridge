@@ -1,0 +1,1 @@
+{"tag": "en", "label": "Connection", "attributes": {"status": {"label": "Connection status", "displayTemplate": "{{device.label}} connection is {{value}}", "i18n": {"value": {"online": {"label": "Connected"}, "offline": {"label": "Offline"}}}}}}

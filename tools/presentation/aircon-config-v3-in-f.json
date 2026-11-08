@@ -1,0 +1,133 @@
+{
+ "type": "profile",
+ "mnmn": "SmartThingsCommunity",
+ "dashboard": {
+  "states": [
+   {
+    "component": "main",
+    "capability": "temperatureMeasurement",
+    "version": 1
+   }
+  ],
+  "actions": [
+   {
+    "component": "main",
+    "capability": "switch",
+    "version": 1
+   }
+  ]
+ },
+ "detailView": [
+  {
+   "component": "main",
+   "capability": "switch",
+   "version": 1
+  },
+  {
+   "component": "main",
+   "capability": "silvervalley08660.airconMode",
+   "version": 1
+  },
+  {
+   "component": "main",
+   "capability": "silvervalley08660.targetTemperatureF",
+   "version": 1
+  },
+  {
+   "component": "main",
+   "capability": "temperatureMeasurement",
+   "version": 1
+  },
+  {
+   "component": "main",
+   "capability": "airConditionerFanMode",
+   "version": 1
+  },
+  {
+   "component": "main",
+   "capability": "fanOscillationMode",
+   "version": 1
+  },
+  {
+   "component": "main",
+   "capability": "silvervalley08660.airflowDirection",
+   "version": 1
+  },
+  {
+   "component": "main",
+   "capability": "refresh",
+   "version": 1
+  }
+ ],
+ "automation": {
+  "conditions": [
+   {
+    "component": "main",
+    "capability": "switch",
+    "version": 1
+   },
+   {
+    "component": "main",
+    "capability": "silvervalley08660.airconMode",
+    "version": 1
+   },
+   {
+    "component": "main",
+    "capability": "silvervalley08660.targetTemperatureF",
+    "version": 1
+   },
+   {
+    "component": "main",
+    "capability": "temperatureMeasurement",
+    "version": 1
+   },
+   {
+    "component": "main",
+    "capability": "airConditionerFanMode",
+    "version": 1
+   },
+   {
+    "component": "main",
+    "capability": "fanOscillationMode",
+    "version": 1
+   },
+   {
+    "component": "main",
+    "capability": "silvervalley08660.airflowDirection",
+    "version": 1
+   }
+  ],
+  "actions": [
+   {
+    "component": "main",
+    "capability": "switch",
+    "version": 1
+   },
+   {
+    "component": "main",
+    "capability": "silvervalley08660.airconMode",
+    "version": 1
+   },
+   {
+    "component": "main",
+    "capability": "silvervalley08660.targetTemperatureF",
+    "version": 1
+   },
+   {
+    "component": "main",
+    "capability": "airConditionerFanMode",
+    "version": 1
+   },
+   {
+    "component": "main",
+    "capability": "fanOscillationMode",
+    "version": 1
+   },
+   {
+    "component": "main",
+    "capability": "silvervalley08660.airflowDirection",
+    "version": 1
+   }
+  ]
+ }
+}

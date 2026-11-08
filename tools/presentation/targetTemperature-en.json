@@ -1,1 +1,1 @@
-{"tag": "en", "label": "Set temperature", "attributes": {"temperature": {"label": "Set temperature", "displayTemplate": "{{attribute}} of {{device.label}} is {{value}}"}}}
+{"tag": "en", "label": "Set temperature", "attributes": {"temperature": {"label": "Set temperature", "displayTemplate": "{{attribute}} of {{device.label}} is {{value}}", "i18n": {}}}, "commands": {"setTemperature": {"label": "Set temperature"}}}
