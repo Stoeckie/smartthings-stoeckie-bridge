@@ -35,7 +35,7 @@ LAN API (default port 8787, no auth, LAN only)
       dishwasher / oven (Home Connect): on | off | stop | pause | resume (oven) | refresh
       rainradar: refresh | settings {postcode, housenumber, address, location, radius_m, threshold, provider,
                humid_hours} (state: raining, rainRate mm/h, minutesUntilRain, minutesOfRain, intensity, summary,
-               dewPointNow, dewPointMax and dewPointMaxAt over the next humid_hours hours, humidSummary)
+               dewPointNow, dewPointMax and dewPointMaxAt over the next humid_hours hours, humidSummary; windSpeed, windGust (km/h) and windDirection now)
   POST /stbridge/buienradar               body {"enabled": true} (from the bridge device)
   GET  /stbridge/irobot/<blid>[?refresh=1] -> {"name", "favorites": [{name, id, command, params}], "updated"}
   POST /stbridge/srp                      body {"nonce", "box"} (signed and encrypted, paired hubs only)
@@ -72,7 +72,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-07e"
+VERSION = "2026-11-08a"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -1331,6 +1331,18 @@ OPENMETEO_URL = "https://api.open-meteo.com/v1/forecast"  # worldwide, 15 minute
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"  # addresses worldwide (OpenStreetMap, ODbL)
 RAIN_PROVIDERS = ("auto", "buienradar", "openmeteo")
 HUMID_POLL = 3600  # dew point forecast: the weather models are updated hourly
+WIND_POLL = 900    # wind now: Open-Meteo "current" values change every 15 minutes
+
+
+def wind_summary(data: Any) -> dict[str, Any]:
+    """Open-Meteo current wind (km/h, 10 m) -> windSpeed, windGust (km/h) and windDirection (degrees)."""
+    cur = (data or {}).get("current") or {}
+    out: dict[str, Any] = {}
+    for src, key in (("wind_speed_10m", "windSpeed"), ("wind_gusts_10m", "windGust"), ("wind_direction_10m", "windDirection")):
+        v = cur.get(src)
+        if isinstance(v, (int, float)):
+            out[key] = round(float(v), 1) if key != "windDirection" else int(round(v)) % 360
+    return out
 HUMID_HOURS = 48   # default look-ahead for the highest dew point
 
 
@@ -1578,6 +1590,10 @@ class Buienradar:
         self.humid_key: tuple | None = None
         self.humid_next = 0.0  # next dew point forecast fetch (time.time())
         self.humid_ok = 0.0    # last good fetch
+        self.wind: dict[str, Any] = {}
+        self.wind_key: tuple | None = None
+        self.wind_next = 0.0
+        self.wind_ok = 0.0
 
     async def _fetch_humid(self, lat: float, lon: float, hours: int) -> dict[str, Any]:
         """Dew point forecast for one point (Open-Meteo, hourly; in NL the KNMI model)."""
@@ -1606,6 +1622,27 @@ class Buienradar:
                 if now - self.humid_ok > 3 * HUMID_POLL:
                     self.humid = {}
         return self.humid
+
+    async def _wind_state(self, lat: float, lon: float) -> dict[str, Any]:
+        """Wind now (Open-Meteo, km/h), every 15 minutes; a failure never stops the rain radar."""
+        key = (round(lat, 4), round(lon, 4))
+        now = time.time()
+        if key != self.wind_key or now >= self.wind_next:
+            params = {"latitude": f"{lat:.4f}", "longitude": f"{lon:.4f}", "timezone": "UTC", "wind_speed_unit": "kmh",
+                      "current": "wind_speed_10m,wind_gusts_10m,wind_direction_10m"}
+            try:
+                async with self.session.get(OPENMETEO_URL, params=params,
+                                            headers={"User-Agent": f"stoeckie-bridge/{VERSION}"}) as r:
+                    if r.status != 200:
+                        raise RuntimeError(f"Open-Meteo HTTP {r.status}")
+                    self.wind = wind_summary(await r.json(content_type=None))
+                self.wind_key, self.wind_ok, self.wind_next = key, now, now + WIND_POLL
+            except Exception as ex:  # noqa: BLE001
+                log.warning("[buienradar] wind failed: %s", ex)
+                self.wind_next = now + 300
+                if now - self.wind_ok > 4 * WIND_POLL:
+                    self.wind = {}
+        return self.wind
 
     async def _fetch(self, lat: float, lon: float) -> list[float]:
         async with self.session.get(BUIENRADAR_URL, params={"lat": f"{lat:.2f}", "lon": f"{lon:.2f}"},
@@ -1682,6 +1719,7 @@ class Buienradar:
         state = rain_summary(rates, float(self.b.get("threshold") or RAIN_THRESHOLD))
         state.update(points=len(series), provider=provider, **self._settings_state())
         state.update(await self._humid_state(lat, lon))
+        state.update(await self._wind_state(lat, lon))
         name = "Buienradar" if provider == "buienradar" else "Rain radar"
         REG.upsert("buienradar", "rainradar", name, state, True, self._command())
         log.info("[buienradar] %s (%d point(s), radius %g m)", state["summary"], len(series), radius)

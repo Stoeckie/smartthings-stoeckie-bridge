@@ -86,7 +86,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-08b"
+local BUILD = "2026-11-08c"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -111,6 +111,7 @@ local acModeX = capabilities["silvervalley08660.airconMode"]
 local targetTemp = capabilities["silvervalley08660.targetTemperature"]
 local targetTempF = capabilities["silvervalley08660.targetTemperatureF"] -- same, in °F (profiles ...-f)
 local airflowDir = capabilities["silvervalley08660.airflowDirection"]  -- louver position 1..n (swing off)
+local windKmh = (function() local ok, c = pcall(function() return capabilities["silvervalley08660.windSpeedKmh"] end); return ok and c or nil end)() -- wind on the rain radar device (km/h)
 -- Home Connect: program list with start button, and oven temperature + cooking time (labels EN/NL)
 local hcProg = capabilities["silvervalley08660.applianceProgram"]
 local cookSet = capabilities["silvervalley08660.cookSettings"]
@@ -119,7 +120,7 @@ local washerProg = capabilities["silvervalley08660.washerProgram"]   -- Samsung 
 local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor = "stoeckie-climate",
                   aircon = "stoeckie-aircon-v3", car = "stoeckie-car-v2",
                   velux_lock = "stoeckie-velux-lock", rain = "stoeckie-rain-v4",
-                  rainradar = "stoeckie-rainradar-v2", dishwasher = "stoeckie-dishwasher-v2", oven = "stoeckie-oven-v2",
+                  rainradar = "stoeckie-rainradar-v3", dishwasher = "stoeckie-dishwasher-v2", oven = "stoeckie-oven-v2",
                   washer = "stoeckie-washer-v3", tv = "stoeckie-tv" }
 local MANUFACTURER = { dryer = "AEG", aircon = "Fujitsu", car = "Skoda", dishwasher = "Home Connect", oven = "Home Connect",
                        washer = "Samsung", tv = "Samsung" }
@@ -424,8 +425,22 @@ local function emit_dew(dev, s)
   end
 end
 
+-- wind now (km/h, Open-Meteo), in its own component: usable in routines (e.g. no airing above 80 km/h)
+local function emit_wind(dev, s)
+  local c = dev.profile.components.wind
+  if not (c and windKmh) then return end
+  for _, a in ipairs({ { "speed", "windSpeed", "km/h" }, { "gust", "windGust", "km/h" }, { "direction", "windDirection", "°" } }) do
+    local v = tonumber(s[a[2]])
+    if v then
+      local ok, err = pcall(function() dev:emit_component_event(c, windKmh[a[1]]({ value = v, unit = a[3] })) end)
+      if not ok then log.warn("[stbridge] " .. dev.label .. ": " .. tostring(err)) end
+    end
+  end
+end
+
 local function emit_rainradar(dev, s)
   emit_dew(dev, s)
+  emit_wind(dev, s)
   if s.raining ~= nil then
     try_emit(dev, function() return s.raining and capabilities.rainSensor.rain.detected() or capabilities.rainSensor.rain.undetected() end)
   end
@@ -572,8 +587,8 @@ end
 local function profile_marker(want)
   if want:sub(1, #PROFILE.aircon) == PROFILE.aircon then return want:sub(-2) == "-f" and targetTempF or airflowDir end
   if want == PROFILE.washer then return washerProg end
-  -- -v2: dew point components
-  if want:sub(1, #PROFILE.rainradar) == PROFILE.rainradar then return capabilities.temperatureMeasurement end
+  -- -v2: dew point components, -v3: wind component
+  if want:sub(1, #PROFILE.rainradar) == PROFILE.rainradar then return windKmh or capabilities.temperatureMeasurement end
   if want == PROFILE.dishwasher then return hcProg end
   if want == PROFILE.oven then return cookSet end
 end

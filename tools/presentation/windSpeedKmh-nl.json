@@ -1,0 +1,1 @@
+{"tag": "nl", "label": "Wind", "attributes": {"speed": {"label": "Windsnelheid", "displayTemplate": "Wind bij {{device.label}}: {{value}}"}, "gust": {"label": "Windstoten", "displayTemplate": "Windstoten bij {{device.label}}: {{value}}"}, "direction": {"label": "Windrichting", "displayTemplate": "Windrichting bij {{device.label}}: {{value}}"}}}

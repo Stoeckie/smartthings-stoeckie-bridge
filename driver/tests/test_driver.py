@@ -380,7 +380,7 @@ def test_rainradar(bridge):
       DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
     ''')
     rr = lua.eval("RR")
-    assert rr.new_profile == "stoeckie-rainradar-v2-simple"
+    assert rr.new_profile == "stoeckie-rainradar-v3-simple"
     paths = [f"{rr.events[i].comp}:{rr.events[i].path}" for i in range(1, len(rr.events) + 1)]
     assert sorted(paths) == ["dewMax:cap.temperatureMeasurement.temperature",
                              "dewNow:cap.temperatureMeasurement.temperature", "main:cap.rainSensor.rain.undetected"]

@@ -1,0 +1,1 @@
+{"tag": "en", "label": "Wind", "attributes": {"speed": {"label": "Wind speed", "displayTemplate": "Wind at {{device.label}}: {{value}}"}, "gust": {"label": "Gusts", "displayTemplate": "Gusts at {{device.label}}: {{value}}"}, "direction": {"label": "Wind direction", "displayTemplate": "Wind direction at {{device.label}}: {{value}}"}}}

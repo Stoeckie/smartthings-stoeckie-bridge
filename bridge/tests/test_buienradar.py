@@ -229,3 +229,10 @@ def test_source_abroad(monkeypatch):
         await runner.cleanup()
 
     asyncio.run(main())
+
+
+def test_wind_summary():
+    data = {"current": {"wind_speed_10m": 23.44, "wind_gusts_10m": 51.0, "wind_direction_10m": 359.6}}
+    assert sb.wind_summary(data) == {"windSpeed": 23.4, "windGust": 51.0, "windDirection": 0}
+    assert sb.wind_summary({}) == {}
+    assert sb.wind_summary({"current": {"wind_speed_10m": None}}) == {}
