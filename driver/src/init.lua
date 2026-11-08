@@ -52,6 +52,14 @@ end
 local function set_conn(dev, up, reason)
   if up then
     dev:set_field("conn_down_since", nil)
+    if not dev:get_field("drop_seen") then
+      -- the app wants a value for every attribute ("not all status information updated yet" otherwise)
+      dev:set_field("drop_seen", true)
+      local ok, v = pcall(dev.get_latest_state, dev, "main", drop_cap.ID, "lastDrop")
+      if ok and v == nil and not dev:get_field("conn_drop") then
+        pcall(function() dev:emit_event(drop_cap.lastDrop("No drops yet")) end)
+      end
+    end
     report_drop(dev)
     emit_conn(dev, "online")
     return
@@ -72,7 +80,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-07b"
+local BUILD = "2026-11-08a"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -256,6 +264,7 @@ local function emit_aircon(dev, s)
   try_emit(dev, function() return acMode.airConditionerMode(m) end)
   try_emit(dev, function() return acModeX.mode(m) end)
   emit_list(dev, "acModes", modes, acMode.supportedAcModes)
+  emit_list(dev, "acModesA", modes, acMode.availableAcModes) -- the app also reads the "available" lists
   emit_list(dev, "acModesX", modes, acModeX.supportedModes)
   if s.setpoint then
     try_emit(dev, function() return coolSetpoint.coolingSetpoint({ value = tonumber(s.setpoint), unit = "C" }) end)
@@ -299,9 +308,11 @@ local function emit_aircon(dev, s)
   end
   if s.fan then try_emit(dev, function() return acFan.fanMode(s.fan) end) end
   emit_list(dev, "acFans", map_list(s.supportedFans), acFan.supportedAcFanModes)
+  emit_list(dev, "acFansA", map_list(s.supportedFans), acFan.availableAcFanModes)
   local sw = SWING_TO_ST[s.swing or ""]
   if sw then try_emit(dev, function() return oscillation.fanOscillationMode(sw) end) end
   emit_list(dev, "acSwings", map_list(s.supportedSwings, SWING_TO_ST), oscillation.supportedFanOscillationModes)
+  emit_list(dev, "acSwingsA", map_list(s.supportedSwings, SWING_TO_ST), oscillation.availableFanOscillationModes)
 end
 
 local function comp_emit(dev, id, make)
