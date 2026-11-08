@@ -86,7 +86,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-08l"
+local BUILD = "2026-11-09a"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -832,6 +832,7 @@ local function poll(driver, parent)
     else
       if d.online == false then child:offline() else child:online() end
       sync_profile(child)
+      if d.diag == false then child:set_field("diag_sent", nil) end -- the bridge lost them (restart): send again
       local fn = EMIT[d.type]
       -- an empty state (e.g. a washer the bridge has not reached yet after a restart) emits nothing
       if fn and type(d.state) == "table" and next(d.state) ~= nil then

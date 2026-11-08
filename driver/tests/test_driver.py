@@ -336,6 +336,10 @@ def test_aircon_flow(bridge):
     with urllib.request.urlopen(f"http://127.0.0.1:{bridge}/setup") as r:
         page = r.read().decode()
     assert "Demo air conditioner in SmartThings: driver" in page and "stoeckie-aircon-v3-f-h" in page
+    # after a bridge restart the diagnostics are sent again (the bridge says diag: false)
+    with urllib.request.urlopen(f"http://127.0.0.1:{bridge}/stbridge/devices") as r:
+        ac_dev = next(d for d in json.loads(r.read())["devices"] if d["id"] == "demo-aircon")
+    assert ac_dev["diag"] is True
     assert "last commands from SmartThings" in page and "<small>version 20" in page
 
 

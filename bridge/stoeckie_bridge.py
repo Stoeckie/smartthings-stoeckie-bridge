@@ -73,7 +73,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-09b"
+VERSION = "2026-11-09c"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -3473,7 +3473,10 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
         return web.json_response({"nonce": nonce.hex(), "box": box.hex()})
 
     async def devices(_req):
-        return web.json_response({"devices": list(REG.devices.values()), "time": int(time.time())})
+        # "diag": false tells the driver the bridge has no diagnostics for an air conditioner yet (e.g. after a
+        # bridge restart), so it sends them again
+        out = [dict(d, diag=d["id"] in REG.diag) if d.get("type") == "aircon" else d for d in REG.devices.values()]
+        return web.json_response({"devices": out, "time": int(time.time())})
 
     async def irobot(req):
         blid = req.match_info["blid"]
