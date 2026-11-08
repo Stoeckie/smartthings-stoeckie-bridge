@@ -22,7 +22,7 @@ Sources
 
 Credentials live only in config.json next to this script (never in the code).
 
-LAN API (default port 8787, no auth, LAN only)
+LAN API (default port 8787, LAN only; after pairing only requests signed with the hub token are accepted)
   GET  /stbridge/info                    -> {"service": "stoeckie-bridge", "id": ..., "version": ...}
   GET  /stbridge/devices                 -> {"devices": [ {id, type, name, online, state{...}} ]}
   POST /stbridge/devices/<id>/command    body {"cmd": "...", "value": ...}
@@ -60,6 +60,7 @@ import html
 import ipaddress
 import json
 import os
+import re
 import secrets
 import logging
 import logging.handlers
@@ -72,7 +73,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-09a"
+VERSION = "2026-11-09b"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -222,7 +223,12 @@ class Electrolux:
         e = self.cfg.setdefault("electrolux", {})
         if e.get("refresh_token") != refresh or e.get("access_token") != access:
             e["access_token"], e["refresh_token"], e["api_key"] = access, refresh, api_key
-            save_config(self.cfg)
+            # merge into config.json as it is now: self.cfg is a copy from the start, saving it would undo
+            # everything saved since (hub pairing, VELUX key, rain radar settings, TV tokens)
+            cur = load_config()
+            ce = cur.setdefault("electrolux", {})
+            ce["access_token"], ce["refresh_token"], ce["api_key"] = access, refresh, api_key
+            save_config(cur)
             log.info("[aeg] tokens refreshed and saved")
 
     def _publish(self, app_id: str) -> None:
@@ -313,8 +319,11 @@ class Electrolux:
                 await asyncio.sleep(int(e.get("poll_seconds", 300)))
                 await resync()
 
-        asyncio.create_task(poll())
-        await self.client.start_event_stream(do_on_livestream_opening_list=[resync])
+        poller = asyncio.create_task(poll())
+        try:
+            await self.client.start_event_stream(do_on_livestream_opening_list=[resync])
+        finally:
+            poller.cancel()  # else every restart of this source adds another polling loop
 
 
 # ---------------------------------------------------------------- Fujitsu FGLair (Ayla cloud)
@@ -1020,7 +1029,8 @@ def check_request_sig(token: str, method: str, path: str, ts: str, sig: str, bod
         return "bad time"
     if age > SIG_MAX_AGE:
         return "request too old (check the clock)"
-    if not hmac.compare_digest(sign(token, request_message(method, path, ts, body)), str(sig).lower()):
+    sig = str(sig).lower()  # one spelling for the check and the replay list (else upper case replays a request)
+    if not hmac.compare_digest(sign(token, request_message(method, path, ts, body)), sig):
         return "bad signature"
     for k in [k for k, t in _SEEN_SIGS.items() if now - t > SIG_MAX_AGE * 2]:
         del _SEEN_SIGS[k]
@@ -1028,6 +1038,15 @@ def check_request_sig(token: str, method: str, path: str, ts: str, sig: str, bod
         return "replayed request"
     _SEEN_SIGS[sig] = now
     return None
+
+
+def safe_err(ex: BaseException) -> str:
+    """An exception as text for logs and HTTP answers, without query strings (a websocket error carries the URL,
+    and the Samsung TV token is in that URL) and without anything that looks like a token."""
+    s = str(ex)
+    s = re.sub(r"\?[^\s'\"]*", "", s)                          # query strings
+    s = re.sub(r"(?i)(token|key|secret|password)=\S+", r"\1=...", s)
+    return s[:300]
 
 
 def velux_configured(v: dict[str, Any]) -> bool:
@@ -1773,8 +1792,7 @@ class Buienradar:
             cur.pop("radius_km", None)
             save_config(cfg)
             self.b = dict(cur)
-            log.info("[buienradar] settings: %s %s / %s, radius %s m, from %s mm/h", new.get("postcode"),
-                     new.get("housenumber"), new.get("location"), new.get("radius_m"), new.get("threshold"))
+            log.info("[buienradar] settings changed: radius %s m, from %s mm/h", new.get("radius_m"), new.get("threshold"))
         return changed
 
     def _command(self):
@@ -2795,7 +2813,7 @@ class SamsungTV:
                     try:
                         await self._keys(host, ["KEY_POWER"], 10)
                     except Exception as ex:  # noqa: BLE001  (deep standby: only wake-on-LAN can wake it)
-                        log.info("[samsungtv] %s on: %s", host, ex)
+                        log.info("[samsungtv] %s on: %s", host, safe_err(ex))
             elif cmd == "off":
                 if on:
                     await self._keys(host, ["KEY_POWER"])
@@ -2870,9 +2888,9 @@ class SamsungTV:
                     try:
                         await self._keys(host, [], 45)
                     except Exception as ex:  # noqa: BLE001
-                        log.info("[samsungtv] %s: pairing: %s", name, ex)
+                        log.info("[samsungtv] %s: pairing: %s", name, safe_err(ex))
             except Exception as ex:  # noqa: BLE001
-                log.info("[samsungtv] %s: %r", name, ex)
+                log.info("[samsungtv] %s: %s", name, safe_err(ex))
             try:
                 await asyncio.wait_for(wake.wait(), self.POLL)
                 await asyncio.sleep(1)
@@ -3348,8 +3366,7 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             b["enabled"] = True
             b.pop("radius_km", None)
             save_config(cfg)
-            log.info("[setup] Buienradar: %s %s / %s, radius %s m", b.get("postcode"), b.get("housenumber"),
-                     b.get("location"), b.get("radius_m"))
+            log.info("[setup] Buienradar settings saved, radius %s m", b.get("radius_m"))
         elif section == "velux":
             v = cfg.setdefault("velux", {})
             v["username"] = str(form.get("username", "")).strip()
@@ -3523,8 +3540,8 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
         try:
             await handler(cmd, body.get("value"))
         except Exception as ex:  # noqa: BLE001
-            log.error("command %s on %s failed: %s", body, dev_id, ex)
-            return web.json_response({"error": str(ex)}, status=500)
+            log.error("command %s on %s failed: %s", cmd, dev_id, safe_err(ex))
+            return web.json_response({"error": safe_err(ex)}, status=500)
         return web.json_response({"ok": True, "device": REG.devices.get(dev_id)})
 
     app.middlewares.append(guard)
