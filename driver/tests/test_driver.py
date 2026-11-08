@@ -336,7 +336,7 @@ def test_aircon_flow(bridge):
     with urllib.request.urlopen(f"http://127.0.0.1:{bridge}/setup") as r:
         page = r.read().decode()
     assert "Demo air conditioner in SmartThings: driver" in page and "stoeckie-aircon-v3-f-h" in page
-    assert "last commands from SmartThings" in page and "version 2026-11-09a" in page
+    assert "last commands from SmartThings" in page and "<small>version 20" in page
 
 
 def test_aircon_unit_setting(bridge):
