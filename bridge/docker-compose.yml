@@ -13,7 +13,7 @@ services:
     build: .
     container_name: stoeckie-bridge
     restart: unless-stopped
-    # the bridge needs about 60 to 120 MB; the limit restarts the container instead of starving the host
+    # if the bridge ever grows this far, Docker restarts the container instead of starving the host
     mem_limit: 400m
     network_mode: host
     # ports: ["8787:8787", "8443:8443"]   # instead of network_mode: host
