@@ -1,3 +1,4 @@
+import json
 """Buienradar rain forecast: parsing, summary, radius points, and the source against a fake Buienradar."""
 import asyncio
 import os
@@ -120,7 +121,15 @@ def test_source(monkeypatch):
 def test_settings_endpoint():
     async def main():
         started = []
-        sb.save_config({})
+        tok = "b" * 64
+        sb.save_config({"api_token": tok, "api_paired": True})   # the LAN API is closed until paired
+
+        def signed(body):
+            import time as _t
+            ts = str(_t.time())
+            raw = json.dumps(body).encode()
+            return raw, {"X-Stbridge-Time": ts, "Content-Type": "application/json",
+                         "X-Stbridge-Sig": sb.sign(tok, sb.request_message("POST", "/stbridge/buienradar", ts, raw))}
         app = sb.make_app("t1", on_setup=started.append)
         runner = web.AppRunner(app)
         await runner.setup()
@@ -129,13 +138,13 @@ def test_settings_endpoint():
         port = site._server.sockets[0].getsockname()[1]
         import aiohttp
         async with aiohttp.ClientSession() as s:
-            async with s.post(f"http://127.0.0.1:{port}/stbridge/buienradar", json={"enabled": True}) as r:
+            async with s.post(f"http://127.0.0.1:{port}/stbridge/buienradar", data=signed({"enabled": True})[0], headers=signed({"enabled": True})[1]) as r:
                 assert r.status == 200
             assert sb.load_config()["buienradar"]["enabled"] is True and started == ["buienradar"]
-            async with s.post(f"http://127.0.0.1:{port}/stbridge/buienradar", json={"enabled": True}) as r:
+            async with s.post(f"http://127.0.0.1:{port}/stbridge/buienradar", data=signed({"enabled": True})[0], headers=signed({"enabled": True})[1]) as r:
                 assert r.status == 200
             assert started == ["buienradar"]  # no change, no restart
-            async with s.post(f"http://127.0.0.1:{port}/stbridge/buienradar", json={"enabled": False}) as r:
+            async with s.post(f"http://127.0.0.1:{port}/stbridge/buienradar", data=signed({"enabled": False})[0], headers=signed({"enabled": False})[1]) as r:
                 assert r.status == 200
         assert sb.load_config()["buienradar"]["enabled"] is False and len(started) == 2
         await runner.cleanup()

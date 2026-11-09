@@ -114,3 +114,68 @@ def test_setup_page_is_english():
         assert "Pair (open for 5 minutes)" in text and "Koppelen" not in text and 'lang="en"' in text
         await c.close()
     run(main())
+
+
+def test_gateway_needs_setup_key():
+    """A browser from the Docker gateway (can be the whole LAN on Docker Desktop) must enter the setup key."""
+    import ipaddress
+    old = sb.SETUP_GATEWAY
+    sb.SETUP_GATEWAY = ipaddress.ip_address("127.0.0.1")   # the test client comes from 127.0.0.1
+
+    async def main():
+        c = await _client()
+        port = c.server.port
+        r = await c.get("/setup")
+        assert r.status == 200 and "Setup key" in await r.text() and "AEG" not in await r.text()
+        r = await c.post("/setup", data={"section": "fglair", "username": "x@y.nl", "password": "p"},
+                         headers={"Origin": f"http://127.0.0.1:{port}"}, allow_redirects=False)
+        assert "Setup key" in await r.text()                 # nothing saved without the key
+        r = await c.post("/setup", data={"section": "setup_key", "key": "wrong"},
+                         headers={"Origin": f"http://127.0.0.1:{port}"}, allow_redirects=False)
+        assert "Wrong key" in await r.text()
+        r = await c.post("/setup", data={"section": "setup_key", "key": sb.setup_key()},
+                         headers={"Origin": f"http://127.0.0.1:{port}"}, allow_redirects=False)
+        assert r.status == 302 and "stbridge_setup" in r.headers.get("Set-Cookie", "")
+        r = await c.get("/setup", headers={"Cookie": "stbridge_setup=" + sb.setup_cookie_value()})
+        assert r.status == 200 and "AEG" in await r.text()
+        await c.close()
+    try:
+        run(main())
+    finally:
+        sb.SETUP_GATEWAY = old
+
+
+def test_no_plain_setup_from_lan_without_https():
+    """When the certificate could not be made, the setup page does not fall back to plain http for the LAN."""
+    import ipaddress
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("10.255.255.255", 1))
+        lan = s.getsockname()[0]
+    except OSError:
+        return
+    finally:
+        s.close()
+    if ipaddress.ip_address(lan).is_loopback:
+        return
+    old = list(sb.SETUP_ALLOW)
+    sb.SETUP_ALLOW[:] = [ipaddress.ip_network(lan + "/32")]
+
+    async def main():
+        srv = TestServer(sb.make_app("t", None, None), host=lan)
+        c = TestClient(srv)
+        await c.start_server()
+        r = await c.get("/setup", allow_redirects=False)
+        assert r.status == 403 and "https is not available" in await r.text()
+        await c.close()
+        srv = TestServer(sb.make_app("t", None, 8443), host=lan)
+        c = TestClient(srv)
+        await c.start_server()
+        r = await c.get("/setup", allow_redirects=False)
+        assert r.status == 302 and r.headers["Location"].startswith("https://")
+        await c.close()
+    try:
+        run(main())
+    finally:
+        sb.SETUP_ALLOW[:] = old

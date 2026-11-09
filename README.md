@@ -54,7 +54,7 @@ docker compose up -d --build
 
 * **Update:** `git pull`, then in `bridge` again `docker compose up -d --build` (always with `--build`: since 2026-11-07 the image is `python:3.14-slim`). Settings in `bridge/data` stay.
 * Host networking (Linux), so the hub finds the bridge on the host IP, port 8787. Data (config.json, log) lives in `bridge/data`.
-* **Setup page:** open http://localhost:8787/setup in a browser **on the Docker host** (https://localhost:8443/setup also works; the certificate is self-signed). No need for a text browser inside the container.
+* **Setup page:** with host networking open http://localhost:8787/setup in a browser **on the Docker host**. With port mapping (Docker Desktop, rootless Docker, many NAS) a browser on the host arrives from the Docker gateway, and on Docker Desktop so does every other computer on your LAN. So from the gateway the bridge asks for the **setup key** first (https only): it is in the log (`docker logs stoeckie-bridge`) and in `data/setup-key.txt`. No need for a text browser inside the container.
 * **From another computer:** add its address to `STBRIDGE_SETUP_ALLOW` in `docker-compose.yml`, e.g. `STBRIDGE_SETUP_ALLOW: "192.168.1.20/32"`, run `docker compose up -d` and open https://<docker host ip>:8443/setup (https only, credentials never cross the LAN in plain text).
 * **Without host networking** (Docker Desktop on Windows/Mac, many NAS): use `ports: ["8787:8787", "8443:8443"]` instead of `network_mode: host`. A browser on the Docker host then reaches the container from the Docker network gateway; the bridge (2026-11-06a or newer) recognizes that inside a container and allows it, so http://localhost:8787/setup on the host just works. Other computers still need `STBRIDGE_SETUP_ALLOW`. Switch this off with `STBRIDGE_SETUP_ALLOW_GATEWAY: "0"`. The hub must reach port 8787 on the host IP; set that IP in the bridge device settings if the automatic search does not find it.
 * Credentials can also be passed once as environment variables (`ELECTROLUX_API_KEY`, `ELECTROLUX_ACCESS_TOKEN`, `ELECTROLUX_REFRESH_TOKEN`, `FGLAIR_USERNAME`, `FGLAIR_PASSWORD`, `FGLAIR_REGION`); after the first start `data/config.json` wins.
@@ -165,8 +165,8 @@ Every drop is remembered. When the connection is back, the device shows **Last d
 ## Security and privacy
 
 * Credentials only live in `config.json` on the bridge pc (in `.gitignore`), never in the code or the driver.
-* The setup page only answers on the pc itself (or `STBRIDGE_SETUP_ALLOW`, or the Docker host when the bridge runs in a container with port mapping), only when opened by IP or `localhost`, and refuses forms posted from other websites.
-* From another computer the setup page only works over **https** (port 8443; plain http redirects there and refuses forms). The certificate is self-signed and made once on the bridge pc (`setup-cert.pem`, `setup-key.pem`); the browser warns the first time, the log shows its SHA-256 fingerprint to compare. `install-remote.bat` opens port 8443 only for the pc that may use the setup page.
+* The setup page only answers on the pc itself (or `STBRIDGE_SETUP_ALLOW`, or the Docker gateway after the setup key), only when opened by IP or `localhost`, and refuses forms posted from other websites.
+* From another computer the setup page only works over **https** (port 8443; plain http redirects there and refuses forms). If the certificate cannot be made, the setup page only opens on the pc itself (no plain http fallback for the LAN). The certificate is self-signed and made once on the bridge pc (`setup-cert.pem`, `setup-key.pem`); the browser warns the first time, the log shows its SHA-256 fingerprint to compare. `install-remote.bat` opens port 8443 only for the pc that may use the setup page.
 * `install-remote.bat` limits the bridge folder on the target (keys, tokens, certificate) to SYSTEM, administrators and LOCAL SERVICE. The bridge itself runs as **LOCAL SERVICE**, without admin rights: a flaw in the bridge or a package does not hand over the pc. PowerShell remoting on the target only accepts the pc that manages it.
 * Python packages are pinned to exact versions with hashes (`requirements.txt`, made from `requirements.in` with `uv pip compile --universal --generate-hashes`); a changed package is refused.
 * Keys, tokens and passwords are only entered on the setup page, never in SmartThings: SmartThings settings are stored in the Samsung cloud.
@@ -175,13 +175,17 @@ Every drop is remembered. When the connection is back, the device shows **Last d
 
 The LAN API only answers private and local addresses, only when addressed by IP (no DNS rebinding), never a request from a web page (`Origin` header) and only JSON bodies (no cross-site form or text/plain posts).
 
-**Pairing** (bridge and driver from 2026-11-02b): press **Pair** on the setup page; the bridge then hands its token to the first hub that asks within 5 minutes, the hub stores it and pairing closes. From then on:
+> **Warning (bridge 2026-11-09d):** the LAN API is now **closed until a hub is paired**. Before, an unpaired bridge served your devices and commands to anyone on the LAN. After updating, your devices stop updating in SmartThings until you pair: update the driver (2026-11-02b or newer, 2026-11-09d logs clearer hints), open the setup page, press **Pair** and **Allow** your hub.
+
+**Pairing** (bridge 2026-11-09d, driver from 2026-11-02b): press **Pair** on the setup page. Within a minute the hub asks and shows up on the setup page with its IP address; check that it is your hub (SmartThings app, hub details, or your router) and press **Allow**. Only that address gets the token (another device on the LAN cannot grab it first), the hub stores it and pairing closes. The setup page shows the paired hub's address. From then on:
 
 * every request from the hub is signed with HMAC-SHA512 over method, path, time and body (`X-Stbridge-Time`, `X-Stbridge-Sig`); unsigned, changed, old (> 5 min) or replayed requests are refused;
 * every answer is signed back, so a device that takes over the bridge's address or pretends to be the bridge cannot feed the hub false states; when the bridge moves, the driver only follows a bridge that proves it has the token;
 * the token itself never crosses the LAN again. **New token** on the setup page makes a new one; a hub only accepts it with a proof made with the old token. After a bridge reinstall without the old config, switch on **Forget pairing** on the bridge device in SmartThings and press Pair.
 
-Not paired yet: the API stays open as before, the setup page warns about it.
+Not paired yet: the API is closed (only `/stbridge/info`, `/stbridge/pair` and the iRobot favorites answer), the setup page and the log warn about it.
+
+Samsung TV: the bridge keeps the SHA-256 of each TV's self-signed certificate from the first connection and only sends the TV token to a TV with that certificate. Another certificate (TV reset, or another device at the TV's address): the token is not sent, the bridge forgets it and the TV asks Allow again.
 
 Endpoints: `GET /stbridge/info`, `POST /stbridge/pair`, `GET /stbridge/devices`, `POST /stbridge/devices/<id>/command` with `{"cmd": ..., "value": ...}`, `POST /stbridge/buienradar` (rain radar on/off), and the read-only `GET /stbridge/irobot/<blid>` (iRobot favorites for the Roomba driver, open without signature).
 

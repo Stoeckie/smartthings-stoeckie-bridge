@@ -19,10 +19,10 @@ def run(coro):
 
 def reset():
     cfg = sb.load_config()
-    for k in ("api_token", "api_paired"):
+    for k in ("api_token", "api_paired", "api_paired_ip"):
         cfg.pop(k, None)
     sb.save_config(cfg)
-    sb.PAIRING["until"] = 0
+    sb.PAIRING.update(until=0, asked={}, allowed=None, last_ip=None)
     sb._SEEN_SIGS.clear()
 
 
@@ -46,7 +46,10 @@ def test_browser_requests_refused():
         r = await c.post("/stbridge/devices/x/command", data='{"cmd":"open"}', headers={"Content-Type": "text/plain"})
         assert r.status == 415                      # "simple" cross-site post
         r = await c.get("/stbridge/devices")
-        assert r.status == 200                      # not paired yet: open, as before
+        assert r.status == 401                      # not paired yet: closed
+        assert "pairing required" in (await r.json())["error"]
+        r = await c.get("/stbridge/info")
+        assert r.status == 200 and (await r.json())["paired"] is False
         await c.close()
     run(main())
 
@@ -59,9 +62,20 @@ def test_pairing_and_signatures():
         await c.start_server()
         r = await c.post("/stbridge/pair", json={})
         assert r.status == 403                      # pairing not opened
-        sb.PAIRING["until"] = time.time() + 60
+        sb.PAIRING.update(until=time.time() + 60, asked={}, allowed=None)
+        r = await c.post("/stbridge/pair", json={})
+        j = await r.json()
+        assert r.status == 200 and "token" not in j and j["ip"] == "127.0.0.1"   # waits for Allow
+        assert "127.0.0.1" in sb.PAIRING["asked"]
+        r = await c.get("/setup")
+        assert "Allow hub 127.0.0.1" in await r.text()
+        r = await c.post("/setup", data={"section": "api_allow", "ip": "10.9.9.9"}, allow_redirects=False)
+        assert r.status == 302 and sb.PAIRING["allowed"] is None               # never asked: ignored
+        r = await c.post("/setup", data={"section": "api_allow", "ip": "127.0.0.1"}, allow_redirects=False)
+        assert r.status == 302 and sb.PAIRING["allowed"] == "127.0.0.1"
         r = await c.post("/stbridge/pair", json={})
         token = (await r.json())["token"]
+        assert sb.load_config()["api_paired_ip"] == "127.0.0.1"
         assert r.status == 200 and len(token) == 64
         r = await c.post("/stbridge/pair", json={})
         assert r.status == 403                      # closes after one hub
@@ -83,6 +97,22 @@ def test_pairing_and_signatures():
         h, _ = signed(token, "POST", "/stbridge/buienradar", b"{}")
         r = await c.post("/stbridge/buienradar", data=b, headers=h)
         assert r.status == 401                      # body changed after signing
+        await c.close()
+    run(main())
+    reset()
+
+
+def test_pair_only_allowed_address():
+    """Another address that asks during the window does not get the token, even when it asks first."""
+    reset()
+
+    async def main():
+        c = TestClient(TestServer(sb.make_app("t", None)))
+        await c.start_server()
+        sb.PAIRING.update(until=time.time() + 60, asked={"192.168.1.66": time.time()}, allowed="192.168.1.66")
+        r = await c.post("/stbridge/pair", json={})
+        assert "token" not in await r.json()        # 127.0.0.1 is not the allowed address
+        assert not sb.api_paired()
         await c.close()
     run(main())
     reset()

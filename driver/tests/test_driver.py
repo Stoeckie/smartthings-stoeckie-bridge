@@ -5,6 +5,7 @@
     python -m pytest tests
 """
 import json
+import random
 import os
 import pathlib
 import socket
@@ -68,11 +69,13 @@ end }
 package.loaded["cosock"] = { socket = { sleep = function() end }, asyncify = function() return http end,
   spawn = function(fn) fn() end }
 
+TEST_TOKEN = TEST_TOKEN or "7777777777777777777777777777777777777777777777777777777777777777"
 DEVICES = {}
 DELAYED = {}
 function RUN_DELAYED() local l = DELAYED; DELAYED = {}; for _, f in ipairs(l) do f() end end
 function NEW_DEVICE(info)
-  local d = { id = info.id or ("dev" .. (#DEVICES + 1)), fields = {}, preferences = info.preferences or {},
+  local d = { id = info.id or ("dev" .. (#DEVICES + 1)), fields = { api_token = info.api_token or TEST_TOKEN },
+              preferences = info.preferences or {},
               device_network_id = info.device_network_id, parent_device_id = info.parent_device_id,
               parent_assigned_child_key = info.parent_assigned_child_key, label = info.label,
               events = {}, state = "online",
@@ -114,10 +117,17 @@ def free_port():
     return p
 
 
-def start_bridge():
+TEST_TOKEN = "7" * 64
+
+
+def start_bridge(paired=True):
+    """The LAN API is closed until a hub is paired: the shared bridge starts paired with TEST_TOKEN."""
     data = tempfile.mkdtemp()
     port = free_port()
-    pathlib.Path(data, "config.json").write_text(json.dumps({"port": port, "bridge_id": "test1"}))
+    cfg = {"port": port, "bridge_id": "test1"}
+    if paired:
+        cfg.update(api_token=TEST_TOKEN, api_paired=True)
+    pathlib.Path(data, "config.json").write_text(json.dumps(cfg))
     env = dict(os.environ, STBRIDGE_DATA=data)
     p = subprocess.Popen([sys.executable, str(BRIDGE), "--demo"], env=env,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -136,6 +146,17 @@ def bridge():
     yield port
     p.terminate()
     p.wait()
+
+
+def signed_get(url):
+    """GET /stbridge/... signed with TEST_TOKEN (what the paired hub does)."""
+    import hashlib
+    import hmac
+    import urllib.parse as up
+    path = up.urlsplit(url).path
+    ts = "%.6f" % time.time()
+    sig = hmac.new(TEST_TOKEN.encode(), f"GET\n{path}\n{ts}\n".encode(), hashlib.sha512).hexdigest()
+    return urllib.request.Request(url, headers={"X-Stbridge-Time": ts, "X-Stbridge-Sig": sig})
 
 
 def py_http(method, url, body, headers=None):
@@ -162,6 +183,7 @@ def test_aircon_flow(bridge):
     lua.globals().py_http = py_http
     lua.execute(HARNESS)
     lua.execute(f'dofile("{SRC}/init.lua")')
+    lua.execute("math.randomseed(%d)" % random.randrange(1 << 30))  # each runtime its own nonces (no replays)
     lua.execute(f'''
       PARENT = NEW_DEVICE({{ id = "p1", label = "Bridge", device_network_id = "stbridge-test1",
                             preferences = {{ ipAddress = "127.0.0.1", port = "{bridge}" }} }})
@@ -219,7 +241,7 @@ def test_aircon_flow(bridge):
     assert "minHeat" in ev["main:cap.silvervalley08660.airconMode.supportedModes"]
 
     def state():
-        with urllib.request.urlopen(f"http://127.0.0.1:{bridge}/stbridge/devices") as r:
+        with urllib.request.urlopen(signed_get(f"http://127.0.0.1:{bridge}/stbridge/devices")) as r:
             devs = json.loads(r.read())["devices"]
         return next(d for d in devs if d["id"] == "demo-aircon")["state"]
 
@@ -337,7 +359,7 @@ def test_aircon_flow(bridge):
         page = r.read().decode()
     assert "Demo air conditioner in SmartThings: driver" in page and "stoeckie-aircon-v3-f-h" in page
     # after a bridge restart the diagnostics are sent again (the bridge says diag: false)
-    with urllib.request.urlopen(f"http://127.0.0.1:{bridge}/stbridge/devices") as r:
+    with urllib.request.urlopen(signed_get(f"http://127.0.0.1:{bridge}/stbridge/devices")) as r:
         ac_dev = next(d for d in json.loads(r.read())["devices"] if d["id"] == "demo-aircon")
     assert ac_dev["diag"] is True
     assert "last commands from SmartThings" in page and "<small>version 20" in page
@@ -350,6 +372,7 @@ def test_aircon_unit_setting(bridge):
     lua.globals().py_http = py_http
     lua.execute(HARNESS)
     lua.execute(f'dofile("{SRC}/init.lua")')
+    lua.execute("math.randomseed(%d)" % random.randrange(1 << 30))  # each runtime its own nonces (no replays)
     lua.execute(f'''
       PARENT = NEW_DEVICE({{ id = "p1", label = "Bridge", device_network_id = "stbridge-test1",
                             preferences = {{ ipAddress = "127.0.0.1", port = "{bridge}" }} }})
@@ -373,6 +396,7 @@ def test_car_flow(bridge):
     lua.globals().py_http = py_http
     lua.execute(HARNESS)
     lua.execute(f'dofile("{SRC}/init.lua")')
+    lua.execute("math.randomseed(%d)" % random.randrange(1 << 30))  # each runtime its own nonces (no replays)
     lua.execute(f'''
       PARENT = NEW_DEVICE({{ id = "p1", label = "Bridge", device_network_id = "stbridge-test1",
                             preferences = {{ ipAddress = "127.0.0.1", port = "{bridge}" }} }})
@@ -393,7 +417,7 @@ def test_car_flow(bridge):
     assert "status:cap.contactSensor.contact.closed" in ev
 
     def state():
-        with urllib.request.urlopen(f"http://127.0.0.1:{bridge}/stbridge/devices") as r:
+        with urllib.request.urlopen(signed_get(f"http://127.0.0.1:{bridge}/stbridge/devices")) as r:
             devs = json.loads(r.read())["devices"]
         return next(d for d in devs if d["id"] == "demo-car")["state"]
     lua.execute('DRIVER.capability_handlers.switch.on(DRIVER_OBJ, CAR, { component = "main" })')
@@ -408,6 +432,7 @@ def test_velux_lock_flow(bridge):
     lua.globals().py_http = py_http
     lua.execute(HARNESS)
     lua.execute(f'dofile("{SRC}/init.lua")')
+    lua.execute("math.randomseed(%d)" % random.randrange(1 << 30))  # each runtime its own nonces (no replays)
     lua.execute(f'''
       PARENT = NEW_DEVICE({{ id = "p1", label = "Bridge", device_network_id = "stbridge-test1",
                             preferences = {{ ipAddress = "127.0.0.1", port = "{bridge}" }} }})
@@ -425,7 +450,7 @@ def test_velux_lock_flow(bridge):
     assert rain is not None and rain.events[1].path == "cap.rainSensor.rain.undetected"
 
     def state():
-        with urllib.request.urlopen(f"http://127.0.0.1:{bridge}/stbridge/devices") as r:
+        with urllib.request.urlopen(signed_get(f"http://127.0.0.1:{bridge}/stbridge/devices")) as r:
             devs = json.loads(r.read())["devices"]
         return next(d for d in devs if d["id"] == "demo-velux")["state"]
     lua.execute('DRIVER.capability_handlers.lock.unlock(DRIVER_OBJ, LOCK, {})')
@@ -440,6 +465,7 @@ def test_car_battery_graph(bridge):
     lua.globals().py_http = py_http
     lua.execute(HARNESS)
     lua.execute(f'dofile("{SRC}/init.lua")')
+    lua.execute("math.randomseed(%d)" % random.randrange(1 << 30))  # each runtime its own nonces (no replays)
     lua.execute(f'''
       PARENT = NEW_DEVICE({{ id = "p1", label = "Bridge", device_network_id = "stbridge-test1",
                             preferences = {{ ipAddress = "127.0.0.1", port = "{bridge}" }} }})
@@ -473,6 +499,7 @@ def test_rainradar(bridge):
     lua.globals().py_http = py_http
     lua.execute(HARNESS)
     lua.execute(f'dofile("{SRC}/init.lua")')
+    lua.execute("math.randomseed(%d)" % random.randrange(1 << 30))  # each runtime its own nonces (no replays)
     lua.execute(f'''
       PARENT = NEW_DEVICE({{ id = "p1", label = "Bridge", device_network_id = "stbridge-test1",
                             preferences = {{ ipAddress = "127.0.0.1", port = "{bridge}" }} }})
@@ -514,6 +541,7 @@ def test_dryer_no_completion_time_spam(bridge):
     lua.globals().py_http = py_http
     lua.execute(HARNESS)
     lua.execute(f'dofile("{SRC}/init.lua")')
+    lua.execute("math.randomseed(%d)" % random.randrange(1 << 30))  # each runtime its own nonces (no replays)
     lua.execute(f'''
       PARENT = NEW_DEVICE({{ id = "p1", label = "Bridge", device_network_id = "stbridge-test1",
                             preferences = {{ ipAddress = "127.0.0.1", port = "{bridge}" }} }})
@@ -528,13 +556,15 @@ def test_dryer_no_completion_time_spam(bridge):
 
 def test_pairing_signed_api():
     """Koppelen on the setup page, the driver pairs at its next poll and signs from then on; a forged token fails."""
-    port, proc = start_bridge()
+    port, proc = start_bridge(paired=False)
     try:
         lua = lua53.LuaRuntime(unpack_returned_tuples=True)
         lua.execute(f'package.path = "{SRC}/?.lua;{HERE}/?.lua;" .. package.path')
         lua.globals().py_http = py_http
         lua.execute(HARNESS)
+        lua.execute("TEST_TOKEN = nil")
         lua.execute(f'dofile("{SRC}/init.lua")')
+        lua.execute("math.randomseed(%d)" % random.randrange(1 << 30))  # each runtime its own nonces (no replays)
         lua.execute(f'''
           PARENT = NEW_DEVICE({{ id = "p1", label = "Bridge", device_network_id = "stbridge-test1",
                                 preferences = {{ ipAddress = "127.0.0.1", port = "{port}" }} }})
@@ -542,17 +572,25 @@ def test_pairing_signed_api():
           DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
         ''')
         assert lua.eval("PARENT.fields.api_token") is None
-        # press Koppelen (the setup page accepts localhost)
-        form = urllib.parse.urlencode({"section": "api_pair"}).encode()
-        req = urllib.request.Request(f"http://127.0.0.1:{port}/setup", data=form, method="POST")
-        try:
-            urllib.request.urlopen(req, timeout=5)
-        except urllib.error.HTTPError:
-            pass
+        assert lua.eval("PARENT.state") == "offline"       # not paired: the bridge is closed
+
+        def setup_post(fields):
+            form = urllib.parse.urlencode(fields).encode()
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/setup", data=form, method="POST")
+            try:
+                urllib.request.urlopen(req, timeout=5)
+            except urllib.error.HTTPError:
+                pass
+        setup_post({"section": "api_pair"})                # press Pair (the setup page accepts localhost)
         lua.execute('''
           for _, d in ipairs(DEVICES) do d.events = {} end
           DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
         ''')
+        assert lua.eval("PARENT.fields.api_token") is None   # asked, waits for Allow
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/setup", timeout=5) as r:
+            assert "Allow hub 127.0.0.1" in r.read().decode()
+        setup_post({"section": "api_allow", "ip": "127.0.0.1"})
+        lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
         token = lua.eval("PARENT.fields.api_token")
         assert token and len(token) == 64
         # unsigned requests are refused now, signed ones work (children get their state)
@@ -584,6 +622,7 @@ def test_homeconnect_appliances(bridge):
     lua.globals().py_http = py_http
     lua.execute(HARNESS)
     lua.execute(f'dofile("{SRC}/init.lua")')
+    lua.execute("math.randomseed(%d)" % random.randrange(1 << 30))  # each runtime its own nonces (no replays)
     lua.execute(f'''
       PARENT = NEW_DEVICE({{ id = "p1", label = "Bridge", device_network_id = "stbridge-test1",
                             preferences = {{ ipAddress = "127.0.0.1", port = "{bridge}" }} }})
@@ -603,7 +642,7 @@ def test_homeconnect_appliances(bridge):
     assert "cap.ovenSetpoint.ovenSetpoint" in opaths and "cap.temperatureMeasurement.temperature" in opaths
     lua.execute('DRIVER.capability_handlers.ovenOperatingState.stop(DRIVER_OBJ, OVEN, {})')
     lua.execute('DRIVER.capability_handlers.switch.off(DRIVER_OBJ, DISH, {})')
-    st = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{bridge}/stbridge/devices", timeout=5).read())
+    st = json.loads(urllib.request.urlopen(signed_get(f"http://127.0.0.1:{bridge}/stbridge/devices"), timeout=5).read())
     by = {d["id"]: d["state"] for d in st["devices"]}
     assert by["demo-oven"]["operation"] == "inactive" and by["demo-dishwasher"]["power"] == "off"
     assert "cap.silvervalley08660.applianceProgram.supportedPrograms" in opaths
@@ -615,7 +654,7 @@ def test_homeconnect_appliances(bridge):
     lua.execute(f'{h}.startProgram(DRIVER_OBJ, OVEN, {{ args = {{ program = "pizza" }} }})')
     lua.execute(f'{h}.setProgram(DRIVER_OBJ, DISH, {{ args = {{ program = "quick45" }} }})')
     lua.execute('DRIVER.capability_handlers.dishwasherOperatingState.setMachineState(DRIVER_OBJ, DISH, { args = { state = "run" } })')
-    st = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{bridge}/stbridge/devices", timeout=5).read())
+    st = json.loads(urllib.request.urlopen(signed_get(f"http://127.0.0.1:{bridge}/stbridge/devices"), timeout=5).read())
     by = {d["id"]: d["state"] for d in st["devices"]}
     assert by["demo-oven"]["program"] == "pizza" and by["demo-oven"]["setpoint"] == 200.0
     assert by["demo-oven"]["duration"] == 45 and by["demo-oven"]["operation"] == "run"
@@ -633,12 +672,12 @@ def test_homeconnect_appliances(bridge):
     assert "cap.washerOperatingState.machineState.run" in wpaths
     assert "cap.washerOperatingState.washerJobState.wash" in wpaths
     lua.execute('DRIVER.capability_handlers.washerOperatingState.setMachineState(DRIVER_OBJ, WASHER, { args = { state = "pause" } })')
-    st = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{bridge}/stbridge/devices", timeout=5).read())
+    st = json.loads(urllib.request.urlopen(signed_get(f"http://127.0.0.1:{bridge}/stbridge/devices"), timeout=5).read())
     by = {d["id"]: d["state"] for d in st["devices"]}
     assert by["demo-washer"]["operation"] == "pause"
     vals = {washer.events[i].path: washer.events[i].arg for i in range(1, len(washer.events) + 1)}
     assert vals.get("cap.silvervalley08660.washerProgram.program") == "cotton"
     lua.execute('DRIVER.capability_handlers["silvervalley08660.washerProgram"].startProgram(DRIVER_OBJ, WASHER, { args = { program = "quick15" } })')
-    st = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{bridge}/stbridge/devices", timeout=5).read())
+    st = json.loads(urllib.request.urlopen(signed_get(f"http://127.0.0.1:{bridge}/stbridge/devices"), timeout=5).read())
     by = {d["id"]: d["state"] for d in st["devices"]}
     assert by["demo-washer"]["program"] == "quick15" and by["demo-washer"]["operation"] == "run"

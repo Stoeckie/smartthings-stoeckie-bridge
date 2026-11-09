@@ -2,7 +2,8 @@
 # Host networking: the hub reaches the bridge on the host IP, port 8787, and the setup page works on
 # http://localhost:8787/setup in a browser on the Docker host (https on port 8443, self-signed).
 # Without host networking (Docker Desktop, many NAS): comment out network_mode and use the ports line; the
-# setup page then still works from a browser on the Docker host (the bridge allows the Docker gateway).
+# setup page then works from a browser on the Docker host after you enter the setup key (docker logs
+# stoeckie-bridge, or data/setup-key.txt): on Docker Desktop the whole LAN arrives from the Docker gateway.
 services:
   stoeckie-bridge:
     build: .

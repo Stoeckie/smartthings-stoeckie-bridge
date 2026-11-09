@@ -86,7 +86,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-09a"
+local BUILD = "2026-11-09d"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -769,6 +769,14 @@ local function try_pair(parent, ip, port, err)
   if tok and os.time() - (st.last_pair or 0) < 30 then return end
   st.last_pair = os.time()
   local res = api.pair(ip, port)
+  if res and res.waiting then
+    if os.time() - (st.wait_hint or 0) > 120 then
+      st.wait_hint = os.time()
+      log.warn("[stbridge] " .. parent.label .. ": pairing: on the bridge setup page (https://" .. ip
+        .. ":8443/setup) press Allow for hub " .. tostring(res.ip or "?") .. " (this hub)")
+    end
+    return
+  end
   if not (res and type(res.token) == "string" and #res.token >= 32) then
     if asked and os.time() - (st.pair_hint or 0) > 600 then
       st.pair_hint = os.time()
@@ -776,8 +784,8 @@ local function try_pair(parent, ip, port, err)
         log.warn("[stbridge] " .. parent.label .. ": the bridge at " .. ip .. " does not sign its answers. After a "
           .. "bridge reset: switch on Forget pairing in this device's settings and press Pair on the bridge setup page")
       else
-        log.warn("[stbridge] " .. parent.label .. ": the bridge asks for pairing: press Pair on its setup page "
-          .. "(https://" .. ip .. ":8443/setup)")
+        log.warn("[stbridge] " .. parent.label .. ": not paired: the bridge stays closed until you press Pair on "
+          .. "its setup page (https://" .. ip .. ":8443/setup) and Allow this hub")
       end
     end
     return

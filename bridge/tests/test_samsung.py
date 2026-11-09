@@ -239,3 +239,60 @@ def test_washer_off_after_restart_without_answer(monkeypatch):
     asyncio.run(main())
     d = sb.REG.devices["samsung-192-168-1-9"]
     assert d["online"] is False and d["state"]["power"] == "off" and d["state"]["remoteStartAllowed"] is False
+
+
+def test_tv_certificate_pinned(tmp_path):
+    """The TV token only goes to the TV whose certificate was seen first; another certificate gets no token."""
+    import asyncio
+    import json as _json
+
+    import aiohttp
+    from aiohttp import web
+
+    seen = []
+
+    async def ws(req):
+        seen.append(req.query.get("token"))
+        w = web.WebSocketResponse()
+        await w.prepare(req)
+        await w.send_str(_json.dumps({"event": "ms.channel.connect", "data": {"token": "tok1"}}))
+        await w.close()
+        return w
+
+    async def serve(certdir):
+        certdir.mkdir()
+        ctx, _ = sb.setup_tls(certdir)
+        assert ctx is not None
+        app = web.Application()
+        app.router.add_get("/api/v2/channels/samsung.remote.control", ws)
+        r = web.AppRunner(app)
+        await r.setup()
+        site = web.TCPSite(r, "127.0.0.1", 0, ssl_context=ctx)
+        await site.start()
+        return r, site._server.sockets[0].getsockname()[1]
+
+    async def main():
+        sb.save_config({})
+        tv = sb.SamsungTV({})
+        tv.session = aiohttp.ClientSession()
+        r, port = await serve(tmp_path / "a")
+        tv.WS_PORT = port
+        await tv._keys("127.0.0.1", [], 5)               # first time: no token, certificate kept
+        assert seen == [None] and tv.tokens["127.0.0.1"] == "tok1" and len(tv.certs["127.0.0.1"]) == 64
+        await tv._keys("127.0.0.1", [], 5)               # same TV: token sent
+        assert seen[-1] == "tok1"
+        await r.cleanup()
+        r, port = await serve(tmp_path / "b")            # another device at the address (other certificate)
+        tv.WS_PORT = port
+        try:
+            await tv._keys("127.0.0.1", [], 5)
+            raise AssertionError("expected a refusal")
+        except ValueError as ex:
+            assert "certificate changed" in str(ex)
+        assert len(seen) == 2                            # it never got a request, so never the token
+        assert "127.0.0.1" not in tv.tokens and "127.0.0.1" not in tv.certs
+        assert "127.0.0.1" not in (sb.load_config()["samsungtv"].get("tokens") or {})
+        await r.cleanup()
+        await tv.session.close()
+
+    asyncio.run(main())

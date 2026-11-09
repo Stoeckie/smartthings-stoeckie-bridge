@@ -73,7 +73,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-09c"
+VERSION = "2026-11-09d"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -117,10 +117,39 @@ def container_gateway(route_file: str = "/proc/net/route", sys_net: str = "/sys/
 
 SETUP_GATEWAY = (container_gateway() if in_container() and os.environ.get("STBRIDGE_SETUP_ALLOW_GATEWAY", "1") != "0"
                  else None)
+# The gateway is not always the Docker host alone: on Docker Desktop (Windows, macOS) and with rootless Docker or
+# Podman every connection from the LAN to a published port arrives from that same address. So a browser that
+# comes from the gateway must first enter the setup key (written to the log and to data/setup-key.txt).
+SETUP_KEY_FILE = DATA / "setup-key.txt"
+
+
+def setup_key() -> str:
+    try:
+        k = SETUP_KEY_FILE.read_text(encoding="ascii").strip()
+        if len(k) >= 24:
+            return k
+    except OSError:
+        pass
+    k = secrets.token_urlsafe(18)
+    SETUP_KEY_FILE.write_text(k + "\n", encoding="ascii")
+    try:
+        os.chmod(SETUP_KEY_FILE, 0o600)
+    except OSError:
+        pass
+    return k
+
+
+def setup_cookie_value() -> str:
+    return hmac.new(setup_key().encode(), b"stbridge-setup", hashlib.sha256).hexdigest()
 
 
 def setup_source_allowed(ip) -> bool:
     return ip.is_loopback or ip == SETUP_GATEWAY or any(ip in net for net in SETUP_ALLOW)
+
+
+def setup_needs_key(ip) -> bool:
+    """Only the Docker gateway needs the key: localhost is this computer, STBRIDGE_SETUP_ALLOW is your own choice."""
+    return SETUP_GATEWAY is not None and ip == SETUP_GATEWAY and not any(ip in net for net in SETUP_ALLOW)
 
 log = logging.getLogger("bridge")
 
@@ -989,8 +1018,10 @@ def srp_box_key(token: str, direction: str) -> bytes:
 # After pairing, every request from the hub carries an HMAC-SHA512 signature made with a shared token
 # (X-Stbridge-Time, X-Stbridge-Sig) and every answer is signed back. The token itself never crosses the
 # LAN again after pairing, a replayed request is refused, and a device pretending to be the bridge cannot
-# produce a valid answer. Until a hub is paired the API stays open (old drivers keep working).
-PAIRING: dict[str, Any] = {"until": 0.0}
+# produce a valid answer. Until a hub is paired the API is closed: only /stbridge/info and /stbridge/pair answer.
+# Pairing: the hub asks while "Pair" is open, the setup page shows the asking address and the token only goes to
+# the address you press Allow for (no race: another device on the LAN cannot grab the token first).
+PAIRING: dict[str, Any] = {"until": 0.0, "asked": {}, "allowed": None, "last_ip": None}
 PAIR_WINDOW = 300          # seconds the "Pair" button keeps pairing open
 SIG_MAX_AGE = 300          # seconds a signed request stays valid (hub and pc clocks use NTP)
 _SEEN_SIGS: dict[str, float] = {}
@@ -2706,6 +2737,7 @@ class SamsungTV:
     ask "Allow" on screen; the token it then gives is kept in config.json (samsungtv.tokens). Power on from standby
     sends the power key and a wake-on-LAN packet (needs "Power on with mobile" / network standby on the TV).
     TVs come from samsung/appliances.json (type "tv", host, mac, name) or config "samsungtv": {"tvs": [...]}."""
+    WS_PORT = 8002
 
     POLL = 5
     NAME = "Stoeckie Bridge"
@@ -2720,6 +2752,9 @@ class SamsungTV:
             pass
         self.tvs = [t for t in tvs if isinstance(t, dict) and t.get("host")]
         self.tokens: dict[str, str] = dict((cfg.get("samsungtv") or {}).get("tokens") or {})
+        # SHA-256 of each TV's self-signed certificate, kept from the first connection: the token only goes to
+        # a TV that shows the same certificate again (another device at the TV's address does not get it)
+        self.certs: dict[str, str] = dict((cfg.get("samsungtv") or {}).get("certs") or {})
         self.session = None
         self.wake: dict[str, asyncio.Event] = {}
         self.last: dict[str, dict[str, Any]] = {}
@@ -2735,6 +2770,18 @@ class SamsungTV:
         cfg.setdefault("samsungtv", {}).setdefault("tokens", {})[host] = token
         save_config(cfg)
         log.info("[samsungtv] %s: paired", host)
+
+    def _save_cert(self, host: str, fp: str | None) -> None:
+        cfg = load_config()
+        certs = cfg.setdefault("samsungtv", {}).setdefault("certs", {})
+        if fp:
+            self.certs[host] = certs[host] = fp
+        else:
+            self.certs.pop(host, None)
+            certs.pop(host, None)
+            self.tokens.pop(host, None)
+            cfg["samsungtv"].setdefault("tokens", {}).pop(host, None)
+        save_config(cfg)
 
     async def _info(self, host: str) -> dict[str, Any] | None:
         import aiohttp
@@ -2759,14 +2806,29 @@ class SamsungTV:
         import ssl as _ssl
         import aiohttp
         name = base64.b64encode(self.NAME.encode()).decode()
-        url = f"wss://{host}:8002/api/v2/channels/samsung.remote.control?name={name}"
+        url = f"wss://{host}:{self.WS_PORT}/api/v2/channels/samsung.remote.control?name={name}"
         if self.tokens.get(host):
             url += f"&token={self.tokens[host]}"
         ctx = _ssl.create_default_context()
         ctx.check_hostname = False
-        ctx.verify_mode = _ssl.CERT_NONE   # the TV has a self-signed certificate; this is the LAN only
-        async with self.session.ws_connect(url, ssl=ctx, timeout=aiohttp.ClientWSTimeout(ws_close=5),
-                                           heartbeat=None) as ws:
+        ctx.verify_mode = _ssl.CERT_NONE   # the TV has a self-signed certificate: pinned below instead
+        pin = self.certs.get(host)
+        ssl_arg: Any = aiohttp.Fingerprint(bytes.fromhex(pin)) if pin else ctx
+        try:
+            ws_cm = await self.session.ws_connect(url, ssl=ssl_arg, timeout=aiohttp.ClientWSTimeout(ws_close=5),
+                                                  heartbeat=None)
+        except aiohttp.ServerFingerprintMismatch:
+            # the token was not sent: the check runs right after the TLS handshake, before the request
+            log.warning("[samsungtv] %s: the TV shows another certificate than before (TV reset, or another device "
+                        "at its address): the token is not sent; choose Allow on the TV again", host)
+            self._save_cert(host, None)
+            raise ValueError("TV certificate changed: choose Allow on the TV again") from None
+        async with ws_cm as ws:
+            if not pin:
+                sslobj = ws.get_extra_info("ssl_object")
+                der = sslobj.getpeercert(binary_form=True) if sslobj is not None else None
+                if der:
+                    self._save_cert(host, hashlib.sha256(der).hexdigest())
             deadline = time.monotonic() + wait_pair
             while True:
                 left = deadline - time.monotonic()
@@ -3026,7 +3088,7 @@ def setup_tls(data_dir: Path):
 # ---------------------------------------------------------------- LAN HTTP API
 
 SETUP_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Stoeckie Bridge setup</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Stoeckie Bridge setup</title>{refresh}
 <style>body{font:15px system-ui,sans-serif;max-width:640px;margin:32px auto;padding:0 16px;color:#222}
 label{display:block;margin:14px 0 4px;font-weight:600}input,textarea,select{width:100%;box-sizing:border-box;padding:8px;
 font:13px ui-monospace,monospace}textarea{height:90px}button{margin-top:18px;padding:10px 18px;font-size:15px}
@@ -3034,8 +3096,11 @@ font:13px ui-monospace,monospace}textarea{height:90px}button{margin-top:18px;pad
 <h2>Stoeckie Bridge <small>{version}</small></h2><div class="st">{status}</div>
 <p>Everything you enter here is stored only locally, in config.json on this computer.</p>
 <h3>Pair the SmartThings hub</h3>
-<p>After pairing, the bridge only accepts signed requests from the paired hub. Press Pair; the hub pairs by itself
-within 5 minutes (driver Stoeckie Bridge 2026-11-02b or newer).</p>
+<p>Until a hub is paired the bridge does not serve your devices on the LAN. After pairing it only accepts signed
+requests from the paired hub. Press Pair; within a minute your hub shows up here with its IP address. Check that it
+is your hub (SmartThings app, hub details, or your router) and press Allow (driver Stoeckie Bridge 2026-11-02b or
+newer).</p>
+{pair_requests}
 <form method="post"><input type="hidden" name="section" value="api_pair">
 <button type="submit">Pair (open for 5 minutes)</button></form>
 <form method="post"><input type="hidden" name="section" value="api_new_token">
@@ -3180,6 +3245,7 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
                 if why:
                     log.warning("[api] refused %s %s from %s: %s", req.method, req.path, req.remote, why)
                     return web.json_response({"error": why}, status=401)
+                PAIRING["last_ip"] = req.remote
                 resp = await handler(req)
                 if isinstance(resp, web.Response) and isinstance(resp.body, (bytes, bytearray)):
                     resp.headers["X-Stbridge-Sig"] = sign(token, sig.lower().encode() + b"\n" + bytes(resp.body))
@@ -3188,8 +3254,10 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             # that the Roomba driver (another driver, no token) fetches
             open_paths = req.path in ("/stbridge/info", "/stbridge/pair") or (
                 req.method == "GET" and req.path.startswith("/stbridge/irobot/"))
-            if token and not open_paths:
-                return web.json_response({"error": "pairing required"}, status=401)
+            if not open_paths:
+                # also before pairing: an unpaired bridge no longer serves devices or commands to the whole LAN
+                return web.json_response({"error": "pairing required: press Pair on the bridge setup page and "
+                                                   "Allow your hub"}, status=401)
         resp = await handler(req)
         if req.path.startswith("/setup"):
             resp.headers["Cache-Control"] = "no-store"
@@ -3277,34 +3345,76 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             else:
                 lines.append("iRobot set up, fetching.")
         if PAIRING["until"] > time.time():
-            lines.append(f"SmartThings pairing is open ({int(PAIRING['until'] - time.time())} s left): "
-                         "the hub pairs at its next poll.")
+            lines.append(f"SmartThings pairing is open ({int(PAIRING['until'] - time.time())} s left): wait until "
+                         "your hub shows up below and press Allow.")
         elif api_paired(cfg):
-            lines.append("SmartThings hub paired: the LAN API only accepts signed requests.")
+            seen = PAIRING.get("last_ip") or cfg.get("api_paired_ip")
+            lines.append("SmartThings hub paired" + (f" ({seen})" if seen else "")
+                         + ": the LAN API only accepts signed requests from it.")
         else:
-            lines.append("NOTE: no SmartThings hub paired yet, the LAN API is open to the whole LAN. "
-                         "Press Pair below.")
+            lines.append("WARNING: no SmartThings hub paired yet. The LAN API is closed until you pair: your devices "
+                         "do not reach SmartThings. Press Pair below and Allow your hub.")
         return "<br>".join(html.escape(x) for x in lines)
 
     def plain_from_lan(req) -> bool:
-        """Setup page over plain http from another computer: credentials would cross the LAN unencrypted.
-        The Docker gateway is the Docker host itself (the traffic never leaves that machine)."""
+        """Setup page over plain http from another address than this computer: credentials would cross the LAN
+        unencrypted. This includes the Docker gateway (on Docker Desktop that is also the whole LAN). Without https
+        (certificate could not be made) only this computer can open the setup page."""
         try:
-            ip = ipaddress.ip_address(req.remote or "")
-            loop = ip.is_loopback or (SETUP_GATEWAY is not None and ip == SETUP_GATEWAY)
+            loop = ipaddress.ip_address(req.remote or "").is_loopback
         except ValueError:
             loop = False
-        return https_port is not None and not req.secure and not loop
+        return not req.secure and not loop
+
+    def key_ok(req) -> bool:
+        try:
+            ip = ipaddress.ip_address(req.remote or "")
+        except ValueError:
+            return False
+        if not setup_needs_key(ip):
+            return True
+        return hmac.compare_digest(req.cookies.get("stbridge_setup", ""), setup_cookie_value())
+
+    def no_https(_req) -> web.Response:
+        return web.Response(status=403, text="https is not available on this bridge (see bridge.log), so the setup "
+                            "page only opens in a browser on this computer (http://localhost:8787/setup)")
+
+    def key_page(bad: bool = False) -> web.Response:
+        return web.Response(content_type="text/html", headers={"Cache-Control": "no-store"}, text=(
+            '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Stoeckie Bridge setup key</title>'
+            '<meta name="viewport" content="width=device-width,initial-scale=1"></head>'
+            '<body style="font:15px system-ui,sans-serif;max-width:640px;margin:32px auto;padding:0 16px">'
+            '<h2>Setup key</h2>' + ('<p><b>Wrong key.</b></p>' if bad else '') +
+            '<p>The bridge runs in a container and cannot tell this browser apart from other computers on your LAN. '
+            'Enter the setup key: it is in the bridge log (<code>docker logs stoeckie-bridge</code>) and in '
+            '<code>data/setup-key.txt</code>.</p><form method="post"><input type="hidden" name="section" '
+            'value="setup_key"><input name="key" autocomplete="off" required style="width:100%;padding:8px">'
+            '<button type="submit" style="margin-top:14px;padding:10px 18px">Open setup</button></form></body></html>'))
 
     async def setup_get(req):
         if not local_only(req):
             return web.Response(status=403, text="setup only from this computer (localhost) or an address in STBRIDGE_SETUP_ALLOW")
         if plain_from_lan(req):
+            if https_port is None:
+                return no_https(req)
             host = (req.host or "").rsplit(":", 1)[0]
             raise web.HTTPFound(f"https://{host}:{https_port}/setup")
+        if not key_ok(req):
+            return key_page()
         k = load_config().get("skoda") or {}
         rb = load_config().get("buienradar") or {}
+        pairing_open = PAIRING["until"] > time.time()
+        reqs = "".join(
+            '<form method="post"><input type="hidden" name="section" value="api_allow">'
+            f'<input type="hidden" name="ip" value="{html.escape(ip)}"><button type="submit">Allow hub '
+            f'{html.escape(ip)}</button></form>' for ip in (PAIRING["asked"] if pairing_open else {}))
+        if pairing_open and PAIRING["allowed"]:
+            reqs += f"<p>Allowed {html.escape(PAIRING['allowed'])}: the hub picks up the token at its next poll.</p>"
+        elif pairing_open and not reqs:
+            reqs = "<p>Waiting for the hub to ask (it asks at every poll).</p>"
         page = (SETUP_HTML.replace("{version}", "version " + VERSION).replace("{status}", status_text())
+                .replace("{refresh}", '<meta http-equiv="refresh" content="10">' if pairing_open else "")
+                .replace("{pair_requests}", reqs)
                 .replace("{skoda_poll}", html.escape(str(k.get("poll_minutes", 10))))
                 .replace("{skoda_temp}", html.escape(str(k.get("climate_temp", 21))))
                 .replace("{fglair_poll}", html.escape(str((load_config().get("fglair") or {}).get("poll_seconds", 60))))
@@ -3325,10 +3435,21 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
         if not local_only(req):
             return web.Response(status=403, text="setup only from this computer (localhost) or an address in STBRIDGE_SETUP_ALLOW")
         if plain_from_lan(req):
-            return web.Response(status=403, text="use https for the setup page")
+            return no_https(req) if https_port is None else web.Response(status=403, text="use https for the setup page")
         form = await req.post()
-        cfg = load_config()
         section = str(form.get("section", "aeg"))
+        if section == "setup_key":
+            if hmac.compare_digest(str(form.get("key", "")).strip(), setup_key()):
+                resp = web.Response(status=302, headers={"Location": "/setup"})
+                resp.set_cookie("stbridge_setup", setup_cookie_value(), httponly=True, secure=True,
+                                samesite="Strict", max_age=365 * 86400, path="/setup")
+                log.info("[setup] setup key accepted from %s", req.remote)
+                return resp
+            await asyncio.sleep(2)
+            return key_page(bad=True)
+        if not key_ok(req):
+            return key_page()
+        cfg = load_config()
         if section == "skoda":
             k = cfg.setdefault("skoda", {})
             k["api_key"] = "".join(str(form.get("api_key", "")).split())
@@ -3377,8 +3498,14 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             log.info("[setup] VELUX login saved")
         elif section == "api_pair":
             api_token(cfg)
-            PAIRING["until"] = time.time() + PAIR_WINDOW
+            PAIRING.update(until=time.time() + PAIR_WINDOW, asked={}, allowed=None)
             log.info("[setup] pairing with SmartThings open for %d s", PAIR_WINDOW)
+            raise web.HTTPFound("/setup")
+        elif section == "api_allow":
+            ip = str(form.get("ip", ""))
+            if PAIRING["until"] > time.time() and ip in PAIRING["asked"]:
+                PAIRING["allowed"] = ip
+                log.info("[setup] pairing allowed for hub %s", ip)
             raise web.HTTPFound("/setup")
         elif section == "api_new_token":
             if cfg.get("api_token"):
@@ -3386,7 +3513,7 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             cfg["api_token"] = secrets.token_hex(32)
             cfg["api_paired"] = True
             save_config(cfg)
-            PAIRING["until"] = time.time() + PAIR_WINDOW
+            PAIRING.update(until=time.time() + PAIR_WINDOW, asked={}, allowed=None)
             log.info("[setup] new API token, pairing open for %d s", PAIR_WINDOW)
             raise web.HTTPFound("/setup")
         elif section == "velux_pair":
@@ -3425,16 +3552,26 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
                                   "name": socket.gethostname(), "paired": api_paired()})
 
     async def pair(req):
-        """Hand the token to a hub, only while "Pair" on the setup page is open (5 minutes, one hub)."""
+        """Hand the token to a hub, only while "Pair" on the setup page is open (5 minutes, one hub) and only to the
+        address that was allowed on the setup page. Until then the hub gets {"waiting": ...} and asks again."""
         if time.time() > PAIRING["until"]:
             return web.json_response({"error": "pairing closed: press Pair on the bridge setup page"},
                                      status=403)
+        ip = str(req.remote or "")
+        if PAIRING["allowed"] != ip:
+            if ip not in PAIRING["asked"]:
+                if len(PAIRING["asked"]) >= 8:
+                    return web.json_response({"error": "too many pairing requests"}, status=429)
+                log.info("[api] %s asks to pair: press Allow on the setup page if this is your hub", ip)
+            PAIRING["asked"][ip] = time.time()
+            return web.json_response({"waiting": "press Allow for " + ip + " on the bridge setup page", "ip": ip})
         cfg = load_config()
         tok = api_token(cfg)
         cfg["api_paired"] = True
+        cfg["api_paired_ip"] = ip
         save_config(cfg)
-        PAIRING["until"] = 0.0
-        log.info("[api] hub %s paired", req.remote)
+        PAIRING.update(until=0.0, asked={}, allowed=None, last_ip=ip)
+        log.info("[api] hub %s paired", ip)
         # a hub that already has a (previous) token only accepts the new one with this proof, so a device on the
         # LAN that pretends to be the bridge cannot slip it a token of its own
         proof = sign(cfg.get("api_token_prev") or tok, tok.encode())
@@ -3745,12 +3882,16 @@ async def serve(args) -> None:
     await web.TCPSite(runner, "0.0.0.0", port).start()
     log.info("Stoeckie Bridge %s listening on port %d (id %s)", VERSION, port, bridge_id)
     if SETUP_GATEWAY is not None:
-        log.info("[setup] running in a container: setup page also allowed from the Docker host (%s)", SETUP_GATEWAY)
+        log.info("[setup] running in a container: a browser that comes from the Docker gateway (%s) needs the setup "
+                 "key %s (also in data/setup-key.txt)", SETUP_GATEWAY, setup_key())
+    if not api_paired():
+        log.warning("[api] no SmartThings hub paired: the LAN API is closed until you open the setup page, press "
+                    "Pair and Allow your hub (driver 2026-11-02b or newer)")
     if tls:
         await web.TCPSite(runner, "0.0.0.0", https_port, ssl_context=tls).start()
         log.info("[https] setup page on https://<this pc>:%d/setup, certificate SHA-256 %s", https_port, fp)
     elif not args.demo:
-        log.warning("[https] not available (%s); setup page only on http", fp)
+        log.warning("[https] not available (%s); the setup page only opens on this computer (localhost)", fp)
 
     async def guarded(name, coro):
         while True:
