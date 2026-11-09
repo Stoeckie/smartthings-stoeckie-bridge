@@ -31,7 +31,7 @@ components:
 preferences:
   - name: temperatureUnit
     title: Temperature unit
-    description: "Unit of the Set temperature slider. Auto: °C, and °F once SmartThings sends a °F value (US locations)."
+    description: "Unit of the Set temperature slider. Auto (recommended): the °C slider, the app shows it in °F in a °F location. °F: a separate °F slider."
     required: false
     preferenceType: enumeration
     definition:
@@ -40,6 +40,16 @@ preferences:
         C: "°C"
         F: "°F"
       default: auto
+  - name: vAirflowOrder
+    title: Vertical airflow order
+    description: "Position 1 in the app is the top. If your unit counts the other way round (position 1 points down), choose Unit counts from the bottom."
+    required: false
+    preferenceType: enumeration
+    definition:
+      options:
+        top: Unit counts from the top
+        bottom: Unit counts from the bottom
+      default: top
   - name: offChanges
     title: Changes while off
     description: "Fujitsu units switch on with any change. Keep: a change made while the unit is off is shown and sent when you switch it on. Send now: sent right away (the unit switches on)."

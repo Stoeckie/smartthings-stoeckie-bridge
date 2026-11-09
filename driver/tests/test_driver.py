@@ -264,8 +264,24 @@ def test_aircon_flow(bridge):
     assert state()["minHeat"] is False and state()["mode"] == "fan"
     lua.execute(f'{h}["silvervalley08660.targetTemperature"].setTemperature(DRIVER_OBJ, AC, {{ args = {{ temperature = 22.5 }} }})')
     assert state()["setpoint"] == 22.5
+    lua.execute("AC.events = {}")
     lua.execute(f'{h}["silvervalley08660.airflowDirection"].setPosition(DRIVER_OBJ, AC, {{ args = {{ position = "4" }} }})')
     assert state()["vDir"] == 4 and state()["swing"] == "off"
+    # shown right away (the app stops spinning): the position, and swing fixed (it was vertical)
+    assert app_shows("main:cap.silvervalley08660.airflowDirection.position") == "4"
+    assert app_shows("main:cap.fanOscillationMode.fanOscillationMode") == "fixed"
+    # horizontal: 1 in the app is left; Fujitsu counts from the right, so 1 is sent as the highest position
+    hn = state()["hDirCount"]
+    lua.execute(f'{h}["silvervalley08660.horizontalAirflow"].setPosition(DRIVER_OBJ, AC, {{ args = {{ position = "1" }} }})')
+    assert state()["hDir"] == hn
+    assert app_shows("main:cap.silvervalley08660.horizontalAirflow.position") == "1"
+    lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
+    assert lua.eval("AC.fields.ac_shown.hdir") == "1"          # the poll maps the unit's position back
+    lua.execute('AC.preferences.hAirflowOrder = "left"')       # a unit that counts from the left
+    lua.execute(f'{h}["silvervalley08660.horizontalAirflow"].setPosition(DRIVER_OBJ, AC, {{ args = {{ position = "2" }} }})')
+    assert state()["hDir"] == 2
+    lua.execute('AC.preferences.hAirflowOrder = nil')
+    lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
     lua.execute(f'{h}.fanOscillationMode.setFanOscillationMode(DRIVER_OBJ, AC, {{ args = {{ fanOscillationMode = "vertical" }} }})')
 
     lua.execute("AC.events = {}")
@@ -293,7 +309,8 @@ def test_aircon_flow(bridge):
     lua.execute("AC.events = {}")
     lua.execute(f'{h}["silvervalley08660.horizontalAirflow"].setPosition(DRIVER_OBJ, AC, {{ args = {{ position = "5" }} }})')
     lua.execute(f'{h}["silvervalley08660.airconMode"].setMode(DRIVER_OBJ, AC, {{ args = {{ mode = "cool" }} }})')
-    # Fahrenheit: a °F value from a US location is converted and switches the device to the °F profile
+    # Fahrenheit: a °F value from a US location is converted; the device keeps the °C slider (the app shows
+    # it in °F in a °F location)
     lua.execute(f'{h}.thermostatCoolingSetpoint.setCoolingSetpoint(DRIVER_OBJ, AC, {{ args = {{ setpoint = 72 }} }})')
     s = state()
     assert s["power"] == "off" and s["mode"] == before["mode"] and s["setpoint"] == before["setpoint"]
@@ -302,12 +319,12 @@ def test_aircon_flow(bridge):
     assert ev["main:cap.silvervalley08660.airconMode.mode"] == "cool"
     assert ev["main:cap.silvervalley08660.horizontalAirflow.position"] == "5"
     assert ev["main:cap.thermostatCoolingSetpoint.coolingSetpoint"] == 22.0
-    assert lua.eval("AC.new_profile") == "stoeckie-aircon-v3-f-h"
+    assert lua.eval("AC.new_profile") == "stoeckie-aircon-v3-h"
     # the next poll keeps showing the kept changes, not the values of the unit
     lua.execute("AC.events = {}")
     lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
     assert app_shows("main:cap.silvervalley08660.airconMode.mode") == "cool"
-    assert app_shows("main:cap.silvervalley08660.targetTemperatureF.temperature") == 72
+    assert app_shows("main:cap.silvervalley08660.targetTemperature.temperature") == 22.0
     assert "main:cap.silvervalley08660.airconMode.mode" not in events()  # no flip back to the unit's value
     # the same value again (list opened and closed) is still nothing
     lua.execute(f'{h}["silvervalley08660.airconMode"].setMode(DRIVER_OBJ, AC, {{ args = {{ mode = "cool" }} }})')
@@ -319,10 +336,10 @@ def test_aircon_flow(bridge):
     assert (s["power"], s["mode"], s["hDir"]) == ("on", "cool", before["hDir"])
     lua.execute("RUN_DELAYED()")
     s = state()
-    assert (s["power"], s["mode"], s["setpoint"], s["hDir"]) == ("on", "cool", 22.0, 5)
+    assert (s["power"], s["mode"], s["setpoint"], s["hDir"]) == ("on", "cool", 22.0, 1)   # 5 of 5 in the app = 1
     assert lua.eval("AC.fields.ac_pending") is None
     lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
-    assert app_shows("main:cap.silvervalley08660.targetTemperatureF.temperature") == 72
+    assert app_shows("main:cap.silvervalley08660.targetTemperature.temperature") == 22.0
     lua.execute(f'{h}["silvervalley08660.targetTemperatureF"].setTemperature(DRIVER_OBJ, AC, {{ args = {{ temperature = 68 }} }})')
     assert state()["setpoint"] == 20.0
     # setting "Changes while off: Send now": a change while off goes out right away (and switches the unit on)
@@ -357,7 +374,7 @@ def test_aircon_flow(bridge):
     # the driver reports what it shows to the bridge (setup page)
     with urllib.request.urlopen(f"http://127.0.0.1:{bridge}/setup") as r:
         page = r.read().decode()
-    assert "Demo air conditioner in SmartThings: driver" in page and "stoeckie-aircon-v3-f-h" in page
+    assert "Demo air conditioner in SmartThings: driver" in page and "stoeckie-aircon-v3-h" in page
     # after a bridge restart the diagnostics are sent again (the bridge says diag: false)
     with urllib.request.urlopen(signed_get(f"http://127.0.0.1:{bridge}/stbridge/devices")) as r:
         ac_dev = next(d for d in json.loads(r.read())["devices"] if d["id"] == "demo-aircon")

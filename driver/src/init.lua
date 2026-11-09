@@ -133,14 +133,13 @@ local AC_MODE_FROM_ST = { auto = "auto", cool = "cool", dry = "dry", fanOnly = "
 local SWING_TO_ST = { off = "fixed", vertical = "vertical", horizontal = "horizontal", both = "all" }
 local SWING_FROM_ST = { fixed = "off", vertical = "vertical", horizontal = "horizontal", all = "both" }
 
--- Temperature unit of an air conditioner: the bridge works in °C. A US location shows °F: the standard
--- capabilities are converted by the app, the custom "Set temperature" slider is not, so a °F device gets a
--- profile with a °F slider (...-f). Setting "Temperature unit": auto (°F once a °F value arrives), C or F.
+-- Temperature unit of an air conditioner: the bridge works in °C. The app takes the range of a temperature
+-- slider as °C and converts range and value to the unit of the location (seen 2026-11-09: the °F slider 60-88
+-- showed as 140-190 °F in a US location). So the °C slider works everywhere and Auto keeps it; a °F command
+-- value (above 40) is converted. Setting "°F" keeps the °F slider profile (...-f), whose range is now in °C too.
 local function ac_unit_f(device)
   local p = device.preferences and device.preferences.temperatureUnit
-  if p == "F" then return true end
-  if p == "C" then return false end
-  return device:get_field("unitF") == true
+  return p == "F"
 end
 local function c_to_f(c) return math.floor(c * 9 / 5 + 32 + 0.5) end
 local function f_to_c(f) return math.floor(((f - 32) * 5 / 9) * 2 + 0.5) / 2 end
@@ -347,7 +346,63 @@ local function set_pending(dev, t)
   dev:set_field("ac_pending", t and stjson.encode(t) or nil, { persist = true })
 end
 
+-- Louver positions as the app shows them: vertical 1 = top, horizontal 1 = left (as you look at the unit).
+-- Fujitsu counts the horizontal louvers from the right (reported 2026-11-09: pointing left showed position 5
+-- of 5). Settings "Vertical / Horizontal airflow order" turn the order round for units that count otherwise.
+local AC_COUNT = {}   -- device.id -> { v = n, h = n } from the last poll
+local function pos_flip(dev, axis)
+  local p = dev.preferences or {}
+  if axis == "h" then return p.hAirflowOrder ~= "left" end   -- default: the unit counts from the right
+  return p.vAirflowOrder == "bottom"                          -- default: the unit counts from the top
+end
+local function pos_map(dev, axis, n_pos)
+  local n = tonumber(n_pos)
+  local cnt = tonumber((AC_COUNT[dev.id] or {})[axis]) or 0
+  if not n or n < 1 then return n end
+  n = math.floor(n)
+  if pos_flip(dev, axis) and cnt > 0 and n <= cnt then return cnt + 1 - n end
+  return n
+end
+-- after a command the cloud can still report the old value for a poll or two: keep showing the new value for
+-- a minute (or until the unit reports it), so the app does not jump back and forth
+local AC_HOLD = {}    -- device.id -> key -> { v = shown, t = os.time() }
+local HOLD_SECS = 60
+local function apply_holds(dev, s, raw)
+  local h = AC_HOLD[dev.id]
+  if not h then return s end
+  local c = {}
+  for k, v in pairs(s) do c[k] = v end
+  local now = os.time()
+  local field = { setpoint = "setpoint", fan = "fan", vdir = "vDir", hdir = "hDir", mode = "mode", swing = "swing" }
+  for key, x in pairs(h) do
+    local f = field[key]
+    local reported = c[f]
+    if key == "swing" then reported = SWING_TO_ST[c.swing or ""] end
+    if key == "mode" then reported = AC_MODE_TO_ST[c.mode or ""] end
+    local same = tostring(reported) == tostring(x.v)
+    if (key == "vdir" or key == "hdir") and x.raw ~= nil then same = tonumber(raw[f]) == tonumber(x.raw) end
+    if now - x.t > HOLD_SECS or reported == nil or same
+        or (key == "setpoint" and tonumber(reported) == tonumber(x.v)) then
+      h[key] = nil
+    elseif s.power ~= "off" then
+      if key == "swing" then c.swing = SWING_FROM_ST[x.v] or c.swing
+      elseif key == "mode" then c.mode = AC_MODE_FROM_ST[x.v] or c.mode
+      elseif key == "vdir" or key == "hdir" or key == "setpoint" then c[f] = tonumber(x.v)
+      else c[f] = x.v end
+    end
+  end
+  return c
+end
+
 local function emit_aircon(dev, s)
+  -- louver positions in the order the app shows (see pos_map), then held values of recent commands
+  AC_COUNT[dev.id] = { v = tonumber(s.vDirCount) or 0, h = tonumber(s.hDirCount) or 0 }
+  do
+    local c = {}
+    for k, v in pairs(s) do c[k] = v end
+    c.vDir, c.hDir = pos_map(dev, "v", s.vDir), pos_map(dev, "h", s.hDir)
+    s = apply_holds(dev, c, s)
+  end
   try_emit(dev, function() return s.power == "off" and capabilities.switch.switch.off() or capabilities.switch.switch.on() end)
   -- changes made while the unit is off are kept until it is switched on (see ac_change): show them, not the
   -- values of the unit, else the app jumps back. Once the unit is on (also from the remote or FGLair) they go.
@@ -1041,12 +1096,32 @@ local function ac_send(driver, device, what, value, key, shown)
   local s = device:get_field("ac_shown")
   if type(s) == "table" and key then
     s[key] = shown
-    if key == "vdir" or key == "hdir" then s.swing = nil end    -- a position ends swing
+    if key == "vdir" or key == "hdir" then s.swing_was, s.swing = s.swing, nil end    -- a position ends swing
     if key == "swing" then s.vdir, s.hdir = nil, nil end
     if key == "mode" then s.power = "on" end                    -- a mode command switches a Fujitsu on
   end
   local ok = send(driver, device, what, value)
-  if not ok then device:set_field("ac_shown", nil) end
+  if not ok then
+    device:set_field("ac_shown", nil)
+    return ok
+  end
+  if key then
+    -- show the new value right away (the app stops spinning) and keep it while the cloud catches up
+    AC_HOLD[device.id] = AC_HOLD[device.id] or {}
+    local h, now = AC_HOLD[device.id], os.time()
+    h[key] = { v = shown, raw = value, t = now }
+    show_setting(device, key, shown)
+    if key == "vdir" or key == "hdir" then
+      -- a position ends the swing of that direction only
+      local sw = (type(s) == "table" and s.swing_was) or shown_value(device, "swing")
+      local left = ({ vdir = { all = "horizontal", vertical = "fixed" }, hdir = { all = "vertical", horizontal = "fixed" } })[key][sw or ""]
+      if left then
+        h.swing = { v = left, t = now }
+        show_setting(device, "swing", left)
+      end
+    end
+    if key == "mode" then try_emit(device, function() return capabilities.switch.switch.on() end) end
+  end
   return ok
 end
 -- every setting of an air conditioner goes through here:
@@ -1089,13 +1164,7 @@ end
 local function handle_setpoint(driver, device, cmd)
   local v = tonumber(cmd.args.setpoint or cmd.args.temperature)
   if not v then return end
-  if v > 40 then
-    if device:get_field("unitF") ~= true then
-      device:set_field("unitF", true, { persist = true })
-      if sync_profile then sync_profile(device) end
-    end
-    v = f_to_c(v)
-  end
+  if v > 40 then v = f_to_c(v) end   -- a °F value from a US location
   send_setpoint(driver, device, v)
 end
 local function handle_setpoint_f(driver, device, cmd)
@@ -1112,11 +1181,11 @@ local function handle_oscillation(driver, device, cmd)
 end
 local function handle_vdir(driver, device, cmd)
   local n = tonumber(cmd.args.position)
-  if n then ac_change(driver, device, "vdir", tostring(math.floor(n)), "vdir", math.floor(n)) end
+  if n then ac_change(driver, device, "vdir", tostring(math.floor(n)), "vdir", pos_map(device, "v", n)) end
 end
 local function handle_hdir(driver, device, cmd)
   local n = tonumber(cmd.args.position)
-  if n then ac_change(driver, device, "hdir", tostring(math.floor(n)), "hdir", math.floor(n)) end
+  if n then ac_change(driver, device, "hdir", tostring(math.floor(n)), "hdir", pos_map(device, "h", n)) end
 end
 -- what the driver shows, for the bridge setup page (driver build, profile, °C/°F): only sent when it changes
 send_diag = function(dev)
