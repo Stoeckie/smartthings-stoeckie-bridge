@@ -29,7 +29,7 @@ components:
 preferences:
   - name: temperatureUnit
     title: Temperature unit
-    description: "Unit of the Set temperature slider. Auto (recommended): the °C slider, the app shows it in °F in a °F location. °F: a separate °F slider."
+    description: "Unit of the Set temperature slider. Auto or °C: the °C slider. °F: a °F slider, use this in a location set to °F (the app shows the °C slider in °C)."
     required: false
     preferenceType: enumeration
     definition:

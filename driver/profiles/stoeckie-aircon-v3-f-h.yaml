@@ -33,7 +33,7 @@ components:
 preferences:
   - name: temperatureUnit
     title: Temperature unit
-    description: "Unit of the Set temperature slider. Auto (recommended): the °C slider, the app shows it in °F in a °F location. °F: a separate °F slider."
+    description: "Unit of the Set temperature slider. Auto or °C: the °C slider. °F: a °F slider, use this in a location set to °F (the app shows the °C slider in °C)."
     required: false
     preferenceType: enumeration
     definition:
@@ -82,5 +82,5 @@ preferences:
       maximum: 600
       default: 60
 metadata:
-  vid: c069c5eb-5c7e-3e7f-b6fe-c6d281257a54
+  vid: 6b42818a-a9e9-30d8-8a31-8a728705cb12
   mnmn: SmartThingsCommunity
