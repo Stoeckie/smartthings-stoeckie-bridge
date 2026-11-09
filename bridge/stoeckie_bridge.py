@@ -78,7 +78,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-09g"
+VERSION = "2026-11-09h"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -3484,6 +3484,11 @@ class TuyaLocal:
         new = resp.get("dps")
         if isinstance(new, dict):
             self.dps.setdefault(tid, {}).update({str(k): v for k, v in new.items()})
+        # raw data points and their codes for the setup page, to check or fix the mapping (no keys in here)
+        m = d.get("mapping") if isinstance(d.get("mapping"), dict) else {}
+        TUYA.setdefault("raw", {})[self.dev_id(tid)] = ", ".join(
+            f"{k}{'=' + str((m.get(k) or {}).get('code')) if isinstance(m.get(k), dict) and m[k].get('code') else ''}: {v}"
+            for k, v in sorted((self.dps.get(tid) or {}).items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else 999))
         st = tuya_state(self.kinds[tid], self.roles[tid], self.dps.get(tid) or {})
         REG.upsert(self.dev_id(tid), self.kinds[tid], str(d.get("name") or "Tuya"), st, online=True)
 
@@ -3976,6 +3981,8 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
                          + (f"; {REG.info[d['id']]}" if REG.info.get(d["id"]) else ""))
             if REG.commands.get(d["id"]):
                 lines.append(f"Tuya {d['name']} last commands from SmartThings: " + "; ".join(REG.commands[d["id"]]))
+            if (TUYA.get("raw") or {}).get(d["id"]):
+                lines.append(f"Tuya {d['name']} data points: {TUYA['raw'][d['id']]}")
         v = cfg.get("velux") or {}
         if velux_configured(v):
             locks = [d for d in REG.devices.values() if d["type"] == "velux_lock"]
