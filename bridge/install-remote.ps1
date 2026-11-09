@@ -248,6 +248,12 @@ try {
     $allowDefault = if ($null -ne $prefs.allowSetup) { [bool]$prefs.allowSetup } else { $true }
     $prefs.allowSetup = [bool]($myIp -and (Ask-Yes "Setup pagina van de bridge ook vanaf deze pc ($myIp) kunnen openen?" $allowDefault))
     if ($prefs.allowSetup) { $allow = "$myIp/32" }
+    # more devices that may open the setup page (e.g. a phone with a fixed DHCP reservation): "allowExtra" in
+    # remote-target.json, comma separated addresses or networks
+    if ($prefs.allowExtra) {
+        $extra = @("$($prefs.allowExtra)" -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        $allow = (@($allow) + $extra | Where-Object { $_ }) -join ","
+    }
     $sleepDefault = if ($null -ne $prefs.noSleep) { [bool]$prefs.noSleep } else { $true }
     $noSleep = Ask-Yes "Slaapstand uitzetten op $Target (nodig voor een bridge die altijd draait)?" $sleepDefault
     $prefs.noSleep = $noSleep
@@ -282,7 +288,7 @@ try {
         Get-NetFirewallRule -DisplayName "Stoeckie Bridge setup (https)" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
         if ($allow) {
             New-NetFirewallRule -DisplayName "Stoeckie Bridge setup (https)" -Direction Inbound -Protocol TCP `
-                -LocalPort 8443 -RemoteAddress ($allow -replace "/32$", "") -Action Allow -Profile Private,Domain | Out-Null
+                -LocalPort 8443 -RemoteAddress @($allow -split "," | ForEach-Object { $_ -replace "/32$", "" }) -Action Allow -Profile Private,Domain | Out-Null
         }
 
         # PowerShell remoting on this pc: only from the pc that manages it (else the own network, never anywhere)
