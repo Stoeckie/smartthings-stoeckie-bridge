@@ -82,7 +82,8 @@ function NEW_DEVICE(info)
               profile = { components = { main = { id = "main" }, outdoor = { id = "outdoor" }, plug = { id = "plug" },
                                          climate = { id = "climate" }, status = { id = "status" },
                                          rain = { id = "rain" }, graph = { id = "graph" },
-                                         dewNow = { id = "dewNow" }, dewMax = { id = "dewMax" } } } }
+                                         dewNow = { id = "dewNow" }, dewMax = { id = "dewMax" },
+                                         verticalSwing = { id = "verticalSwing" }, horizontalSwing = { id = "horizontalSwing" } } } }
   function d:get_field(k) return self.fields[k] end
   -- like the hub: a persisted table comes back as a proxy: fields can be read, but next() and pairs() see
   -- nothing (seen on a hub 2026-11-08: next() of a persisted table was nil right after set_field)
@@ -91,7 +92,7 @@ function NEW_DEVICE(info)
     self.fields[k] = v
   end
   d.latest = {}  -- comp:path -> last emitted arg (what the app shows), survives events resets in the tests
-  function d:emit_event(e) self.events[#self.events + 1] = { comp = "main", path = e.path, arg = e.arg }; self.latest["main:" .. e.path] = e.value end
+  function d:emit_event(e) self.events[#self.events + 1] = { comp = "main", path = e.path, arg = e.arg, forced = e.state_change }; self.latest["main:" .. e.path] = e.value end
   function d:emit_component_event(c, e) self.events[#self.events + 1] = { comp = c.id, path = e.path, arg = e.arg }; self.latest[c.id .. ":" .. e.path] = e.value end
   function d:online() self.state = "online" end
   function d:offline() self.state = "offline" end
@@ -235,7 +236,7 @@ def test_aircon_flow(bridge):
     # Minimum Heat is one of the modes (like in the FGLair app), no extra switch or profile
     assert "minHeat" in ev["main:cap.airConditionerMode.supportedAcModes"]
     assert ac.new_profile == "stoeckie-aircon-v3-h"  # the demo unit has horizontal louvers
-    assert ev["main:cap.silvervalley08660.airflowDirection.position"] == "3"   # raw 2 of 4, Fujitsu counts from the bottom
+    assert ev["main:cap.silvervalley08660.airflowDirection.position"] == "2"   # raw 2 of 4, Fujitsu counts from the top
     assert ev["main:cap.silvervalley08660.airflowDirection.supportedPositions"] == ["swing", "1", "2", "3", "4"]
     assert ev["main:cap.silvervalley08660.targetTemperature.temperature"] == 21.0
     assert "minHeat" in ev["main:cap.silvervalley08660.airconMode.supportedModes"]
@@ -267,11 +268,11 @@ def test_aircon_flow(bridge):
     lua.execute("AC.events = {}")
     lua.execute(f'{h}["silvervalley08660.airflowDirection"].setPosition(DRIVER_OBJ, AC, {{ args = {{ position = "4" }} }})')
     vn = state()["vDirCount"]
-    assert state()["vDir"] == vn + 1 - 4 and state()["swing"] == "off"   # Fujitsu counts from the bottom
-    lua.execute('AC.preferences.vAirflowOrder = "top"')                    # a unit that counts from the top
+    assert state()["vDir"] == 4 and state()["swing"] == "off"   # Fujitsu counts from the top, like the app
+    lua.execute('AC.preferences.vAirflowDir = "reversed"')                 # a unit that counts from the bottom
     lua.execute(f'{h}["silvervalley08660.airflowDirection"].setPosition(DRIVER_OBJ, AC, {{ args = {{ position = "3" }} }})')
-    assert state()["vDir"] == 3
-    lua.execute('AC.preferences.vAirflowOrder = nil')
+    assert state()["vDir"] == vn + 1 - 3
+    lua.execute('AC.preferences.vAirflowDir = nil')
     lua.execute(f'{h}["silvervalley08660.airflowDirection"].setPosition(DRIVER_OBJ, AC, {{ args = {{ position = "4" }} }})')
     # shown right away (the app stops spinning): the position, and swing fixed (it was vertical)
     assert app_shows("main:cap.silvervalley08660.airflowDirection.position") == "4"
@@ -416,11 +417,50 @@ def test_aircon_flow(bridge):
     # the same Swing again (list opened and closed) sends nothing
     lua.execute("AC.events = {}")
     lua.execute(f'{h}["silvervalley08660.horizontalAirflow"].setPosition(DRIVER_OBJ, AC, {{ args = {{ position = "swing" }} }})')
-    assert state()["swing"] == "both" and events() == {}
+    # nothing goes to the unit, but the app gets the shown value back (it waits for an event, else a network error)
+    assert state()["swing"] == "both"
+    assert set(events()) <= {"main:cap.fanOscillationMode.fanOscillationMode", "main:cap.silvervalley08660.horizontalAirflow.position",
+                             "verticalSwing:cap.switch.switch.on", "horizontalSwing:cap.switch.switch.on"}
+    assert events().get("main:cap.silvervalley08660.horizontalAirflow.position") == "swing"
     # a position stops the swing of that direction only
     lua.execute(f'{h}["silvervalley08660.airflowDirection"].setPosition(DRIVER_OBJ, AC, {{ args = {{ position = "3" }} }})')
     lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
     assert app_shows("main:cap.silvervalley08660.airflowDirection.position") == "3"
+    # Swing toggles: on swings that direction, off stops only that direction
+    def sw(comp):
+        n = len(ac.events)
+        for i in range(n, 0, -1):
+            e = ac.events[i]
+            if e.comp == comp and str(e.path).startswith("cap.switch.switch"):
+                return str(e.path).rsplit(".", 1)[1]
+        return None
+    lua.execute("AC.events = {}")
+    lua.execute(f'{h}.switch.on(DRIVER_OBJ, AC, {{ component = "verticalSwing" }})')
+    assert state()["swing"] == "both" and sw("verticalSwing") == "on"
+    lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
+    lua.execute("AC.events = {}")
+    lua.execute(f'{h}.switch.off(DRIVER_OBJ, AC, {{ component = "horizontalSwing" }})')
+    assert state()["swing"] == "vertical"
+    assert sw("horizontalSwing") == "off"
+    lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
+    lua.execute("AC.events = {}")
+    lua.execute(f'{h}.switch.off(DRIVER_OBJ, AC, {{ component = "verticalSwing" }})')
+    assert state()["swing"] == "off" and state()["power"] == "on"
+    assert sw("verticalSwing") == "off"
+    lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
+    lua.execute("AC.events = {}")
+    lua.execute(f'{h}.switch.on(DRIVER_OBJ, AC, {{ component = "horizontalSwing" }})')
+    assert state()["swing"] == "horizontal" and sw("horizontalSwing") == "on"
+    assert app_shows("main:cap.silvervalley08660.horizontalAirflow.position") == "swing"
+    lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
+    # the same mode again: nothing to the unit, but the app gets the mode back as a state change (no spinner)
+    mode = state()["mode"]
+    shown = lua.eval("AC.fields.ac_shown.mode")
+    lua.execute("AC.events = {}")
+    lua.execute(f'{h}["silvervalley08660.airconMode"].setMode(DRIVER_OBJ, AC, {{ capability = "silvervalley08660.airconMode", args = {{ mode = "{shown}" }} }})')
+    assert state()["mode"] == mode
+    assert events().get("main:cap.silvervalley08660.airconMode.mode") == shown
+    assert any(ac.events[i].forced for i in range(1, len(ac.events) + 1))
     # the driver reports what it shows to the bridge (setup page)
     with urllib.request.urlopen(f"http://127.0.0.1:{bridge}/setup") as r:
         page = r.read().decode()

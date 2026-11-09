@@ -86,7 +86,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-09h"
+local BUILD = "2026-11-09i"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -182,6 +182,7 @@ end
 local stjson = require "st.json"
 local EMIT_REFRESH = 0                -- default off; setting "Resend all values every (minutes)" of the bridge device
 local REFRESH_BY_PARENT = {}          -- parent device.id -> seconds (set at every poll from that setting)
+local FORCE_EMIT = false  -- set by confirm(): send the value even when unchanged, as a state change
 local EMIT_CACHE = {}  -- device.id -> key -> { v = encoded value, t = time }; plain memory, not a device field
 local function refresh_secs(dev)
   return REFRESH_BY_PARENT[dev.parent_device_id or dev.id] or EMIT_REFRESH
@@ -245,9 +246,10 @@ local function push(dev, comp, ev)
     local cache = EMIT_CACHE[dev.id]
     local c, now = cache[key], os.time()
     local refresh = refresh_secs(dev)
-    if c and c.v == val and (refresh <= 0 or now - c.t < refresh + jitter(key, refresh)) then return end
-    if not c and latest_json(dev, comp, ev) == val then cache[key] = { v = val, t = now }; return end
-    if c and c.v == val then ev.state_change = true end   -- periodic resend (setting) of an unchanged value
+    if c and c.v == val and not FORCE_EMIT and (refresh <= 0 or now - c.t < refresh + jitter(key, refresh)) then return end
+    if not c and not FORCE_EMIT and latest_json(dev, comp, ev) == val then cache[key] = { v = val, t = now }; return end
+    -- a confirmation (see confirm) or the periodic resend (setting) of an unchanged value
+    if FORCE_EMIT or (c and c.v == val) then ev.state_change = true end
     if comp then dev:emit_component_event(comp, ev) else dev:emit_event(ev) end
     cache[key] = { v = val, t = now }  -- only after the emit went through: a refused event is tried again
     return
@@ -260,6 +262,16 @@ local function try_emit(dev, make)
   local ok, err = pcall(function() push(dev, nil, make()) end)
   if not ok then log.warn("[stbridge] " .. dev.label .. ": " .. tostring(err)) end
   return ok
+end
+
+-- a command for the value the app already shows (a list opened and closed, the same mode chosen again) sends
+-- nothing to the unit, but the app waits for an event and shows a network error after a while (seen
+-- 2026-11-09). Confirm the shown value with a state change.
+local function confirm(fn)
+  FORCE_EMIT = true
+  local ok, err = pcall(fn)
+  FORCE_EMIT = false
+  if not ok then log.warn("[stbridge] confirm: " .. tostring(err)) end
 end
 
 local function iso_secs(v)
@@ -376,11 +388,17 @@ local AC_COUNT = {}   -- device.id -> { v = n, h = n } from the last poll
 local function pos_flip(dev, axis)
   local p = dev.preferences or {}
   if axis == "h" then return p.hAirflowOrder ~= "left" end   -- default: the unit counts from the right
-  return p.vAirflowOrder ~= "top"                             -- default: the unit counts from the bottom
+  -- vertical: position 1 in the app is the top, highest and flattest (as on the remote); Fujitsu units count from
+  -- the top too (DS and Dan confirmed 2026-11-09; the earlier "from the bottom" default was wrong)
+  return p.vAirflowDir == "reversed"
 end
 local function pos_map(dev, axis, n_pos)
   local n = tonumber(n_pos)
   local cnt = tonumber((AC_COUNT[dev.id] or {})[axis]) or 0
+  if cnt == 0 then   -- no poll yet since the driver started: the count of the last poll
+    local v, h = tostring(dev:get_field("ac_count") or ""):match("^(%d+),(%d+)$")
+    cnt = tonumber(axis == "h" and h or v) or 0
+  end
   if not n or n < 1 then return n end
   n = math.floor(n)
   if pos_flip(dev, axis) and cnt > 0 and n <= cnt then return cnt + 1 - n end
@@ -417,9 +435,27 @@ local function apply_holds(dev, s, raw)
   return c
 end
 
+-- Swing toggles (components verticalSwing / horizontalSwing, like the switches in the FGLair app): on while
+-- that direction swings. Off stops only that direction; the unit goes back to its own position.
+local function emit_swing_switches(dev, swing_st)
+  local m = SWING_FROM_ST[swing_st or ""]
+  if not m then return end
+  for id, on in pairs({ verticalSwing = (m == "vertical" or m == "both"), horizontalSwing = (m == "horizontal" or m == "both") }) do
+    local comp = dev.profile and dev.profile.components and dev.profile.components[id]
+    if comp then
+      local ok, err = pcall(function()
+        push(dev, comp, on and capabilities.switch.switch.on() or capabilities.switch.switch.off())
+      end)
+      if not ok then log.warn("[stbridge] " .. dev.label .. " " .. id .. ": " .. tostring(err)) end
+    end
+  end
+end
+
 local function emit_aircon(dev, s)
   -- louver positions in the order the app shows (see pos_map), then held values of recent commands
   AC_COUNT[dev.id] = { v = tonumber(s.vDirCount) or 0, h = tonumber(s.hDirCount) or 0 }
+  local enc = AC_COUNT[dev.id].v .. "," .. AC_COUNT[dev.id].h
+  if dev:get_field("ac_count") ~= enc then dev:set_field("ac_count", enc, { persist = true }) end
   do
     local c = {}
     for k, v in pairs(s) do c[k] = v end
@@ -542,6 +578,8 @@ local function emit_aircon(dev, s)
   emit_list(dev, "acFansA", map_list(s.supportedFans), acFan.availableAcFanModes)
   local sw = SWING_TO_ST[s.swing or ""]
   if sw then try_emit(dev, function() return oscillation.fanOscillationMode(sw) end) end
+  local held = AC_HOLD[dev.id] and AC_HOLD[dev.id].swing
+  emit_swing_switches(dev, (held and os.time() - held.t < HOLD_SECS and held.v) or sw)
   emit_list(dev, "acSwings", map_list(s.supportedSwings, SWING_TO_ST), oscillation.supportedFanOscillationModes)
   emit_list(dev, "acSwingsA", map_list(s.supportedSwings, SWING_TO_ST), oscillation.availableFanOscillationModes)
   if send_diag then send_diag(dev) end
@@ -1025,8 +1063,10 @@ local function cancel_pending_timer(device)
   local tm = PENDING_TIMER[device.id]
   if tm then pcall(function() device.thread:cancel_timer(tm) end); PENDING_TIMER[device.id] = nil end
 end
+local swing_toggle   -- below
 local function handle_switch_on(driver, device, cmd)
   local c = cmd and cmd.component
+  if c == "verticalSwing" or c == "horizontalSwing" then return swing_toggle(driver, device, c, true) end
   if c == "climate" then send(driver, device, "climate_on"); return end
   local pend = get_pending(device)
   if pend then
@@ -1059,6 +1099,7 @@ local function handle_switch_on(driver, device, cmd)
 end
 local function handle_switch_off(driver, device, cmd)
   local c = cmd and cmd.component
+  if c == "verticalSwing" or c == "horizontalSwing" then return swing_toggle(driver, device, c, false) end
   if c ~= "climate" then
     cancel_pending_timer(device)
     if device:get_field("ac_pending") then set_pending(device, nil) end
@@ -1120,7 +1161,9 @@ local function show_setting(device, key, v)
     try_emit(device, function() return acMode.airConditionerMode(v) end)
     try_emit(device, function() return acModeX.mode(v) end)
   elseif key == "fan" then try_emit(device, function() return acFan.fanMode(v) end)
-  elseif key == "swing" then try_emit(device, function() return oscillation.fanOscillationMode(v) end)
+  elseif key == "swing" then
+    try_emit(device, function() return oscillation.fanOscillationMode(v) end)
+    emit_swing_switches(device, v)
   elseif key == "vdir" then try_emit(device, function() return airflowDir.position(v) end)
   elseif key == "hdir" and hAirflow then try_emit(device, function() return hAirflow.position(v) end)
   elseif key == "setpoint" then
@@ -1172,7 +1215,10 @@ end
 local function ac_change(driver, device, key, shown, what, value)
   log.info(string.format("[stbridge] %s: command %s %s (unit %s)", device.label, key, tostring(shown),
     unit_off(device) and "off" or "on"))
-  if unchanged(device, key, shown) then return end
+  if unchanged(device, key, shown) then
+    confirm(function() show_setting(device, key, shown) end)
+    return
+  end
   if unit_off(device) and (device.preferences or {}).offChanges ~= "send" then
     local pend = get_pending(device) or {}
     pend[key] = { what = what, value = value, shown = shown }
@@ -1196,7 +1242,8 @@ local function handle_ac_mode(driver, device, cmd)
   -- Off (our list has it, the standard list allows it) switches the unit off; Off again while off (a list
   -- opened and closed): nothing
   if cmd.args.mode == "off" then
-    if not unit_off(device) then handle_switch_off(driver, device, { component = "main" }) end
+    if not unit_off(device) then handle_switch_off(driver, device, { component = "main" })
+    else confirm(function() try_emit(device, function() return acModeX.mode("off") end) end) end
     return
   end
   if cmd.capability == acModeX.ID then
@@ -1229,7 +1276,9 @@ local function handle_setpoint(driver, device, cmd)
 end
 local function handle_setpoint_f(driver, device, cmd)
   local v = tonumber(cmd.args.temperature)
-  if v then send_setpoint(driver, device, f_to_c(v)) end
+  if not v then return end
+  if v <= 40 then send_setpoint(driver, device, math.floor(v * 2 + 0.5) / 2); return end
+  send_setpoint(driver, device, f_to_c(math.floor(v + 0.5)))   -- whole °F, like the unit
 end
 local function handle_fan_mode(driver, device, cmd)
   ac_change(driver, device, "fan", cmd.args.fanMode, "fan", cmd.args.fanMode)
@@ -1242,15 +1291,34 @@ end
 -- Swing chosen in an airflow list: that direction swings, the other direction keeps what it does
 local function swing_dir(driver, device, axis)
   local key = axis == "v" and "vdir" or "hdir"
-  if unchanged(device, key, "swing") then return end
+  if unchanged(device, key, "swing") then
+    confirm(function() show_setting(device, key, "swing") end)
+    return
+  end
   local cur = SWING_FROM_ST[shown_value(device, "swing") or "fixed"] or "off"
   local new
   if axis == "v" then new = (cur == "horizontal" or cur == "both") and "both" or "vertical"
   else new = (cur == "vertical" or cur == "both") and "both" or "horizontal" end
   ac_change(driver, device, "swing", SWING_TO_ST[new], "swing", new)
-  show_setting(device, key, "swing")
+  confirm(function() show_setting(device, key, "swing") end)   -- the list waits for this value
   local s = device:get_field("ac_shown")
   if type(s) == "table" then s[key] = "swing" end
+end
+-- a Swing toggle: on swings that direction (the other keeps what it does), off stops only that direction
+swing_toggle = function(driver, device, comp, on)
+  local v = comp == "verticalSwing"
+  local cur = SWING_FROM_ST[shown_value(device, "swing") or "fixed"] or "off"
+  local other = v and (cur == "horizontal" or cur == "both") or (not v and (cur == "vertical" or cur == "both"))
+  local new
+  if on then new = other and "both" or (v and "vertical" or "horizontal")
+  else new = other and (v and "horizontal" or "vertical") or "off" end
+  ac_change(driver, device, "swing", SWING_TO_ST[new], "swing", new)
+  if on then
+    local key = v and "vdir" or "hdir"
+    show_setting(device, key, "swing")
+    local s = device:get_field("ac_shown")
+    if type(s) == "table" then s[key] = "swing" end
+  end
 end
 local function handle_vdir(driver, device, cmd)
   if cmd.args.position == "swing" then return swing_dir(driver, device, "v") end

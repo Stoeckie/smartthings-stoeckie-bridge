@@ -26,11 +26,21 @@ components:
         version: 1
     categories:
       - name: AirConditioner
+  - id: verticalSwing
+    label: Vertical swing
+    capabilities:
+      - id: switch
+        version: 1
+  - id: horizontalSwing
+    label: Horizontal swing
+    capabilities:
+      - id: switch
+        version: 1
 preferences:
   - name: temperatureUnit
     title: Temperature unit
     description: "Unit of the Set temperature slider. Auto or °C: the °C slider. °F: a °F slider, use this in a location set to °F (the app shows the °C slider in °C)."
-    required: false
+    required: true
     preferenceType: enumeration
     definition:
       options:
@@ -38,20 +48,20 @@ preferences:
         C: "°C"
         F: "°F"
       default: auto
-  - name: vAirflowOrder
+  - name: vAirflowDir
     title: Vertical airflow order
-    description: "Position 1 in the app is the top. Fujitsu units count from the bottom; if yours counts from the top (position 1 in the app points down), choose Unit counts from the top."
-    required: false
+    description: "Position 1 is the top: the highest, flattest position, as on the remote; the last position blows down. If yours is the other way round, choose Reversed."
+    required: true
     preferenceType: enumeration
     definition:
       options:
-        bottom: Unit counts from the bottom
-        top: Unit counts from the top
-      default: bottom
+        normal: "1 = top (Fujitsu)"
+        reversed: "1 = bottom (reversed)"
+      default: normal
   - name: hAirflowOrder
     title: Horizontal airflow order
     description: "Position 1 in the app is left, as you look at the unit. Fujitsu units count from the right; if yours counts from the left, choose Unit counts from the left."
-    required: false
+    required: true
     preferenceType: enumeration
     definition:
       options:
@@ -61,7 +71,7 @@ preferences:
   - name: offChanges
     title: Changes while off
     description: "Fujitsu units switch on with any change. Keep: a change made while the unit is off is shown and sent when you switch it on. Send now: sent right away (the unit switches on)."
-    required: false
+    required: true
     preferenceType: enumeration
     definition:
       options:
