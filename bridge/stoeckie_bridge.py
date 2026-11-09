@@ -78,7 +78,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-09i"
+VERSION = "2026-11-09k"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -3358,10 +3358,12 @@ class TuyaLocal:
         self.fails: dict[str, int] = {}
         self.scan_lock = asyncio.Lock()
         self.last_scan = -1e9
+        self.alias: dict[str, str] = {}
 
-    @staticmethod
-    def dev_id(tuya_id: str) -> str:
-        return "tuya-" + tuya_id
+    def dev_id(self, tuya_id: str) -> str:
+        """SmartThings key of a device. "st_key" (manual "devices" list in config) keeps the SmartThings device,
+        its name, room and routines when the device got a new Tuya id (removed and paired again in the app)."""
+        return "tuya-" + str(self.alias.get(tuya_id) or tuya_id)
 
     async def _call(self, fn, *args, timeout: float = TUYA_TIMEOUT):
         return await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(None, fn, *args), timeout)
@@ -3539,6 +3541,8 @@ class TuyaLocal:
     def add(self, d: dict[str, Any]) -> str:
         """Register a device: its data points by function code, its kind and its command handler."""
         tid = d["id"]
+        if d.get("st_key"):
+            self.alias[tid] = str(d["st_key"])
         self.roles[tid] = tuya_roles(tuya_functions(d.get("mapping")), d.get("dps"))
         kind = self.kinds[tid] = tuya_kind(d, self.roles[tid])
         self.locks[tid] = asyncio.Lock()

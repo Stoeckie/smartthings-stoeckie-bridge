@@ -259,6 +259,24 @@ def test_cloud_fetch_scan_poll_and_commands(fake_tuya, caplog):
         assert KEY not in line
 
 
+def test_st_key_keeps_the_smartthings_device(fake_tuya):
+    """Paired again in the app: new Tuya id, same SmartThings device through "st_key"."""
+    sb.save_config({"tuya": {"devices": [{"id": "bf03newid00000000003", "key": KEY, "name": "Panel",
+                                          "ip": "192.168.1.72", "version": "3.3", "st_key": "bf02panel00000000002"}]}})
+
+    async def main():
+        tl = sb.TuyaLocal(sb.load_config())
+        d = tl.devices[0]
+        tl.add(d)
+        assert "tuya-bf02panel00000000002" in sb.REG.devices and "tuya-bf03newid00000000003" not in sb.REG.devices
+        assert tl.dev_id("bf03newid00000000003") == "tuya-bf02panel00000000002"
+        assert tl.dev_id("other") == "tuya-other"
+
+    asyncio.run(main())
+    for k in [k for k in sb.REG.devices if k.startswith("tuya-")]:
+        sb.REG.devices.pop(k)
+
+
 def test_cloud_fetch_refused(fake_tuya, caplog):
     sb.save_config({"tuya": {"api_key": "AccessId12345678", "api_secret": "wrongwrongwrong1", "region": "eu",
                              "fetch": True}})
