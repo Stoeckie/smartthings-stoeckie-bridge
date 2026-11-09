@@ -78,7 +78,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-09h"
+VERSION = "2026-11-09i"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -3080,7 +3080,7 @@ def tuya_roles(funcs: dict[str, dict[str, Any]], override: Any = None) -> dict[s
             continue
         base = dict(roles.get(role) or {"code": role, "type": "", "values": {}})
         vals = dict(base.get("values") or {})
-        vals.update({k: info[k] for k in ("scale", "min", "max", "step", "range") if k in info})
+        vals.update({k: info[k] for k in ("scale", "min", "max", "step", "range", "heating") if k in info})
         roles[role] = dict(base, dp=str(info["dp"]), values=vals)
     if not funcs and "switch" not in roles:
         roles["switch"] = {"dp": "1", "code": "switch", "type": "boolean", "values": {}}  # DP 1 is on/off
@@ -3246,7 +3246,10 @@ def tuya_state(kind: str, roles: dict[str, dict[str, Any]], dps: dict[str, Any])
         st["mode"] = TUYA_MODE_TO_ST.get(str(raw or "").lower(), "heat")
     ws = val("work_state")
     if ws is not None:
-        heating = str(ws).lower() in TUYA_HEATING
+        # a device can name its own heating values ("heating" in the config dps override), e.g. a floor
+        # thermostat that reports "heating" while the relay is on and "warming" while it waits (seen 2026-11-09)
+        own = ((roles.get("work_state") or {}).get("values") or {}).get("heating")
+        heating = str(ws).lower() in ({str(x).lower() for x in own} if isinstance(own, list) else TUYA_HEATING)
         st["operatingStateFrom"] = "device"
     else:
         # no valve or work state DP: an estimate from room and set temperature
