@@ -35,8 +35,17 @@ def test_push_dedup():
     lua.execute('PUSH(DEV, nil, { other = true })')  # unknown shape: always emitted
     out = lua.eval("DEV.out")
     vals = [out[i] for i in range(1, len(out) + 1)]
-    # first time and the hourly refresh carry state_change; a real change does not (the hub sets it)
-    assert vals == ["on!", "off", "on", "outdoor:on!", "on!", "off", "raw"], vals
+    # only the periodic resend carries state_change; a first value or a real change does not (a forced event
+    # would run routines again after every driver update)
+    assert vals == ["on", "off", "on", "outdoor:on", "on!", "off", "raw"], vals
+    # after a driver start: a value the platform already has is not sent again, another value is
+    lua.execute("""
+      DEV3 = setmetatable({ id = "d3", label = "D3", f = {}, out = {} }, { __index = DEV })
+      function DEV3:get_latest_state(comp, cap, attr) return ({ main = "on", outdoor = "off" })[comp] end
+      PUSH(DEV3, nil, EV("on")); PUSH(DEV3, {id="outdoor"}, EV("on")); PUSH(DEV3, nil, EV("off"))
+    """)
+    out = lua.eval("DEV3.out")
+    assert [out[i] for i in range(1, len(out) + 1)] == ["outdoor:on", "off"]
     # a refused emit is not cached: the next identical value is tried again
     lua.execute('''
       DEV2 = { id = "d2", label = "D2", f = {}, out = {}, fail = true }

@@ -86,7 +86,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-09f"
+local BUILD = "2026-11-09h"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -205,6 +205,27 @@ local function ev_key(comp, ev)
   if type(cap) ~= "string" or type(attr) ~= "string" or ev_state(ev) == nil then return nil end
   return (comp and comp.id or "main") .. "/" .. cap .. "/" .. attr
 end
+-- what the platform shows for this attribute, as the same json as the cache (nil when unknown)
+local function latest_json(dev, comp, ev)
+  local cap = ev.capability_id or ev.capability
+  if type(cap) == "table" then cap = cap.ID or cap.id end
+  local attr = ev.attribute_id or ev.attribute
+  if type(attr) == "table" then attr = attr.NAME or attr.name end
+  local ok, v = pcall(dev.get_latest_state, dev, comp and comp.id or "main", cap, attr)
+  if not ok or v == nil then return nil end
+  local s = ev_state(ev)
+  if type(s) == "table" and s.value ~= nil and type(v) ~= "table" then
+    local copy = {}
+    for k, x in pairs(s) do copy[k] = x end
+    copy.value = v
+    v = copy
+  end
+  local ok2, j = pcall(stjson.encode, { v, ev.visibility })
+  return ok2 and j or nil
+end
+-- emit only changed values. After a driver start (update, hub reboot) the first value is compared with what the
+-- platform already has: the same value is not sent again. Before 2026-11-09 that first value was forced
+-- (state_change), so every driver update re-ran routines and notifications.
 local function push(dev, comp, ev)
   local key, val = ev_key(comp, ev), nil
   if key then
@@ -225,7 +246,8 @@ local function push(dev, comp, ev)
     local c, now = cache[key], os.time()
     local refresh = refresh_secs(dev)
     if c and c.v == val and (refresh <= 0 or now - c.t < refresh + jitter(key, refresh)) then return end
-    if not c or c.v == val then ev.state_change = true end
+    if not c and latest_json(dev, comp, ev) == val then cache[key] = { v = val, t = now }; return end
+    if c and c.v == val then ev.state_change = true end   -- periodic resend (setting) of an unchanged value
     if comp then dev:emit_component_event(comp, ev) else dev:emit_event(ev) end
     cache[key] = { v = val, t = now }  -- only after the emit went through: a refused event is tried again
     return
@@ -434,10 +456,14 @@ local function emit_aircon(dev, s)
   end
   if pend and pend.mode then m = pend.mode.shown end
   try_emit(dev, function() return acMode.airConditionerMode(m) end)
-  try_emit(dev, function() return acModeX.mode(m) end)
+  -- our mode list also has Off (like a thermostat): it shows Off while the unit is off. The standard mode
+  -- (voice assistants, routines) keeps the last mode.
+  try_emit(dev, function() return acModeX.mode(s.power == "off" and "off" or m) end)
+  local modesX = { "off" }
+  for _, x in ipairs(modes) do modesX[#modesX + 1] = x end
   emit_list(dev, "acModes", modes, acMode.supportedAcModes)
   emit_list(dev, "acModesA", modes, acMode.availableAcModes) -- the app also reads the "available" lists
-  emit_list(dev, "acModesX", modes, acModeX.supportedModes)
+  emit_list(dev, "acModesX", modesX, acModeX.supportedModes)
   if s.setpoint then
     try_emit(dev, function() return coolSetpoint.coolingSetpoint({ value = tonumber(s.setpoint), unit = "C" }) end)
     local f = ac_unit_f(dev)
@@ -451,15 +477,24 @@ local function emit_aircon(dev, s)
   end
   -- what the app shows now: a command with the same value (the app sends one when you open a list and go
   -- back without choosing) must not switch the unit on
+  -- each airflow list starts with Swing (like the two sections in the FGLair app): it shows Swing while that
+  -- direction swings, otherwise the position
+  local swings = {}
+  for _, x in ipairs(s.supportedSwings or {}) do swings[x] = true end
+  local can_v = swings.vertical or swings.both
+  local can_h = swings.horizontal or swings.both
+  local swv = s.swing == "vertical" or s.swing == "both"
+  local swh = s.swing == "horizontal" or s.swing == "both"
+  local vshown = (can_v and swv) and "swing" or (tonumber(s.vDir) and tostring(math.floor(s.vDir)) or nil)
+  local hshown = (can_h and swh) and "swing" or (tonumber(s.hDir) and tostring(math.floor(s.hDir)) or nil)
   dev:set_field("ac_shown", { power = s.power == "off" and "off" or "on", mode = m, fan = s.fan, swing = SWING_TO_ST[s.swing or ""],
-    vdir = tonumber(s.vDir) and tostring(math.floor(s.vDir)) or nil,
-    hdir = tonumber(s.hDir) and tostring(math.floor(s.hDir)) or nil, setpoint = tonumber(s.setpoint) })
+    vdir = vshown, hdir = hshown, setpoint = tonumber(s.setpoint) })
   local n = tonumber(s.vDirCount) or 0
   if n > 0 then
-    local list = {}
+    local list = can_v and { "swing" } or {}
     for i = 1, math.min(n, 8) do list[#list + 1] = tostring(i) end
     emit_list(dev, "vDirs", list, airflowDir.supportedPositions)
-    if tonumber(s.vDir) then try_emit(dev, function() return airflowDir.position(tostring(math.floor(s.vDir))) end) end
+    if vshown then try_emit(dev, function() return airflowDir.position(vshown) end) end
   end
   -- horizontal louvers (left/right): only units that report positions get the profile with this control
   local hn = tonumber(s.hDirCount) or 0
@@ -468,10 +503,10 @@ local function emit_aircon(dev, s)
     sync_profile(dev)
   end
   if hn > 0 and hAirflow and dev:supports_capability(hAirflow) then
-    local list = {}
+    local list = can_h and { "swing" } or {}
     for i = 1, math.min(hn, 8) do list[#list + 1] = tostring(i) end
     emit_list(dev, "hDirs", list, hAirflow.supportedPositions)
-    if tonumber(s.hDir) then try_emit(dev, function() return hAirflow.position(tostring(math.floor(s.hDir))) end) end
+    if hshown then try_emit(dev, function() return hAirflow.position(hshown) end) end
   end
   local r = s.setpointRange
   if type(r) == "table" and r[1] and r[2] then
@@ -1032,7 +1067,12 @@ local function handle_switch_off(driver, device, cmd)
     local s = device:get_field("ac_shown")
     if type(s) == "table" then s.power = "off" end
   end
-  send(driver, device, c == "climate" and "climate_off" or "off")
+  local aircon = c ~= "climate" and type(device:get_field("ac_shown")) == "table"
+  local ok = send(driver, device, c == "climate" and "climate_off" or "off")
+  if ok and aircon then
+    try_emit(device, function() return acModeX.mode("off") end)
+  end
+  return ok
 end
 -- a refused lock command (e.g. unlock without the gateway key): show the real state again instead of a spinner
 local function lock_cmd(driver, device, cmd)
@@ -1153,6 +1193,25 @@ local function ac_change(driver, device, key, shown, what, value)
   ac_send(driver, device, what, value, key, shown)
 end
 local function handle_ac_mode(driver, device, cmd)
+  -- Off (our list has it, the standard list allows it) switches the unit off; Off again while off (a list
+  -- opened and closed): nothing
+  if cmd.args.mode == "off" then
+    if not unit_off(device) then handle_switch_off(driver, device, { component = "main" }) end
+    return
+  end
+  if cmd.capability == acModeX.ID then
+    -- another mode chosen in our list while the unit is off switches it on in that mode (with the changes
+    -- kept while off), like a thermostat
+    local mx = AC_MODE_FROM_ST[cmd.args.mode or ""]
+    if mx and unit_off(device) then
+      local pend = get_pending(device) or {}
+      pend.mode = { what = "mode", value = mx, shown = AC_MODE_TO_ST[mx] }
+      set_pending(device, pend)
+      show_setting(device, "mode", AC_MODE_TO_ST[mx])
+      try_emit(device, function() return capabilities.switch.switch.on() end)
+      return handle_switch_on(driver, device, { component = "main" })
+    end
+  end
   local m = AC_MODE_FROM_ST[cmd.args.mode or ""]
   if not m then log.warn("[stbridge] unsupported AC mode " .. tostring(cmd.args.mode)); return end
   ac_change(driver, device, "mode", AC_MODE_TO_ST[m], "mode", m)
@@ -1180,11 +1239,26 @@ local function handle_oscillation(driver, device, cmd)
   if not m then return end
   ac_change(driver, device, "swing", cmd.args.fanOscillationMode, "swing", m)
 end
+-- Swing chosen in an airflow list: that direction swings, the other direction keeps what it does
+local function swing_dir(driver, device, axis)
+  local key = axis == "v" and "vdir" or "hdir"
+  if unchanged(device, key, "swing") then return end
+  local cur = SWING_FROM_ST[shown_value(device, "swing") or "fixed"] or "off"
+  local new
+  if axis == "v" then new = (cur == "horizontal" or cur == "both") and "both" or "vertical"
+  else new = (cur == "vertical" or cur == "both") and "both" or "horizontal" end
+  ac_change(driver, device, "swing", SWING_TO_ST[new], "swing", new)
+  show_setting(device, key, "swing")
+  local s = device:get_field("ac_shown")
+  if type(s) == "table" then s[key] = "swing" end
+end
 local function handle_vdir(driver, device, cmd)
+  if cmd.args.position == "swing" then return swing_dir(driver, device, "v") end
   local n = tonumber(cmd.args.position)
   if n then ac_change(driver, device, "vdir", tostring(math.floor(n)), "vdir", pos_map(device, "v", n)) end
 end
 local function handle_hdir(driver, device, cmd)
+  if cmd.args.position == "swing" then return swing_dir(driver, device, "h") end
   local n = tonumber(cmd.args.position)
   if n then ac_change(driver, device, "hdir", tostring(math.floor(n)), "hdir", pos_map(device, "h", n)) end
 end
