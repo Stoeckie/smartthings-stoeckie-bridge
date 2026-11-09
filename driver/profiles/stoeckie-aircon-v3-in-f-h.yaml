@@ -40,14 +40,14 @@ preferences:
       default: auto
   - name: vAirflowOrder
     title: Vertical airflow order
-    description: "Position 1 in the app is the top. If your unit counts the other way round (position 1 points down), choose Unit counts from the bottom."
+    description: "Position 1 in the app is the top. Fujitsu units count from the bottom; if yours counts from the top (position 1 in the app points down), choose Unit counts from the top."
     required: false
     preferenceType: enumeration
     definition:
       options:
-        top: Unit counts from the top
         bottom: Unit counts from the bottom
-      default: top
+        top: Unit counts from the top
+      default: bottom
   - name: hAirflowOrder
     title: Horizontal airflow order
     description: "Position 1 in the app is left, as you look at the unit. Fujitsu units count from the right; if yours counts from the left, choose Unit counts from the left."

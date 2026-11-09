@@ -235,7 +235,7 @@ def test_aircon_flow(bridge):
     # Minimum Heat is one of the modes (like in the FGLair app), no extra switch or profile
     assert "minHeat" in ev["main:cap.airConditionerMode.supportedAcModes"]
     assert ac.new_profile == "stoeckie-aircon-v3-h"  # the demo unit has horizontal louvers
-    assert ev["main:cap.silvervalley08660.airflowDirection.position"] == "2"
+    assert ev["main:cap.silvervalley08660.airflowDirection.position"] == "3"   # raw 2 of 4, Fujitsu counts from the bottom
     assert ev["main:cap.silvervalley08660.airflowDirection.supportedPositions"] == ["1", "2", "3", "4"]
     assert ev["main:cap.silvervalley08660.targetTemperature.temperature"] == 21.0
     assert "minHeat" in ev["main:cap.silvervalley08660.airconMode.supportedModes"]
@@ -266,7 +266,13 @@ def test_aircon_flow(bridge):
     assert state()["setpoint"] == 22.5
     lua.execute("AC.events = {}")
     lua.execute(f'{h}["silvervalley08660.airflowDirection"].setPosition(DRIVER_OBJ, AC, {{ args = {{ position = "4" }} }})')
-    assert state()["vDir"] == 4 and state()["swing"] == "off"
+    vn = state()["vDirCount"]
+    assert state()["vDir"] == vn + 1 - 4 and state()["swing"] == "off"   # Fujitsu counts from the bottom
+    lua.execute('AC.preferences.vAirflowOrder = "top"')                    # a unit that counts from the top
+    lua.execute(f'{h}["silvervalley08660.airflowDirection"].setPosition(DRIVER_OBJ, AC, {{ args = {{ position = "3" }} }})')
+    assert state()["vDir"] == 3
+    lua.execute('AC.preferences.vAirflowOrder = nil')
+    lua.execute(f'{h}["silvervalley08660.airflowDirection"].setPosition(DRIVER_OBJ, AC, {{ args = {{ position = "4" }} }})')
     # shown right away (the app stops spinning): the position, and swing fixed (it was vertical)
     assert app_shows("main:cap.silvervalley08660.airflowDirection.position") == "4"
     assert app_shows("main:cap.fanOscillationMode.fanOscillationMode") == "fixed"

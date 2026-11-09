@@ -86,7 +86,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-09d"
+local BUILD = "2026-11-09e"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -347,13 +347,14 @@ local function set_pending(dev, t)
 end
 
 -- Louver positions as the app shows them: vertical 1 = top, horizontal 1 = left (as you look at the unit).
--- Fujitsu counts the horizontal louvers from the right (reported 2026-11-09: pointing left showed position 5
--- of 5). Settings "Vertical / Horizontal airflow order" turn the order round for units that count otherwise.
+-- Fujitsu counts the other way round on both: horizontal from the right (2026-11-09: pointing left showed 5
+-- of 5) and vertical from the bottom (checked on a unit here). Settings "Vertical / Horizontal airflow order"
+-- turn the order round for units that count otherwise.
 local AC_COUNT = {}   -- device.id -> { v = n, h = n } from the last poll
 local function pos_flip(dev, axis)
   local p = dev.preferences or {}
   if axis == "h" then return p.hAirflowOrder ~= "left" end   -- default: the unit counts from the right
-  return p.vAirflowOrder == "bottom"                          -- default: the unit counts from the top
+  return p.vAirflowOrder ~= "top"                             -- default: the unit counts from the bottom
 end
 local function pos_map(dev, axis, n_pos)
   local n = tonumber(n_pos)
