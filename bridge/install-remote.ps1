@@ -295,6 +295,12 @@ try {
                 -LocalPort 8443 -RemoteAddress @($allow -split "," | ForEach-Object { $_ -replace "/32$", "" }) -Action Allow -Profile Private,Domain | Out-Null
         }
 
+        # Tuya devices announce themselves by UDP broadcast (ports 6666, 6667, 7000) on the own network: the bridge
+        # listens to find their address and protocol version (local control, see README Tuya)
+        Get-NetFirewallRule -DisplayName "Stoeckie Bridge Tuya discovery (udp)" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+        New-NetFirewallRule -DisplayName "Stoeckie Bridge Tuya discovery (udp)" -Direction Inbound -Protocol UDP `
+            -LocalPort 6666,6667,7000 -RemoteAddress LocalSubnet -Action Allow -Profile Private,Domain | Out-Null
+
         # PowerShell remoting on this pc: only from the pc that manages it (else the own network, never anywhere)
         $winrmFrom = if ($myIp) { $myIp } else { "LocalSubnet" }
         Get-NetFirewallRule -Name "WINRM-HTTP-In-TCP*" -ErrorAction SilentlyContinue |
