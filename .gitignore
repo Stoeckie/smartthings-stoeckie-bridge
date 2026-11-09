@@ -21,3 +21,4 @@ remote-check.txt
 bridge/homeconnect/
 bridge/samsung/
 bridge/data/samsung/
+bridge/docker-compose.override.yml

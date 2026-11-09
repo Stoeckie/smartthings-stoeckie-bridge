@@ -1,0 +1,11 @@
+# Copy to docker-compose.override.yml and change what you need. Docker Compose merges it with
+# docker-compose.yml automatically; git ignores the copy, so a git pull keeps your settings.
+services:
+  stoeckie-bridge:
+    environment:
+      TZ: America/New_York
+      # Allow the setup page from another computer on your LAN:
+      # STBRIDGE_SETUP_ALLOW: "192.168.1.0/24"
+    # Without host networking (Docker Desktop, many NAS):
+    # network_mode: bridge
+    # ports: ["8787:8787", "8443:8443"]

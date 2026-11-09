@@ -73,7 +73,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-09d"
+VERSION = "2026-11-09e"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -3267,6 +3267,7 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
 
     def status_text() -> str:
         cfg = load_config()
+        mem = memory_mb()
         e, f = cfg.get("electrolux") or {}, cfg.get("fglair") or {}
         lines = []
         devs = [d for d in REG.devices.values() if d["type"] == "dryer"]
@@ -3349,6 +3350,8 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
                          "your hub shows up below and press Allow.")
         elif api_paired(cfg):
             seen = PAIRING.get("last_ip") or cfg.get("api_paired_ip")
+            if mem:
+                lines.append(f"Memory: {mem[0]:.0f} MB (highest {mem[1]:.0f} MB since the start)")
             lines.append("SmartThings hub paired" + (f" ({seen})" if seen else "")
                          + ": the LAN API only accepts signed requests from it.")
         else:
@@ -3904,12 +3907,37 @@ async def serve(args) -> None:
                 log.exception("[%s] crashed, restart in 60 s", name)
                 await asyncio.sleep(60)
 
+    async def memory_log():
+        # one line an hour, so a slow leak shows in bridge.log (reported on a small Docker host, 2026-11-09)
+        while True:
+            await asyncio.sleep(3600)
+            m = memory_mb()
+            if m:
+                log.info("[bridge] memory %.0f MB (highest %.0f MB), %d tasks", m[0], m[1], len(asyncio.all_tasks()))
+
+    asyncio.create_task(memory_log())
     if args.demo:
         asyncio.create_task(demo_devices())
     else:
         for section in sources:
             start(section)
     await asyncio.Event().wait()
+
+
+def memory_mb() -> tuple[float, float] | None:
+    """Current and highest memory use of the bridge in MB (Linux /proc; Windows via psutil when installed)."""
+    try:
+        with open("/proc/self/status", encoding="ascii") as f:
+            st = dict(line.split(":", 1) for line in f if ":" in line)
+        return int(st["VmRSS"].split()[0]) / 1024, int(st["VmHWM"].split()[0]) / 1024
+    except (OSError, KeyError, ValueError):
+        pass
+    try:
+        import psutil  # type: ignore
+        info = psutil.Process().memory_info()
+        return info.rss / 1048576, getattr(info, "peak_wset", info.rss) / 1048576
+    except Exception:  # noqa: BLE001
+        return None
 
 
 # ---------------------------------------------------------------- CLI

@@ -4,11 +4,17 @@
 # Without host networking (Docker Desktop, many NAS): comment out network_mode and use the ports line; the
 # setup page then works from a browser on the Docker host after you enter the setup key (docker logs
 # stoeckie-bridge, or data/setup-key.txt): on Docker Desktop the whole LAN arrives from the Docker gateway.
+#
+# Your own settings: put them in docker-compose.override.yml next to this file (copy
+# docker-compose.override.example.yml). Docker Compose reads that file automatically and git never touches it, so
+# a git pull no longer conflicts with your changes. Leave this file as it is.
 services:
   stoeckie-bridge:
     build: .
     container_name: stoeckie-bridge
     restart: unless-stopped
+    # the bridge needs about 60 to 120 MB; the limit restarts the container instead of starving the host
+    mem_limit: 400m
     network_mode: host
     # ports: ["8787:8787", "8443:8443"]   # instead of network_mode: host
     volumes:
