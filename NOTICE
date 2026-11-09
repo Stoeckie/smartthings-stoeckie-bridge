@@ -14,3 +14,6 @@ the Home Connect Profile Downloader, https://github.com/bruestel/homeconnect-pro
 Samsung appliances are reached with the smartthings-local library, https://github.com/QuiteYellow/SmartThings-Local
 (MIT, used as a dependency). The washer course names per course table come from the localthings project,
 https://github.com/mbillow/localthings, Copyright (c) 2026 Marc Billow, MIT License.
+
+Tuya devices are reached with the tinytuya library, https://github.com/jasonacox/tinytuya (MIT, used as a
+dependency).

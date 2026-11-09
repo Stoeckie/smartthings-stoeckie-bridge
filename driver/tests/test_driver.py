@@ -52,7 +52,8 @@ for _, id in ipairs({ "windowShade", "windowShadeLevel", "refresh", "dryerOperat
                       "silvervalley08660.airflowDirection", "silvervalley08660.applianceProgram",
                       "silvervalley08660.cookSettings", "silvervalley08660.washerProgram", "dishwasherOperatingState", "ovenOperatingState",
                       "washerOperatingState", "audioVolume", "audioMute", "mediaInputSource", "tvChannel",
-                      "ovenSetpoint", "temperatureMeasurement", "remoteControlStatus" }) do caps[id].ID = id end
+                      "ovenSetpoint", "temperatureMeasurement", "remoteControlStatus",
+                      "thermostatHeatingSetpoint", "thermostatMode", "thermostatOperatingState" }) do caps[id].ID = id end
 package.loaded["st.capabilities"] = caps
 package.loaded["st.driver"] = function(name, tmpl) DRIVER = tmpl; return { run = function() end } end
 package.loaded["log"] = { info = function(m) print("I " .. m) end, warn = function(m) print("W " .. m) end,
@@ -83,7 +84,9 @@ function NEW_DEVICE(info)
                                          climate = { id = "climate" }, status = { id = "status" },
                                          rain = { id = "rain" }, graph = { id = "graph" },
                                          dewNow = { id = "dewNow" }, dewMax = { id = "dewMax" },
-                                         verticalSwing = { id = "verticalSwing" }, horizontalSwing = { id = "horizontalSwing" } } } }
+                                         verticalSwing = { id = "verticalSwing" }, horizontalSwing = { id = "horizontalSwing" },
+                                         floor = { id = "floor" }, childLock = { id = "childLock" } } },
+              manufacturer = info.manufacturer, profile_name = info.profile }
   function d:get_field(k) return self.fields[k] end
   -- like the hub: a persisted table comes back as a proxy: fields can be read, but next() and pairs() see
   -- nothing (seen on a hub 2026-11-08: next() of a persisted table was nil right after set_field)
@@ -788,3 +791,97 @@ def test_homeconnect_appliances(bridge):
     st = json.loads(urllib.request.urlopen(signed_get(f"http://127.0.0.1:{bridge}/stbridge/devices"), timeout=5).read())
     by = {d["id"]: d["state"] for d in st["devices"]}
     assert by["demo-washer"]["program"] == "quick15" and by["demo-washer"]["operation"] == "run"
+
+
+def test_tuya_thermostat_and_heater(bridge):
+    """Demo Tuya floor heating thermostat and infrared panel: profiles, events, commands (real bridge mapping code)."""
+    lua = lua53.LuaRuntime(unpack_returned_tuples=True)
+    lua.execute(f'package.path = "{SRC}/?.lua;{HERE}/?.lua;" .. package.path')
+    lua.globals().py_http = py_http
+    lua.execute(HARNESS)
+    lua.execute(f'dofile("{SRC}/init.lua")')
+    lua.execute("math.randomseed(%d)" % random.randrange(1 << 30))  # each runtime its own nonces (no replays)
+    lua.execute(f'''
+      PARENT = NEW_DEVICE({{ id = "p1", label = "Bridge", device_network_id = "stbridge-test1",
+                            preferences = {{ ipAddress = "127.0.0.1", port = "{bridge}" }} }})
+      DRIVER.lifecycle_handlers.init(DRIVER_OBJ, PARENT)
+      DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
+      DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
+      for _, d in ipairs(DEVICES) do
+        if d.parent_assigned_child_key == "demo-tuya-thermostat" then TH = d end
+        if d.parent_assigned_child_key == "demo-tuya-heater" then HE = d end
+      end
+    ''')
+    th, he = lua.eval("TH"), lua.eval("HE")
+    assert th is not None and he is not None
+    assert th.manufacturer == "Tuya" and th.profile_name == "stoeckie-tuya-thermostat"
+    assert he.profile_name == "stoeckie-tuya-heater"
+    assert th.new_profile == "stoeckie-tuya-thermostat"        # floor sensor and child lock: the full profile
+    assert he.new_profile == "stoeckie-tuya-heater-t"          # the panel has a set temperature
+    ltype = lua.eval("type")
+
+    def py(v):
+        if ltype(v) != "table":
+            return v
+        d = {k: py(x) for k, x in v.items()}
+        if d and all(isinstance(k, int) for k in d):
+            return [d[k] for k in sorted(d)]
+        return d
+
+    def shows(dev, key):
+        v = py(dev.latest[key])
+        return v["value"] if isinstance(v, dict) and "value" in v else v
+
+    assert "main:cap.switch.switch.on" in set(th.latest.keys())
+    assert shows(th, "main:cap.temperatureMeasurement.temperature") == 19.8
+    assert shows(th, "main:cap.thermostatHeatingSetpoint.heatingSetpoint") == 21.5
+    assert shows(th, "main:cap.thermostatHeatingSetpoint.heatingSetpointRange") == {"minimum": 5.0, "maximum": 35.0, "step": 0.5}
+    assert shows(th, "main:cap.thermostatMode.thermostatMode") == "heat"
+    assert shows(th, "main:cap.thermostatMode.supportedThermostatModes") == ["off", "auto", "heat", "away", "eco"]
+    assert shows(th, "main:cap.thermostatOperatingState.thermostatOperatingState") == "heating"
+    assert shows(th, "floor:cap.temperatureMeasurement.temperature") == 24.3
+    assert "childLock:cap.switch.switch.off" in set(th.latest.keys())
+    assert "main:cap.switch.switch.off" in set(he.latest.keys())
+    assert shows(he, "main:cap.thermostatHeatingSetpoint.heatingSetpoint") == 20.0
+    # nothing changed: nothing emitted
+    lua.execute("TH.events = {}; DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
+    assert len(th.events) == 0
+
+    def state(dev_id):
+        with urllib.request.urlopen(signed_get(f"http://127.0.0.1:{bridge}/stbridge/devices")) as r:
+            devs = json.loads(r.read())["devices"]
+        return next(d for d in devs if d["id"] == dev_id)["state"]
+
+    h = "DRIVER.capability_handlers"
+    lua.execute(f'{h}.thermostatHeatingSetpoint.setHeatingSetpoint(DRIVER_OBJ, TH, {{ args = {{ setpoint = 22.3 }} }})')
+    assert state("demo-tuya-thermostat")["setpoint"] == 22.5                # rounded to the device step
+    assert shows(th, "main:cap.thermostatHeatingSetpoint.heatingSetpoint") == 22.5   # shown right away
+    # the same value again: nothing new, but the app gets it back as a state change (no spinner)
+    lua.execute("TH.events = {}")
+    lua.execute(f'{h}.thermostatHeatingSetpoint.setHeatingSetpoint(DRIVER_OBJ, TH, {{ args = {{ setpoint = 22.5 }} }})')
+    assert any(th.events[i].forced for i in range(1, len(th.events) + 1))
+    lua.execute(f'{h}.thermostatMode.setThermostatMode(DRIVER_OBJ, TH, {{ args = {{ mode = "eco" }} }})')
+    assert state("demo-tuya-thermostat")["mode"] == "eco"
+    assert shows(th, "main:cap.thermostatMode.thermostatMode") == "eco"
+    lua.execute(f'{h}.thermostatMode.setThermostatMode(DRIVER_OBJ, TH, {{ args = {{ mode = "away" }} }})')
+    s = state("demo-tuya-thermostat")
+    assert s["mode"] == "away" and s["tuyaMode"] == "holiday" and s["eco"] is False
+    lua.execute(f'{h}.thermostatMode.off(DRIVER_OBJ, TH, {{}})')
+    assert state("demo-tuya-thermostat")["power"] == "off"
+    assert shows(th, "main:cap.thermostatMode.thermostatMode") == "off"
+    assert shows(th, "main:cap.thermostatOperatingState.thermostatOperatingState") == "idle"
+    lua.execute(f'{h}.thermostatMode.heat(DRIVER_OBJ, TH, {{}})')
+    s = state("demo-tuya-thermostat")
+    assert s["power"] == "on" and s["tuyaMode"] == "manual"
+    lua.execute(f'{h}.switch.on(DRIVER_OBJ, TH, {{ component = "childLock" }})')
+    assert state("demo-tuya-thermostat")["childLock"] is True and state("demo-tuya-thermostat")["power"] == "on"
+    assert "childLock:cap.switch.switch.on" in set(th.latest.keys())
+    lua.execute(f'{h}.switch.off(DRIVER_OBJ, TH, {{ component = "main" }})')
+    assert state("demo-tuya-thermostat")["power"] == "off" and state("demo-tuya-thermostat")["childLock"] is True
+    lua.execute(f'{h}.switch.on(DRIVER_OBJ, TH, {{ component = "main" }})')
+    # the panel: on/off and a set temperature in whole degrees, also from a °F location
+    lua.execute(f'{h}.switch.on(DRIVER_OBJ, HE, {{ component = "main" }})')
+    assert state("demo-tuya-heater")["power"] == "on"
+    lua.execute(f'{h}.thermostatHeatingSetpoint.setHeatingSetpoint(DRIVER_OBJ, HE, {{ args = {{ setpoint = 72 }} }})')
+    assert state("demo-tuya-heater")["setpoint"] == 22.0
+    assert shows(he, "main:cap.thermostatHeatingSetpoint.heatingSetpoint") == 22.0

@@ -1,6 +1,6 @@
 name: "Stoeckie Bridge (local)"
 packageKey: "stoeckie-bridge-local"
-description: "AEG dryer, Fujitsu FGLair air conditioners and Skoda cars via the Stoeckie Bridge running on a pc in the LAN"
+description: "AEG dryer, Fujitsu FGLair air conditioners, Skoda cars and local Tuya thermostats and heaters via the Stoeckie Bridge running on a pc in the LAN"
 vendorSupportInformation: "https://github.com/Stoeckie"
 permissions:
   lan: {}

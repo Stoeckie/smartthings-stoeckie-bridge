@@ -19,6 +19,8 @@ Sources
     cloud with the Home Connect Profile Downloader; put its zips in the homeconnect folder next to config.json.
   * VELUX ACTIVE (optional): departure mode lock/unlock via the VELUX/Netatmo cloud. Unlock is signed with a key
     the gateway hands out locally once (button press). The windows stay local (HomeKit driver on the hub).
+  * Tuya / Smart Life (optional, local): thermostats and heaters over the LAN (library tinytuya). The Tuya IoT
+    Platform is only asked once for the device list, local keys and data point mapping; then everything is local.
 
 Credentials live only in config.json next to this script (never in the code).
 
@@ -33,6 +35,8 @@ LAN API (default port 8787, LAN only; after pairing only requests signed with th
       velux_lock: lock | unlock | refresh | settings {poll_seconds}
       rain:    refresh (VELUX gateway rain sensor)
       dishwasher / oven (Home Connect): on | off | stop | pause | resume (oven) | refresh
+      tuya_thermostat / tuya_heater (Tuya, local): on | off | setpoint (C) | mode (off heat auto eco away ...)
+               | child_lock true/false | eco true/false | refresh
       rainradar: refresh | settings {postcode, housenumber, address, location, radius_m, threshold, provider,
                humid_hours} (state: raining, rainRate mm/h, minutesUntilRain, minutesOfRain, intensity, summary,
                dewPointNow, dewPointMax and dewPointMaxAt over the next humid_hours hours, humidSummary; windSpeed, windGust (km/h) and windDirection now)
@@ -60,6 +64,7 @@ import html
 import ipaddress
 import json
 import os
+import random
 import re
 import secrets
 import logging
@@ -73,7 +78,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-09e"
+VERSION = "2026-11-09f"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -2969,6 +2974,612 @@ class SamsungTV:
             await asyncio.gather(*(self._run_one(t) for t in self.tvs))
 
 
+# ---------------------------------------------------------------- Tuya (Smart Life), local
+
+# Tuya WiFi devices (Smart Life / Tuya Smart app) are controlled on the LAN with tinytuya: every device has a local
+# key, and its data points (DPs) are numbered per product. The Tuya IoT Platform (a cloud project with the Smart
+# Life app linked) only hands out the device list, the local keys and the DP mapping, once (Fetch devices on the
+# setup page). Everything after that is local: status every 30 s, commands right away.
+TUYA_REGIONS = ("eu", "us", "cn", "in")
+TUYA_POLL = 30          # seconds between two status reads of one device
+TUYA_SCAN_SECS = 18     # how long a UDP discovery listens (devices announce themselves about every 5 s)
+TUYA_RESCAN = 300       # look for a device that does not answer at most every 5 minutes
+TUYA_OFFLINE_AFTER = 3  # failed reads in a row before a device shows offline
+TUYA_TIMEOUT = 12.0     # seconds for one local call (connect, send, answer), also below the driver's 15 s
+TUYA: dict[str, Any] = {"error": None, "fetching": False, "fetched": None, "found": 0}
+# thermostat categories (wk: thermostat, wkf: radiator valve, wkcz: floor heating); other devices with a set
+# temperature (qn: heater, e.g. infrared panels) become a heater with a set temperature
+TUYA_THERMOSTAT_CATS = {"wk", "wkf", "wkcz"}
+# function codes per role: the first code the device has wins. Tuya products use different codes for the same
+# thing, so the DP number always comes from the device's own mapping, never from a fixed list.
+TUYA_ROLES: dict[str, tuple[str, ...]] = {
+    "switch": ("switch", "switch_1", "power", "Power"),
+    "temp_set": ("temp_set", "set_temp", "TempSet", "temp_set_c"),
+    "temp_current": ("temp_current", "temp_indoor", "current_temp", "TempCurrent", "temp_current_c"),
+    "temp_floor": ("temp_floor", "floor_temp", "temp_current_external", "temp_sensor", "floortemp",
+                   "temp_floor_current", "temp_current_floor"),
+    "mode": ("mode", "Mode", "work_mode"),
+    "child_lock": ("child_lock", "lock", "ChildLock", "childlock"),
+    "eco": ("eco", "eco_mode", "Eco"),
+    "work_state": ("work_state", "valve_state", "heating_state", "valve", "work_status"),
+    "upper_temp": ("upper_temp", "temp_upper", "upper_limit", "max_temp", "temp_set_max"),
+    "lower_temp": ("lower_temp", "temp_lower", "lower_limit", "min_temp", "temp_set_min"),
+    "unit": ("temp_unit_convert", "c_f", "temp_unit"),
+}
+# Tuya mode value (lower case) -> SmartThings thermostatMode. A value that is not here is not offered.
+TUYA_MODE_TO_ST = {"auto": "auto", "program": "auto", "programming": "auto", "schedule": "auto", "smart": "auto",
+                   "manual": "heat", "hand": "heat", "hold": "heat", "temp_hold": "heat", "constant": "heat",
+                   "comfort": "heat", "holiday": "away", "away": "away", "leave": "away", "eco": "eco",
+                   "energy": "eco", "frost": "frostguard", "anti_frost": "frostguard", "antifreeze": "frostguard",
+                   "freeze": "frostguard"}
+TUYA_HEATING = {"heating", "heat", "warming", "open", "opened", "on", "working", "start", "true", "1"}
+
+
+def tuya_cloud_configured(t: dict[str, Any]) -> bool:
+    return bool(t.get("api_key") and t.get("api_secret"))
+
+
+def mask(s: Any) -> str:
+    """A key or id as it may be shown: the first and last two characters only."""
+    s = str(s or "")
+    return (s[:2] + "..." + s[-2:]) if len(s) > 8 else "..."
+
+
+def tuya_functions(mapping: Any) -> dict[str, dict[str, Any]]:
+    """Function code -> {"dp", "code", "type", "values"} from a tinytuya mapping ({dp: {code, type, values}}) or
+    from the cloud specification ({"status": [...], "functions": [...]} with dp_id; values as JSON text)."""
+    out: dict[str, dict[str, Any]] = {}
+    if not isinstance(mapping, dict):
+        return out
+    items: list[tuple[str, dict[str, Any]]] = []
+    if isinstance(mapping.get("status"), list) or isinstance(mapping.get("functions"), list):
+        for m in list(mapping.get("functions") or []) + list(mapping.get("status") or []):
+            if isinstance(m, dict) and m.get("code") is not None and m.get("dp_id") is not None:
+                items.append((str(m["dp_id"]), m))
+    else:
+        items = [(str(dp), m) for dp, m in mapping.items() if isinstance(m, dict) and m.get("code")]
+    for dp, m in items:
+        values = m.get("values")
+        if isinstance(values, str):
+            try:
+                values = json.loads(values)
+            except ValueError:
+                values = {}
+        code = str(m["code"])
+        out.setdefault(code, {"dp": dp, "code": code, "type": str(m.get("type") or "").lower(),
+                              "values": values if isinstance(values, dict) else {}})
+    return out
+
+
+def tuya_roles(funcs: dict[str, dict[str, Any]], override: Any = None) -> dict[str, dict[str, Any]]:
+    """Role (switch, temp_set, ...) -> function, by code. Config "dps" overrides per role, as a DP number or
+    {"dp", "scale", "min", "max", "step"} (for devices without a mapping from the cloud)."""
+    roles: dict[str, dict[str, Any]] = {}
+    for role, codes in TUYA_ROLES.items():
+        for c in codes:
+            if c in funcs:
+                roles[role] = funcs[c]
+                break
+    for role, v in (override or {}).items() if isinstance(override, dict) else ():
+        if role not in TUYA_ROLES:
+            continue
+        info = v if isinstance(v, dict) else {"dp": v}
+        if info.get("dp") is None:
+            continue
+        base = dict(roles.get(role) or {"code": role, "type": "", "values": {}})
+        vals = dict(base.get("values") or {})
+        vals.update({k: info[k] for k in ("scale", "min", "max", "step", "range") if k in info})
+        roles[role] = dict(base, dp=str(info["dp"]), values=vals)
+    if not funcs and "switch" not in roles:
+        roles["switch"] = {"dp": "1", "code": "switch", "type": "boolean", "values": {}}  # DP 1 is on/off
+    return roles
+
+
+def _tuya_scale(info: dict[str, Any]) -> int:
+    try:
+        return max(0, min(4, int((info.get("values") or {}).get("scale", 0))))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _tuya_unit_f(roles: dict[str, dict[str, Any]], dps: dict[str, Any]) -> bool:
+    u = roles.get("unit")
+    return bool(u) and str(dps.get(u["dp"], "")).lower() in ("f", "fahrenheit")
+
+
+def tuya_decode_temp(raw: Any, info: dict[str, Any], unit_f: bool = False) -> float | None:
+    """A temperature DP in °C: scale 1 means the value is in tenths (215 = 21.5 °C)."""
+    if isinstance(raw, bool):
+        return None
+    try:
+        v = float(raw) / (10 ** _tuya_scale(info))
+    except (TypeError, ValueError):
+        return None
+    if unit_f:
+        v = (v - 32) * 5 / 9
+    return round(v, 1)
+
+
+def tuya_setpoint_range(roles: dict[str, dict[str, Any]], dps: dict[str, Any]) -> tuple[float, float, float] | None:
+    """(min, max, step) in °C of the set temperature: from the spec, narrowed by the upper and lower limits the
+    device reports (those can be changed on the thermostat itself)."""
+    info = roles.get("temp_set")
+    if not info:
+        return None
+    v, s = info.get("values") or {}, _tuya_scale(info)
+    unit_f = _tuya_unit_f(roles, dps)
+    try:
+        lo = float(v.get("min", 5 * 10 ** s)) / 10 ** s
+        hi = float(v.get("max", 35 * 10 ** s)) / 10 ** s
+        step = max(1, int(v.get("step", 1))) / 10 ** s
+    except (TypeError, ValueError):
+        lo, hi, step = 5.0, 35.0, 1.0 / 10 ** s
+    if unit_f:
+        lo, hi = (lo - 32) * 5 / 9, (hi - 32) * 5 / 9
+    for role, pick in (("lower_temp", max), ("upper_temp", min)):
+        r = roles.get(role)
+        t = tuya_decode_temp(dps.get(r["dp"]), r, unit_f) if r else None
+        if t is not None and lo <= t <= hi:
+            if role == "lower_temp":
+                lo = pick(lo, t)
+            else:
+                hi = pick(hi, t)
+    if step < 0.5 and not unit_f:
+        step = 0.5 if s else 1.0  # SmartThings shows 0.1 steps as a long slider; the device still gets its own step
+    return round(lo, 1), round(hi, 1), step
+
+
+def tuya_encode_temp(c: float, roles: dict[str, dict[str, Any]], dps: dict[str, Any]) -> int:
+    """°C from SmartThings -> the raw set temperature: rounded to the device step, kept within min and max."""
+    info = roles["temp_set"]
+    v, s = info.get("values") or {}, _tuya_scale(info)
+    unit_f = _tuya_unit_f(roles, dps)
+    rng = tuya_setpoint_range(roles, dps)
+    if rng:
+        c = max(rng[0], min(rng[1], float(c)))
+    val = float(c) * 9 / 5 + 32 if unit_f else float(c)
+    try:
+        step_raw = max(1, int(v.get("step", 1)))
+    except (TypeError, ValueError):
+        step_raw = 1
+    raw = int(round(round(val * 10 ** s / step_raw) * step_raw))
+    try:
+        raw = max(int(v["min"]), raw) if "min" in v else raw
+        raw = min(int(v["max"]), raw) if "max" in v else raw
+    except (TypeError, ValueError):
+        pass
+    return raw
+
+
+def tuya_mode_values(roles: dict[str, dict[str, Any]]) -> list[str]:
+    info = roles.get("mode")
+    if not info:
+        return []
+    rng = (info.get("values") or {}).get("range")
+    return [str(x) for x in rng] if isinstance(rng, list) else []
+
+
+def tuya_modes(roles: dict[str, dict[str, Any]]) -> dict[str, str]:
+    """SmartThings thermostatMode -> Tuya mode value (the first Tuya value wins when two map to the same mode)."""
+    out: dict[str, str] = {}
+    for val in tuya_mode_values(roles):
+        st = TUYA_MODE_TO_ST.get(val.lower())
+        if st and st not in out:
+            out[st] = val
+    return out
+
+
+def tuya_kind(d: dict[str, Any], roles: dict[str, dict[str, Any]]) -> str:
+    """tuya_thermostat (a thermostat category, or a set temperature with modes) or tuya_heater (on/off, maybe a
+    room temperature and a set temperature, like an infrared panel). Config "type" decides when set."""
+    want = str(d.get("type") or "").lower()
+    if want in ("thermostat", "heater"):
+        return "tuya_" + want
+    cat = str(d.get("category") or "").lower()
+    if "temp_set" in roles and (cat in TUYA_THERMOSTAT_CATS or (not cat and "mode" in roles)):
+        return "tuya_thermostat"
+    return "tuya_heater"
+
+
+def tuya_state(kind: str, roles: dict[str, dict[str, Any]], dps: dict[str, Any]) -> dict[str, Any]:
+    """What the Edge driver gets for one Tuya device, from its DP values."""
+    unit_f = _tuya_unit_f(roles, dps)
+
+    def val(role):
+        r = roles.get(role)
+        return dps.get(r["dp"]) if r else None
+
+    def temp(role):
+        r = roles.get(role)
+        return tuya_decode_temp(dps.get(r["dp"]), r, unit_f) if r and r["dp"] in dps else None
+
+    st: dict[str, Any] = {}
+    on = val("switch")
+    st["power"] = "off" if on is False else "on"
+    for key, role in (("temperature", "temp_current"), ("setpoint", "temp_set")):
+        t = temp(role)
+        if t is not None:
+            st[key] = t
+    rng = tuya_setpoint_range(roles, dps)
+    if rng:
+        st["setpointRange"], st["setpointStep"] = [rng[0], rng[1]], rng[2]
+    if kind == "tuya_heater":
+        st["hasSetpoint"] = "temp_set" in roles
+        return st
+    floor = temp("temp_floor")
+    st["hasFloor"] = "temp_floor" in roles
+    if floor is not None:
+        st["floorTemperature"] = floor
+    lock = val("child_lock")
+    st["hasChildLock"] = "child_lock" in roles
+    if isinstance(lock, bool):
+        st["childLock"] = lock
+    eco = val("eco")
+    if isinstance(eco, bool):
+        st["eco"] = eco
+    modes = tuya_modes(roles)
+    supported = (["off"] if "switch" in roles else []) + [m for m in modes]
+    if "eco" in roles and "eco" not in supported:
+        supported.append("eco")
+    if "heat" not in supported:
+        supported.insert(1 if supported[:1] == ["off"] else 0, "heat")  # no manual mode: heat means on
+    st["supportedModes"] = supported
+    raw = val("mode")
+    st["tuyaMode"] = None if raw is None else str(raw)
+    if st["power"] == "off":
+        st["mode"] = "off"
+    elif eco is True:
+        st["mode"] = "eco"
+    else:
+        st["mode"] = TUYA_MODE_TO_ST.get(str(raw or "").lower(), "heat")
+    ws = val("work_state")
+    if ws is not None:
+        heating = str(ws).lower() in TUYA_HEATING
+        st["operatingStateFrom"] = "device"
+    else:
+        # no valve or work state DP: an estimate from room and set temperature
+        t = st.get("floorTemperature") if st.get("temperature") is None else st.get("temperature")
+        heating = t is not None and st.get("setpoint") is not None and t < st["setpoint"]
+        st["operatingStateFrom"] = "estimate"
+    st["operatingState"] = "heating" if st["power"] == "on" and heating else "idle"
+    return st
+
+
+def tuya_command(cmd: str, value: Any, roles: dict[str, dict[str, Any]], dps: dict[str, Any]) -> dict[str, Any]:
+    """The DP values to send for a command from SmartThings (raises ValueError for what the device can not do)."""
+    def need(role):
+        if role not in roles:
+            raise ValueError(f"this device has no {role.replace('_', ' ')}")
+        return roles[role]["dp"]
+
+    def on_too(out):
+        if "switch" in roles and dps.get(roles["switch"]["dp"]) is False:
+            out[roles["switch"]["dp"]] = True
+        return out
+
+    if cmd in ("on", "off"):
+        return {need("switch"): cmd == "on"}
+    if cmd == "setpoint":
+        try:
+            c = float(value)
+        except (TypeError, ValueError):
+            raise ValueError("setpoint must be a number (°C)") from None
+        return {need("temp_set"): tuya_encode_temp(c, roles, dps)}
+    if cmd in ("child_lock", "eco"):
+        on = value is True or str(value).lower() in ("1", "true", "on", "locked")
+        return {need(cmd): on}
+    if cmd == "mode":
+        m = str(value or "")
+        if m == "off":
+            return {need("switch"): False}
+        modes = tuya_modes(roles)
+        out: dict[str, Any] = {}
+        if m == "eco" and "eco" not in modes:
+            out[need("eco")] = True
+            return on_too(out)
+        if m in modes:
+            out[need("mode")] = modes[m]
+        elif m != "heat":
+            raise ValueError(f"mode {m} not supported by this device")
+        eco = roles.get("eco")
+        if eco and dps.get(eco["dp"]) is True and m != "eco":
+            out[eco["dp"]] = False
+        return on_too(out)
+    raise ValueError(f"unsupported command {cmd}")
+
+
+def tuya_devices(t: dict[str, Any]) -> list[dict[str, Any]]:
+    """Devices from the cloud fetch and the manual list in config (same id: the manual fields win when set)."""
+    by_id: dict[str, dict[str, Any]] = {}
+    for d in list(t.get("cloud_devices") or []) + list(t.get("devices") or []):
+        if not isinstance(d, dict) or not d.get("id"):
+            continue
+        cur = by_id.setdefault(str(d["id"]), {})
+        cur.update({k: v for k, v in d.items() if v not in (None, "", "auto")})
+    ips = t.get("ips") or {}
+    out = []
+    for dev_id, d in by_id.items():
+        d["id"] = dev_id
+        if not d.get("key") or d.get("sub"):  # a device behind a gateway has no local key of its own
+            continue
+        found = ips.get(dev_id) or {}
+        d.setdefault("found_ip", found.get("ip"))
+        d.setdefault("found_version", found.get("version"))
+        out.append(d)
+    return out
+
+
+def tuya_cloud_fetch(region: str, api_key: str, api_secret: str) -> list[dict[str, Any]]:
+    """One call to the Tuya IoT Platform: devices with their local keys and DP mapping (blocking)."""
+    import tinytuya
+    try:
+        cloud = tinytuya.Cloud(apiRegion=region, apiKey=api_key, apiSecret=api_secret)
+    except TypeError:
+        raise ValueError("Access ID and Access Secret are required") from None
+    if getattr(cloud, "error", None):
+        raise ValueError("Tuya cloud refused the login: " + str((cloud.error or {}).get("Payload") or cloud.error)[:200])
+    devs = cloud.getdevices(verbose=False, include_map=True)
+    if isinstance(devs, dict):
+        raise ValueError("Tuya cloud: " + str(devs.get("Payload") or devs.get("Error") or devs)[:200])
+    keep = ("id", "name", "key", "category", "product_id", "product_name", "mapping", "sub", "mac")
+    return [{k: d[k] for k in keep if k in d} for d in devs or [] if isinstance(d, dict) and d.get("id")]
+
+
+class TuyaLocal:
+    """Tuya WiFi devices on the LAN (tinytuya). Devices: config "tuya": {"cloud_devices": [...]} (filled by Fetch
+    devices on the setup page) and/or {"devices": [{id, key, name, ip, version, dps}]} by hand; ip and version
+    "auto" are found with a UDP broadcast scan and kept in "ips". One local call at a time per device, in a thread
+    (tinytuya blocks). Local keys never go to the log, the setup page or SmartThings."""
+
+    def __init__(self, cfg: dict[str, Any]) -> None:
+        self.t = dict(cfg.get("tuya") or {})
+        self.devices = tuya_devices(self.t)
+        self.locks: dict[str, asyncio.Lock] = {}
+        self.conns: dict[str, Any] = {}
+        self.dps: dict[str, dict[str, Any]] = {}
+        self.roles: dict[str, dict[str, dict[str, Any]]] = {}
+        self.kinds: dict[str, str] = {}
+        self.wake: dict[str, asyncio.Event] = {}
+        self.fails: dict[str, int] = {}
+        self.scan_lock = asyncio.Lock()
+        self.last_scan = -1e9
+
+    @staticmethod
+    def dev_id(tuya_id: str) -> str:
+        return "tuya-" + tuya_id
+
+    async def _call(self, fn, *args, timeout: float = TUYA_TIMEOUT):
+        return await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(None, fn, *args), timeout)
+
+    async def fetch_cloud(self) -> int:
+        """Fetch the device list, local keys and DP mapping once and keep them in config.json."""
+        t = self.t
+        TUYA.update(fetching=True, error=None)
+        try:
+            devs = await self._call(tuya_cloud_fetch, str(t.get("region") or "eu"), str(t["api_key"]),
+                                    str(t["api_secret"]), timeout=120)
+        except Exception as ex:  # noqa: BLE001
+            TUYA.update(fetching=False, error=safe_err(ex))
+            log.warning("[tuya] fetching the devices from the Tuya cloud failed: %s", safe_err(ex))
+            cfg = load_config()
+            cfg.setdefault("tuya", {}).pop("fetch", None)
+            save_config(cfg)
+            return 0
+        cfg = load_config()
+        tc = cfg.setdefault("tuya", {})
+        tc["cloud_devices"] = devs
+        tc["fetched"] = int(time.time())
+        tc.pop("fetch", None)
+        save_config(cfg)
+        self.t = dict(tc)
+        TUYA.update(fetching=False, fetched=tc["fetched"], error=None)
+        log.info("[tuya] %d device(s) fetched from the Tuya cloud: %s", len(devs),
+                 ", ".join(f"{d.get('name')} ({d.get('category') or '?'})" for d in devs))
+        return len(devs)
+
+    def _scan(self, wanted: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        from tinytuya import scanner
+        found = scanner.devices(verbose=False, scantime=TUYA_SCAN_SECS, color=False, poll=False, forcescan=False,
+                                byID=True, discover=True, wantids=[d["id"] for d in wanted],
+                                tuyadevices=[{"id": d["id"], "key": d["key"], "name": d.get("name", "")}
+                                             for d in wanted])
+        return {k: v for k, v in (found or {}).items() if isinstance(v, dict) and v.get("ip")}
+
+    async def discover(self, force: bool = False) -> None:
+        """UDP broadcast scan for the devices with ip or version "auto"; found addresses are kept in config."""
+        async with self.scan_lock:
+            if not force and time.monotonic() - self.last_scan < TUYA_RESCAN:
+                return
+            self.last_scan = time.monotonic()
+            wanted = [d for d in self.devices if not d.get("ip") or not d.get("version")]
+            if not wanted:
+                return
+            try:
+                found = await self._call(self._scan, wanted, timeout=TUYA_SCAN_SECS + 20)
+            except Exception as ex:  # noqa: BLE001
+                log.warning("[tuya] scan: %s", safe_err(ex))
+                return
+            TUYA["found"] = len(found)
+            if not found:
+                log.info("[tuya] scan found none of %d device(s) (needs UDP 6666/6667/7000 from the devices: same "
+                         "network, Docker with host networking)", len(wanted))
+                return
+            cfg = load_config()
+            ips = cfg.setdefault("tuya", {}).setdefault("ips", {})
+            changed = False
+            for d in wanted:
+                f = found.get(d["id"])
+                if not f:
+                    continue
+                new = {"ip": str(f["ip"]), "version": str(f.get("version") or "")}
+                if d.get("found_ip") != new["ip"] or str(d.get("found_version")) != new["version"]:
+                    log.info("[tuya] %s at %s (protocol %s)", d.get("name") or mask(d["id"]), new["ip"],
+                             new["version"] or "?")
+                    self._drop(d["id"])  # connect again at the new address
+                d["found_ip"], d["found_version"] = new["ip"], new["version"]
+                if ips.get(d["id"]) != new:
+                    ips[d["id"]] = new
+                    changed = True
+            if changed:
+                save_config(cfg)
+
+    @staticmethod
+    def address(d: dict[str, Any]) -> tuple[str | None, str | None]:
+        return (d.get("ip") or d.get("found_ip") or None), str(d.get("version") or d.get("found_version") or "") or None
+
+    def _device(self, d: dict[str, Any]):
+        """The tinytuya device, kept open between calls (persistent socket); made again after an error."""
+        dev = self.conns.get(d["id"])
+        if dev is None:
+            import tinytuya
+            ip, ver = self.address(d)
+            if not ip:
+                raise ConnectionError("address not found yet (scan)")
+            dev = tinytuya.Device(d["id"], address=ip, local_key=d["key"], version=float(ver or 3.3), persist=True,
+                                  connection_timeout=5, connection_retry_limit=2, connection_retry_delay=1)
+            self.conns[d["id"]] = dev
+        return dev
+
+    def _drop(self, tuya_id: str) -> None:
+        dev = self.conns.pop(tuya_id, None)
+        if dev is not None:
+            try:
+                dev.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    @staticmethod
+    def _check(resp: Any) -> dict[str, Any]:
+        """tinytuya returns errors as {"Error", "Err"} instead of raising."""
+        if isinstance(resp, dict) and resp.get("Error"):
+            code = str(resp.get("Err") or "")
+            hint = " (wrong local key or protocol version?)" if code in ("914", "904") else ""
+            raise ConnectionError(f"{resp['Error']} {code}".strip() + hint)
+        return resp if isinstance(resp, dict) else {}
+
+    def _status(self, d: dict[str, Any]) -> dict[str, Any]:
+        return self._check(self._device(d).status())
+
+    def _set(self, d: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
+        dev = self._device(d)
+        if len(values) == 1:
+            dp, v = next(iter(values.items()))
+            return self._check(dev.set_value(dp, v))
+        return self._check(dev.set_multiple_values(values))
+
+    def _update(self, d: dict[str, Any], resp: dict[str, Any]) -> None:
+        tid = d["id"]
+        new = resp.get("dps")
+        if isinstance(new, dict):
+            self.dps.setdefault(tid, {}).update({str(k): v for k, v in new.items()})
+        st = tuya_state(self.kinds[tid], self.roles[tid], self.dps.get(tid) or {})
+        REG.upsert(self.dev_id(tid), self.kinds[tid], str(d.get("name") or "Tuya"), st, online=True)
+
+    async def read(self, d: dict[str, Any]) -> None:
+        tid = d["id"]
+        async with self.locks[tid]:
+            try:
+                resp = await self._call(self._status, d)
+            except BaseException:
+                self._drop(tid)
+                raise
+            self._update(d, resp)
+
+    def _command(self, d: dict[str, Any]):
+        tid = d["id"]
+
+        async def handler(cmd: str, value: Any) -> None:
+            if cmd == "refresh":
+                self.wake[tid].set()
+                return
+            values = tuya_command(cmd, value, self.roles[tid], self.dps.get(tid) or {})
+            if not values:  # already so (e.g. heat on a device that is on and has no modes)
+                return
+            async with self.locks[tid]:
+                try:
+                    resp = await self._call(self._set, d, values)
+                except BaseException:
+                    self._drop(tid)
+                    raise
+                # the answer has the changed DPs; show them now, the next status read confirms the rest
+                if not isinstance(resp.get("dps"), dict):
+                    resp = {"dps": values}
+                self._update(d, resp)
+            log.info("[tuya] %s %s %s", d.get("name") or mask(tid), cmd, "" if value is None else value)
+            self.wake[tid].set()
+        return handler
+
+    def _info(self, d: dict[str, Any]) -> str:
+        ip, ver = self.address(d)
+        roles = self.roles.get(d["id"]) or {}
+        codes = ", ".join(f"{r} {roles[r]['code']} (DP {roles[r]['dp']})" for r in TUYA_ROLES if r in roles)
+        return (f"{ip or 'address not found yet'}, protocol {ver or '?'}, category {d.get('category') or '?'}; "
+                f"{codes or 'no data points known'}")
+
+    def add(self, d: dict[str, Any]) -> str:
+        """Register a device: its data points by function code, its kind and its command handler."""
+        tid = d["id"]
+        self.roles[tid] = tuya_roles(tuya_functions(d.get("mapping")), d.get("dps"))
+        kind = self.kinds[tid] = tuya_kind(d, self.roles[tid])
+        self.locks[tid] = asyncio.Lock()
+        self.wake[tid] = asyncio.Event()
+        REG.upsert(self.dev_id(tid), kind, str(d.get("name") or "Tuya " + mask(tid)), {}, online=False,
+                   handler=self._command(d))
+        return tid
+
+    async def poll_once(self, d: dict[str, Any]) -> float:
+        """One status read. Offline after TUYA_OFFLINE_AFTER failures in a row; returns the seconds until the
+        next read (30 s with a few seconds jitter, longer after failures)."""
+        tid = d["id"]
+        dev_id = self.dev_id(tid)
+        name = str(d.get("name") or "Tuya " + mask(tid))
+        if not self.address(d)[0]:
+            await self.discover()
+        try:
+            await self.read(d)
+            if self.fails.get(tid):
+                log.info("[tuya] %s: answering again", name)
+            self.fails[tid] = 0
+        except Exception as ex:  # noqa: BLE001
+            n = self.fails[tid] = self.fails.get(tid, 0) + 1
+            log.info("[tuya] %s: %s (%d in a row)", name, safe_err(ex) or type(ex).__name__, n)
+            if n >= TUYA_OFFLINE_AFTER and dev_id in REG.devices:
+                REG.devices[dev_id]["online"] = False
+            if n >= 2 and not d.get("ip"):
+                await self.discover()  # the router may have given it another address
+        REG.info[dev_id] = self._info(d)
+        n = self.fails.get(tid, 0)
+        return TUYA_POLL + random.uniform(-3, 3) if not n else min(300, TUYA_POLL * 2 ** min(n - 1, 4))
+
+    async def _run_one(self, d: dict[str, Any]) -> None:
+        tid = self.add(d)
+        wake = self.wake[tid]
+        await asyncio.sleep(random.uniform(0, 5))  # not all devices at the same moment
+        while True:
+            wait = await self.poll_once(d)
+            try:
+                await asyncio.wait_for(wake.wait(), wait)
+                await asyncio.sleep(1)
+            except asyncio.TimeoutError:
+                pass
+            wake.clear()
+
+    async def run(self) -> None:
+        logging.getLogger("tinytuya").setLevel(logging.WARNING)  # its debug lines can carry the local key
+        if tuya_cloud_configured(self.t) and (self.t.get("fetch") or not self.t.get("cloud_devices")):
+            await self.fetch_cloud()
+            self.devices = tuya_devices(self.t)
+        if not self.devices:
+            if tuya_cloud_configured(self.t) or self.t.get("devices"):
+                log.info("[tuya] no devices with a local key (fetch devices on the setup page)")
+            return
+        log.info("[tuya] %d device(s): %s", len(self.devices),
+                 ", ".join(f"{d.get('name') or mask(d['id'])} ({d.get('category') or '?'})" for d in self.devices))
+        if any(not d.get("ip") or not d.get("version") for d in self.devices):
+            await self.discover(force=True)
+        await asyncio.gather(*(self._run_one(d) for d in self.devices))
+
+
 def _ss_short(v: Any, n: int = 600) -> str:
     t = json.dumps(v, default=lambda o: o.hex() if isinstance(o, (bytes, bytearray)) else str(o))
     return t if len(t) <= n else t[:n] + "..."
@@ -3162,6 +3773,22 @@ Open-Meteo everywhere else. Also available on the Buienradar device in SmartThin
 <label>Radius in meters (0 = only this address, max 25000)</label><input name="radius_m" type="number" min="0" max="25000" value="{rain_radius}">
 <label>Rain from (mm/h)</label><input name="threshold" value="{rain_thr}">
 <button type="submit">Save rain radar</button></form>
+<h3>Tuya / Smart Life (optional, local)</h3>
+<p>Thermostats and heaters from the Smart Life (or Tuya Smart) app, controlled on the LAN. On <b>iot.tuya.com</b>
+create a cloud project (data center of your app account, e.g. Central Europe), link your Smart Life app account
+with its QR code (Devices, Link App Account) and copy the Access ID and Access Secret from the project overview.
+The bridge asks the Tuya cloud once for your devices, their local keys and data points; after that everything is
+local. Keys stay in config.json and are never shown here.</p>
+<p>{tuya_saved}</p>
+<form method="post"><input type="hidden" name="section" value="tuya">
+<label>Access ID</label><input name="api_key" autocomplete="off" required>
+<label>Access Secret</label><input name="api_secret" type="password" autocomplete="off" required>
+<label>Region (data center)</label><select name="region"><option value="eu"{tuya_r_eu}>Europe</option>
+<option value="us"{tuya_r_us}>Americas</option><option value="cn"{tuya_r_cn}>China</option>
+<option value="in"{tuya_r_in}>India</option></select>
+<button type="submit">Save Tuya and fetch devices</button></form>
+<form method="post"><input type="hidden" name="section" value="tuya_fetch">
+<button type="submit">Fetch devices again (new device, new key after a reset)</button></form>
 <h3>VELUX ACTIVE departure mode (optional)</h3>
 <p>To lock and unlock (departure mode: all windows and blinds blocked) from SmartThings.
 The windows themselves keep running locally over HomeKit. Email and password of the VELUX ACTIVE app.</p>
@@ -3316,6 +3943,27 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
                 for d in hcs))
         elif homeconnect_configured():
             lines.append("Home Connect: profiles found, starting (needs Python 3.13, see bridge.log).")
+        t = cfg.get("tuya") or {}
+        tds = [d for d in REG.devices.values() if d["type"] in ("tuya_thermostat", "tuya_heater")]
+        if TUYA.get("fetching"):
+            lines.append("Tuya: fetching the devices from the Tuya cloud...")
+        elif TUYA.get("error"):
+            lines.append("Tuya cloud: " + str(TUYA["error"]))
+        if tuya_cloud_configured(t) or t.get("devices") or tds:
+            fetched = t.get("fetched")
+            lines.append(f"Tuya: {len(t.get('cloud_devices') or [])} device(s) from the cloud"
+                         + (time.strftime(" (fetched %Y-%m-%d %H:%M)", time.localtime(fetched)) if fetched else "")
+                         + f", {len(t.get('devices') or [])} by hand in config.json")
+        for d in tds:
+            s_ = d["state"]
+            temp = s_.get("temperature")
+            lines.append(f"Tuya {d['name']}: {'online' if d.get('online') else 'offline'}, {s_.get('power', '?')}"
+                         + (f", {temp} °C" if temp is not None else "")
+                         + (f", set {s_['setpoint']} °C" if s_.get("setpoint") is not None else "")
+                         + (f", {s_['mode']}" if s_.get("mode") else "")
+                         + (f"; {REG.info[d['id']]}" if REG.info.get(d["id"]) else ""))
+            if REG.commands.get(d["id"]):
+                lines.append(f"Tuya {d['name']} last commands from SmartThings: " + "; ".join(REG.commands[d["id"]]))
         v = cfg.get("velux") or {}
         if velux_configured(v):
             locks = [d for d in REG.devices.values() if d["type"] == "velux_lock"]
@@ -3406,6 +4054,11 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             return key_page()
         k = load_config().get("skoda") or {}
         rb = load_config().get("buienradar") or {}
+        tu = load_config().get("tuya") or {}
+        tuya_region = str(tu.get("region") or "eu")
+        # only a masked Access ID: the secret and the local keys never go into the page
+        tuya_saved = (f"Saved: Access ID {mask(tu.get('api_key'))}, region {tuya_region}. Enter both again to change "
+                      "them." if tuya_cloud_configured(tu) else "Not set up yet.")
         pairing_open = PAIRING["until"] > time.time()
         reqs = "".join(
             '<form method="post"><input type="hidden" name="section" value="api_allow">'
@@ -3431,7 +4084,10 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
                 .replace("{rain_p_openmeteo}", " selected" if rb.get("provider") == "openmeteo" else "")
                 .replace("{rain_radius}", html.escape(str(rb.get("radius_m", int(float(rb.get("radius_km") or 0) * 1000)))))
                 .replace("{rain_thr}", html.escape(str(rb.get("threshold", RAIN_THRESHOLD))))
-                .replace("{velux_ip}", html.escape(str((load_config().get("velux") or {}).get("gateway_ip", "")))))
+                .replace("{velux_ip}", html.escape(str((load_config().get("velux") or {}).get("gateway_ip", ""))))
+                .replace("{tuya_saved}", html.escape(tuya_saved)))
+        for r in TUYA_REGIONS:
+            page = page.replace("{tuya_r_" + r + "}", " selected" if tuya_region == r else "")
         return web.Response(text=page, content_type="text/html")
 
     async def setup_post(req):
@@ -3532,6 +4188,24 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
                 asyncio.get_running_loop().create_task(src.pair(ip))
             await asyncio.sleep(3)
             raise web.HTTPFound("/setup")
+        elif section in ("tuya", "tuya_fetch"):
+            t = cfg.setdefault("tuya", {})
+            if section == "tuya":
+                key = "".join(str(form.get("api_key", "")).split())
+                secret = "".join(str(form.get("api_secret", "")).split())
+                region = str(form.get("region", "eu"))
+                if not (re.fullmatch(r"[A-Za-z0-9]{8,64}", key) and re.fullmatch(r"[A-Za-z0-9]{8,64}", secret)
+                        and region in TUYA_REGIONS):
+                    return web.Response(status=400, text="Access ID and Access Secret are letters and digits "
+                                                         "(copy them from the cloud project on iot.tuya.com)")
+                t.update(api_key=key, api_secret=secret, region=region)
+            elif not tuya_cloud_configured(t):
+                return web.Response(status=409, text="Save the Tuya Access ID and Access Secret first.")
+            t["fetch"] = True
+            save_config(cfg)
+            TUYA["error"] = None
+            log.info("[setup] Tuya %s", "login saved" if section == "tuya" else "fetch devices")
+            section = "tuya"
         elif section == "fglair":
             f = cfg.setdefault("fglair", {})
             f["username"] = str(form.get("username", "")).strip()
@@ -3824,6 +4498,34 @@ async def demo_devices() -> None:
         REG.upsert("demo-washer", "washer", "Demo washer", washer, True, demo_washer)
 
     await demo_washer("refresh", None)
+    # Tuya: the real mapping, state and command code on a floor heating thermostat and an infrared panel
+    tuya_demo = {
+        "demo-tuya-thermostat": ("tuya_thermostat", "Demo floor heating", {
+            "1": {"code": "switch", "type": "Boolean", "values": {}},
+            "2": {"code": "temp_set", "type": "Integer", "values": {"min": 50, "max": 350, "scale": 1, "step": 5}},
+            "3": {"code": "temp_current", "type": "Integer", "values": {"min": -100, "max": 500, "scale": 1}},
+            "4": {"code": "mode", "type": "Enum", "values": {"range": ["auto", "manual", "holiday"]}},
+            "5": {"code": "eco", "type": "Boolean", "values": {}},
+            "6": {"code": "child_lock", "type": "Boolean", "values": {}},
+            "36": {"code": "valve_state", "type": "Enum", "values": {"range": ["open", "close"]}},
+            "102": {"code": "temp_floor", "type": "Integer", "values": {"min": 0, "max": 990, "scale": 1}}},
+            {"1": True, "2": 215, "3": 198, "4": "manual", "5": False, "6": False, "36": "open", "102": 243}),
+        "demo-tuya-heater": ("tuya_heater", "Demo infrared panel", {
+            "1": {"code": "switch", "type": "Boolean", "values": {}},
+            "2": {"code": "temp_set", "type": "Integer", "values": {"min": 5, "max": 40, "scale": 0, "step": 1}},
+            "3": {"code": "temp_current", "type": "Integer", "values": {"min": -20, "max": 60, "scale": 0}}},
+            {"1": False, "2": 20, "3": 18}),
+    }
+
+    async def demo_tuya(dev, cmd, value):
+        kind, name, mapping, dps = tuya_demo[dev]
+        roles = tuya_roles(tuya_functions(mapping))
+        if cmd != "refresh":
+            dps.update(tuya_command(cmd, value, roles, dps))
+        REG.upsert(dev, kind, name, tuya_state(kind, roles, dps), True, lambda c, v, d=dev: demo_tuya(d, c, v))
+
+    for dev in tuya_demo:
+        await demo_tuya(dev, "refresh", None)
     await demo_hc("demo-dishwasher", dish, "refresh", None)
     await demo_hc("demo-oven", oven, "refresh", None)
     t0 = time.time()
@@ -3864,7 +4566,7 @@ async def serve(args) -> None:
     port = int(cfg.get("port", 8787))
     sources = {"aeg": Electrolux, "fglair": FGLair, "skoda": Skoda, "irobot": IRobotCloud, "velux": VeluxCloud,
                "buienradar": Buienradar, "homeconnect": HomeConnect,
-               "samsung": Samsung, "samsungtv": SamsungTV}
+               "samsung": Samsung, "samsungtv": SamsungTV, "tuya": TuyaLocal}
     tasks: dict[str, asyncio.Task] = {}
 
     def start(section: str) -> None:
@@ -4003,7 +4705,7 @@ def setup_logging(verbose: bool) -> None:
         sh = logging.StreamHandler(sys.stdout)
         sh.setFormatter(fmt)
         root.addHandler(sh)
-    for noisy in ("aiohttp.access",):
+    for noisy in ("aiohttp.access", "tinytuya"):  # tinytuya debug lines can carry a local key
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 

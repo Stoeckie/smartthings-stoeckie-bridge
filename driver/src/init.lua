@@ -17,6 +17,9 @@
 --   rainradar (Buienradar / Open-Meteo) -> rainSensor; detail: precipitationSensor + rainForecast (mm/h, minutes until
 --                                       rain, minutes of rain, summary); components dewNow / dewMax: outdoor dew
 --                                       point now and the highest in the next 48 h (temperatureMeasurement, routines)
+--   tuya_thermostat (Tuya, local)     -> switch, heating setpoint, room temperature, thermostatMode, heating/idle;
+--                                        components floor (floor temperature) and childLock (switch)
+--   tuya_heater (Tuya, local)         -> switch, room temperature, heating setpoint (profile -t, when it has one)
 local Driver = require "st.driver"
 local capabilities = require "st.capabilities"
 
@@ -86,7 +89,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-09i"
+local BUILD = "2026-11-09j"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -117,14 +120,20 @@ local windKmh = (function() local ok, c = pcall(function() return capabilities["
 local hcProg = capabilities["silvervalley08660.applianceProgram"]
 local cookSet = capabilities["silvervalley08660.cookSettings"]
 local washerProg = capabilities["silvervalley08660.washerProgram"]   -- Samsung washer courses
+-- Tuya thermostat and heater (standard capabilities only)
+local heatSetpoint = capabilities.thermostatHeatingSetpoint
+local tMode = capabilities.thermostatMode
+local tOpState = capabilities.thermostatOperatingState
+local tOpSupported = (function() local ok, a = pcall(function() return tOpState.supportedThermostatOperatingStates end); return ok and a or nil end)()
 
 local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor = "stoeckie-climate",
                   aircon = "stoeckie-aircon-v3", car = "stoeckie-car-v2",
                   velux_lock = "stoeckie-velux-lock", rain = "stoeckie-rain-v4",
                   rainradar = "stoeckie-rainradar-v3", dishwasher = "stoeckie-dishwasher-v2", oven = "stoeckie-oven-v2",
-                  washer = "stoeckie-washer-v3", tv = "stoeckie-tv" }
+                  washer = "stoeckie-washer-v3", tv = "stoeckie-tv",
+                  tuya_thermostat = "stoeckie-tuya-thermostat", tuya_heater = "stoeckie-tuya-heater" }
 local MANUFACTURER = { dryer = "AEG", aircon = "Fujitsu", car = "Skoda", dishwasher = "Home Connect", oven = "Home Connect",
-                       washer = "Samsung", tv = "Samsung" }
+                       washer = "Samsung", tv = "Samsung", tuya_thermostat = "Tuya", tuya_heater = "Tuya" }
 
 -- bridge value <-> SmartThings value
 local AC_MODE_TO_ST = { auto = "auto", cool = "cool", dry = "dry", fan = "fanOnly", heat = "heat", minheat = "minHeat" }
@@ -794,10 +803,67 @@ local function emit_oven(dev, s)
   hc_program(dev, s)
 end
 
+-- Tuya (Smart Life), local via the bridge. The profile follows what the device has (floor sensor, child lock,
+-- set temperature); the bridge type is not stored on the device, so the kind and these flags are kept as fields
+-- and the profile is switched when they change (see child_profile).
+local function tuya_profile_fields(dev, kind, flags)
+  local changed = dev:get_field("tuyaKind") ~= kind
+  for k, v in pairs(flags) do if (dev:get_field(k) == true) ~= v then changed = true end end
+  if not changed then return end
+  dev:set_field("tuyaKind", kind, { persist = true })
+  for k, v in pairs(flags) do dev:set_field(k, v, { persist = true }) end
+  sync_profile(dev)
+end
+
+local function tuya_common(dev, s)
+  try_emit(dev, function() return s.power == "off" and capabilities.switch.switch.off() or capabilities.switch.switch.on() end)
+  if tonumber(s.temperature) then
+    try_emit(dev, function() return capabilities.temperatureMeasurement.temperature({ value = tonumber(s.temperature), unit = "C" }) end)
+  end
+  if tonumber(s.setpoint) then
+    try_emit(dev, function() return heatSetpoint.heatingSetpoint({ value = tonumber(s.setpoint), unit = "C" }) end)
+  end
+  -- slider range and step from the device spec (and the limits set on the thermostat itself)
+  local r = s.setpointRange
+  if type(r) == "table" and tonumber(r[1]) and tonumber(r[2]) then
+    local step = tonumber(s.setpointStep) or 0.5
+    local enc = r[1] .. "-" .. r[2] .. "/" .. step
+    if dev:get_field("spRange") ~= enc and try_emit(dev, function()
+        return heatSetpoint.heatingSetpointRange({ value = { minimum = tonumber(r[1]), maximum = tonumber(r[2]), step = step }, unit = "C" })
+      end) then
+      dev:set_field("spRange", enc)
+    end
+  end
+end
+
+local function emit_tuya_thermostat(dev, s)
+  tuya_profile_fields(dev, "thermostat", { tuyaNoFloor = s.hasFloor == false, tuyaNoLock = s.hasChildLock == false })
+  tuya_common(dev, s)
+  if type(s.supportedModes) == "table" and #s.supportedModes > 0 then
+    emit_list(dev, "tuyaModes", s.supportedModes, tMode.supportedThermostatModes)
+  end
+  if s.mode then try_emit(dev, function() return tMode.thermostatMode(tostring(s.mode)) end) end
+  if tOpSupported then emit_list(dev, "tuyaOpStates", { "heating", "idle" }, tOpSupported) end
+  if s.operatingState then
+    try_emit(dev, function() return tOpState.thermostatOperatingState(s.operatingState == "heating" and "heating" or "idle") end)
+  end
+  if tonumber(s.floorTemperature) then
+    comp_emit(dev, "floor", function() return capabilities.temperatureMeasurement.temperature({ value = tonumber(s.floorTemperature), unit = "C" }) end)
+  end
+  if s.childLock ~= nil then
+    comp_emit(dev, "childLock", function() return s.childLock and capabilities.switch.switch.on() or capabilities.switch.switch.off() end)
+  end
+end
+
+local function emit_tuya_heater(dev, s)
+  tuya_profile_fields(dev, "heater", { tuyaSetpoint = s.hasSetpoint == true })
+  tuya_common(dev, s)
+end
+
 local EMIT = { dryer = emit_dryer, window = emit_window, sensor = emit_sensor, aircon = emit_aircon, car = emit_car,
                velux_lock = emit_velux_lock, rain = emit_rain,
                rainradar = emit_rainradar, dishwasher = emit_dishwasher, oven = emit_oven, washer = emit_washer,
-  tv = emit_tv }
+  tv = emit_tv, tuya_thermostat = emit_tuya_thermostat, tuya_heater = emit_tuya_heater }
 
 -- polling -------------------------------------------------------------------------
 
@@ -817,6 +883,17 @@ local function child_profile(key, device)
   end
   if key == "buienradar" or key == "demo-rainradar" then
     return PROFILE.rainradar .. (rain_simple(device) and "-simple" or "")
+  end
+  -- Tuya: known after the first state (emit sets the kind); until then the profile it was made with stays.
+  -- -nf: no floor sensor, -nl: no child lock; heater -t: with a set temperature
+  if key:match("^tuya%-") or key:match("^demo%-tuya%-") then
+    local kind = device:get_field("tuyaKind")
+    if kind == "thermostat" then
+      return PROFILE.tuya_thermostat .. (device:get_field("tuyaNoFloor") and "-nf" or "")
+        .. (device:get_field("tuyaNoLock") and "-nl" or "")
+    end
+    if kind == "heater" then return PROFILE.tuya_heater .. (device:get_field("tuyaSetpoint") and "-t" or "") end
+    return nil
   end
   -- -v3: course list + Start (own capability washerProgram; -v2 used applianceProgram)
   if key:match("^samsung%-") or key == "demo-washer" then return PROFILE.washer end
@@ -1016,7 +1093,7 @@ local function send(driver, child, cmd, value)
     return false
   end
   speed_up(driver, parent)
-  return true
+  return res
 end
 
 local function handle_refresh(driver, device)
@@ -1053,6 +1130,62 @@ local function handle_hc_machine(driver, device, cmd)
   elseif want == "run" or want == "running" then send(driver, device, "start") end  -- resumes when paused
 end
 
+-- Tuya commands: the bridge answers with the new state, which goes out right away (changed values only). A
+-- command for the value the app already shows sends no event, so the app would spin: that value is confirmed.
+local function is_tuya(device)
+  local key = device.parent_assigned_child_key or ""
+  return key:match("^tuya%-") ~= nil or key:match("^demo%-tuya%-") ~= nil
+end
+local function already_shown(dev, comp, ev)
+  local key = ev_key(comp, ev)
+  local c = key and EMIT_CACHE[dev.id] and EMIT_CACHE[dev.id][key]
+  if not c then return false end
+  local ok, enc = pcall(stjson.encode, { ev_state(ev), ev.visibility })
+  return ok and c.v == enc
+end
+local function tuya_send(driver, device, cmd, value, make)
+  local res = send(driver, device, cmd, value)
+  if not res then return false end
+  local d = type(res) == "table" and res.device or nil
+  local st = type(d) == "table" and type(d.state) == "table" and d.state or nil
+  if st and make then
+    local ok, ev, comp = pcall(make, st)
+    if ok and ev and already_shown(device, comp, ev) then confirm(function() push(device, comp, ev) end) end
+  end
+  if st and EMIT[d.type] then
+    local ok, err = pcall(EMIT[d.type], device, st)
+    if not ok then log.warn("[stbridge] " .. device.label .. ": " .. tostring(err)) end
+  end
+  return true
+end
+local function tuya_switch(driver, device, comp, on)
+  if comp == "childLock" then
+    local c = device.profile and device.profile.components and device.profile.components.childLock
+    return tuya_send(driver, device, "child_lock", on, function(st)
+      if st.childLock == nil or not c then return nil end
+      return st.childLock and capabilities.switch.switch.on() or capabilities.switch.switch.off(), c
+    end)
+  end
+  return tuya_send(driver, device, on and "on" or "off", nil, function(st)
+    return st.power == "off" and capabilities.switch.switch.off() or capabilities.switch.switch.on()
+  end)
+end
+-- °C; a value above 40 comes from a location set to °F
+local function tuya_setpoint(driver, device, cmd)
+  local v = tonumber(cmd.args.setpoint or cmd.args.temperature)
+  if not v then return end
+  if v > 40 then v = f_to_c(v) end
+  tuya_send(driver, device, "setpoint", v, function(st)
+    return tonumber(st.setpoint) and heatSetpoint.heatingSetpoint({ value = tonumber(st.setpoint), unit = "C" }) or nil
+  end)
+end
+local function tuya_mode(driver, device, m)
+  if m == "emergency heat" or m == "emergencyHeat" then m = "heat" end
+  tuya_send(driver, device, "mode", m, function(st)
+    return st.mode and tMode.thermostatMode(tostring(st.mode)) or nil
+  end)
+end
+
 -- order in which changes kept while an air conditioner was off are sent after switching on (mode first: on a
 -- Fujitsu a mode command also switches the unit on; a louver position after swing, as it ends swing)
 local PENDING_ORDER = { "setpoint", "fan", "swing", "vdir", "hdir" }
@@ -1066,6 +1199,7 @@ end
 local swing_toggle   -- below
 local function handle_switch_on(driver, device, cmd)
   local c = cmd and cmd.component
+  if is_tuya(device) then return tuya_switch(driver, device, c, true) end
   if c == "verticalSwing" or c == "horizontalSwing" then return swing_toggle(driver, device, c, true) end
   if c == "climate" then send(driver, device, "climate_on"); return end
   local pend = get_pending(device)
@@ -1099,6 +1233,7 @@ local function handle_switch_on(driver, device, cmd)
 end
 local function handle_switch_off(driver, device, cmd)
   local c = cmd and cmd.component
+  if is_tuya(device) then return tuya_switch(driver, device, c, false) end
   if c == "verticalSwing" or c == "horizontalSwing" then return swing_toggle(driver, device, c, false) end
   if c ~= "climate" then
     cancel_pending_timer(device)
@@ -1647,6 +1782,16 @@ local driver = Driver("stoeckie-bridge-local", {
     },
     [oscillation.ID] = {
       [oscillation.commands.setFanOscillationMode.NAME] = handle_oscillation,
+    },
+    [heatSetpoint.ID] = {
+      [heatSetpoint.commands.setHeatingSetpoint.NAME] = tuya_setpoint,
+    },
+    [tMode.ID] = {
+      [tMode.commands.setThermostatMode.NAME] = function(driver, device, cmd) tuya_mode(driver, device, cmd.args.mode) end,
+      heat = function(driver, device) tuya_mode(driver, device, "heat") end,
+      auto = function(driver, device) tuya_mode(driver, device, "auto") end,
+      off = function(driver, device) tuya_mode(driver, device, "off") end,
+      emergencyHeat = function(driver, device) tuya_mode(driver, device, "heat") end,
     },
   },
 })

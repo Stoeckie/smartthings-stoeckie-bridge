@@ -543,6 +543,10 @@ charset-normalizer==3.5.2 \
     --hash=sha256:fd1fbe0f116b6e55da77aca2c6ddcddcfac2186cbf78bdebf40fc156efca389d \
     --hash=sha256:fe9753dfee015c570d73df76f899f18444d41388bffcde097deba51c4fadbb9f
     # via requests
+colorama==0.4.6 \
+    --hash=sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44 \
+    --hash=sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6
+    # via tinytuya
 cryptography==50.0.2 \
     --hash=sha256:0ddc924c04591c2811ca024d62ecad4f7f6f08af8939c211438f48a16bd23602 \
     --hash=sha256:0ec5f09541743261e66e291b4a0cbf0fb2997aeaab6d9e9c740b9dba1b58d1c2 \
@@ -607,6 +611,7 @@ cryptography==50.0.2 \
     #   -r requirements.in
     #   pyopenssl
     #   smartthings-local
+    #   tinytuya
 electrolux-group-developer-sdk==0.7.0 \
     --hash=sha256:d558cf41c900c760e91ae447a526aba0b510e812d78dc07b4f055fed4d70dfcf \
     --hash=sha256:de62a4076d309517799c89101d5d6fc59b087bb97bcbc7ccba5aef42b7978147
@@ -1257,7 +1262,9 @@ pyopenssl==26.4.0 \
 requests==2.34.2 \
     --hash=sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0 \
     --hash=sha256:f288924cae4e29463698d6d60bc6a4da69c89185ad1e0bcc4104f584e960b9ed
-    # via ayla-iot-unofficial
+    # via
+    #   ayla-iot-unofficial
+    #   tinytuya
 roombapy-prime==0.8.2 \
     --hash=sha256:bc12d6f04926e0ef73722e9434a47ccd0bb289e0273ce9ef588fb7d3a95b6415 \
     --hash=sha256:deebdd5236b3104210bac3aa1ba9fad66d27d9624b1cbbb867bd8b0aaaa33264
@@ -1265,6 +1272,10 @@ roombapy-prime==0.8.2 \
 smartthings-local==0.1.24 \
     --hash=sha256:bbcaeb2fcf45e9979c98fc375dcf40efa0e6587d559a977ea558512e685caa2d \
     --hash=sha256:e799545c73bae391ad15f958ca5aca30804a01b8a57c8cd49592e265a6e46bc2
+    # via -r requirements.in
+tinytuya==1.20.0 \
+    --hash=sha256:54bfcd0b3411ae4c94cf473e1ca28a2ffa4d376ed2d8e7e4e4adfcdf4ca1657c \
+    --hash=sha256:ac5650c30f1153b1eae0b8d75f67043fb2397a168d3834e47da2d88d2c08c722
     # via -r requirements.in
 typing-extensions==4.16.0 \
     --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8 \
