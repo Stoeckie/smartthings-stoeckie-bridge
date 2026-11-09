@@ -286,7 +286,11 @@ try {
         }
         # setup page over https (8443): only from the pc that may open it, otherwise closed
         Get-NetFirewallRule -DisplayName "Stoeckie Bridge setup (https)" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-        if ($allow) {
+        if ($prefs.lanSetup) {
+            # any device on the own network, after entering the setup key once (STBRIDGE_SETUP_LAN_KEY)
+            New-NetFirewallRule -DisplayName "Stoeckie Bridge setup (https)" -Direction Inbound -Protocol TCP `
+                -LocalPort 8443 -RemoteAddress LocalSubnet -Action Allow -Profile Private,Domain | Out-Null
+        } elseif ($allow) {
             New-NetFirewallRule -DisplayName "Stoeckie Bridge setup (https)" -Direction Inbound -Protocol TCP `
                 -LocalPort 8443 -RemoteAddress @($allow -split "," | ForEach-Object { $_ -replace "/32$", "" }) -Action Allow -Profile Private,Domain | Out-Null
         }
@@ -300,6 +304,7 @@ try {
         if ($noSleep) { & powercfg /change standby-timeout-ac 0; & powercfg /change hibernate-timeout-ac 0 }
         $run = @("@echo off", "cd /d `"%~dp0`"")
         if ($allow) { $run += "set STBRIDGE_SETUP_ALLOW=$allow" }
+        if ($prefs.lanSetup) { $run += "set STBRIDGE_SETUP_LAN_KEY=1" }
         $run += "`"%~dp0venv\Scripts\python.exe`" `"%~dp0stoeckie_bridge.py`""
         Set-Content -Path "$d\run.cmd" -Value $run -Encoding ASCII
         $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"$d\run.cmd`"" -WorkingDirectory $d

@@ -78,7 +78,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-09f"
+VERSION = "2026-11-09g"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -148,13 +148,25 @@ def setup_cookie_value() -> str:
     return hmac.new(setup_key().encode(), b"stbridge-setup", hashlib.sha256).hexdigest()
 
 
+# STBRIDGE_SETUP_LAN_KEY=1: any device on the own network (private address, e.g. a phone whose address changes)
+# may open the setup page after entering the setup key once (remembered in a cookie). The key is shown on the
+# setup page of an allowed computer, in the log and in data/setup-key.txt.
+SETUP_LAN_KEY = os.environ.get("STBRIDGE_SETUP_LAN_KEY", "") == "1"
+
+
 def setup_source_allowed(ip) -> bool:
-    return ip.is_loopback or ip == SETUP_GATEWAY or any(ip in net for net in SETUP_ALLOW)
+    return (ip.is_loopback or ip == SETUP_GATEWAY or any(ip in net for net in SETUP_ALLOW)
+            or (SETUP_LAN_KEY and ip.is_private and not ip.is_link_local))
 
 
 def setup_needs_key(ip) -> bool:
-    """Only the Docker gateway needs the key: localhost is this computer, STBRIDGE_SETUP_ALLOW is your own choice."""
-    return SETUP_GATEWAY is not None and ip == SETUP_GATEWAY and not any(ip in net for net in SETUP_ALLOW)
+    """The Docker gateway and, with STBRIDGE_SETUP_LAN_KEY, other devices on the own network need the key:
+    localhost is this computer, STBRIDGE_SETUP_ALLOW is your own choice."""
+    if any(ip in net for net in SETUP_ALLOW):
+        return False
+    if SETUP_GATEWAY is not None and ip == SETUP_GATEWAY:
+        return True
+    return SETUP_LAN_KEY and ip.is_private and not ip.is_loopback
 
 log = logging.getLogger("bridge")
 
@@ -4000,6 +4012,8 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             seen = PAIRING.get("last_ip") or cfg.get("api_paired_ip")
             if mem:
                 lines.append(f"Memory: {mem[0]:.0f} MB (highest {mem[1]:.0f} MB since the start)")
+            if SETUP_LAN_KEY:
+                lines.append(f"Setup key for a phone or another device on your network: {setup_key()}")
             lines.append("SmartThings hub paired" + (f" ({seen})" if seen else "")
                          + ": the LAN API only accepts signed requests from it.")
         else:
