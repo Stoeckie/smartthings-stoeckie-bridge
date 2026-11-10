@@ -123,3 +123,17 @@ def test_setup_login_flow():
         assert r.status == 403
         await c.close()
     asyncio.run(main())
+
+
+def test_password_optional():
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def main():
+        c = TestClient(TestServer(sb.make_app("t", None)))
+        await c.start_server()
+        port = c.server.port
+        r = await c.post("/setup", data={"section": "echo", "email": "a@b.nl", "password": "", "url": "amazon.com"},
+                         headers={"Origin": f"http://127.0.0.1:{port}"}, allow_redirects=False)
+        assert r.status == 302 and sb.ECHO_LOGIN["proxy"] is not None
+        await c.close()
+    asyncio.run(main())

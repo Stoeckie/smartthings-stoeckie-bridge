@@ -78,7 +78,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-10f"
+VERSION = "2026-11-10g"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -4047,7 +4047,7 @@ in Home Assistant, and it can stop working when Amazon changes it. Afterwards on
 <div class="step{echo_s1}"><details{echo_s1_open}><summary><b>Step 1 of 2: your Amazon account</b></summary>
 <form method="post"><input type="hidden" name="section" value="echo">
 <label>Amazon email</label><input name="email" type="email" autocomplete="off" required>
-<label>Password (only for this login, not kept)</label><input name="password" type="password" autocomplete="off" required>
+<label>Password (optional: leave empty to type it or use a passkey at Amazon in step 2; not kept)</label><input name="password" type="password" autocomplete="off">
 <label>Authenticator app key (recommended)</label><input name="otp_secret" autocomplete="off">
 <p class="hint">Through the bridge Amazon often sends no SMS and passkeys do not work. Add an authenticator app at
 Amazon (Login &amp; security, 2-Step Verification, Add new app, Can't scan the barcode) and paste that key here: the
