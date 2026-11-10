@@ -89,7 +89,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-10c"
+local BUILD = "2026-11-10d"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -1419,7 +1419,12 @@ end
 local function handle_setpoint(driver, device, cmd)
   local v = tonumber(cmd.args.setpoint or cmd.args.temperature)
   if not v then return end
-  if v > 40 then v = fj_f_to_c(v) end   -- a °F value from a US location
+  if v > 40 then v = fj_f_to_c(v)   -- a °F value from a US location
+  elseif ac_unit_f(device) then
+    -- unit set to °F: the app may hand a °F choice over as °C (73 °F = 22.78 °C; rounded that became 23.0,
+    -- shown by the unit as 74). Back to whole °F first, then the Fujitsu table.
+    v = fj_f_to_c(c_to_f(v))
+  end
   send_setpoint(driver, device, v)
 end
 local function handle_setpoint_f(driver, device, cmd)

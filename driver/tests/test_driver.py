@@ -362,6 +362,12 @@ def test_aircon_flow(bridge):
         assert state()["setpoint"] == c_val, f_val
     lua.execute(f'{h}.thermostatCoolingSetpoint.setCoolingSetpoint(DRIVER_OBJ, AC, {{ args = {{ setpoint = 73 }} }})')
     assert state()["setpoint"] == 22.5
+    # the standard setpoint with the unit set to °F: a °C value from the app goes through whole °F too
+    lua.execute('AC.preferences.temperatureUnit = "F"')
+    for c_in, c_val in ((22.78, 22.5), (15.56, 16.0), (16.11, 16.5)):
+        lua.execute(f'{h}.thermostatCoolingSetpoint.setCoolingSetpoint(DRIVER_OBJ, AC, {{ args = {{ setpoint = {c_in} }} }})')
+        assert state()["setpoint"] == c_val, c_in
+    lua.execute('AC.preferences.temperatureUnit = nil')
     # the app may send the °F slider converted to °C: 73 °F = 22.78 °C must still give 22.5
     for c_in, c_val in ((22.78, 22.5), (16.11, 16.5), (22.22, 22.0)):
         lua.execute(f'{h}["silvervalley08660.targetTemperatureF"].setTemperature(DRIVER_OBJ, AC, {{ args = {{ temperature = {c_in} }} }})')
