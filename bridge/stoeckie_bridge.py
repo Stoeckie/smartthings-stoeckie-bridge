@@ -78,7 +78,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-10a"
+VERSION = "2026-11-10b"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -970,6 +970,171 @@ class IRobotCloud:
                 gap = self.MIN_GAP - (time.time() - last)  # refresh from the hub: at most every 10 minutes
                 if gap > 0:
                     await asyncio.sleep(gap)
+
+
+# ---------------------------------------------------------------- Amazon Echo (speak, announce, volume, voice commands)
+# Amazon has no official API for this. Like Alexa Media Player (Home Assistant) the bridge uses the Alexa web API
+# through alexapy (Apache-2.0, gitlab.com/keatontaylor/alexapy). The login runs once through the setup page: the
+# bridge relays the Amazon login page (proxy, so captchas and 2FA work in your own browser) and keeps only the
+# OAuth refresh token in config.json. It can stop working when Amazon changes its website.
+
+ECHO_DOMAINS = ("amazon.de", "amazon.com", "amazon.co.uk", "amazon.fr", "amazon.it", "amazon.es", "amazon.nl")
+ECHO_LOGIN: dict[str, Any] = {"login": None, "proxy": None, "url": None, "error": None, "done": False}
+ECHO: dict[str, Any] = {"devices": 0, "error": None, "updated": 0}
+ECHO_DIR = DATA / "echo"
+
+
+def echo_configured(a: dict[str, Any]) -> bool:
+    return bool(a.get("email") and (a.get("oauth") or {}).get("refresh_token"))
+
+
+def echo_wanted(d: dict[str, Any]) -> bool:
+    """Speakers and screens that can play audio; not the Alexa app, Fire TV remotes or third party devices."""
+    caps = set(d.get("capabilities") or [])
+    fam = str(d.get("deviceFamily") or "")
+    return "AUDIO_PLAYER" in caps and fam not in ("VOX", "THIRD_PARTY_AVS_MEDIA_DISPLAY", "TABLET")
+
+
+def echo_volume(value: Any) -> int:
+    v = int(round(float(value)))
+    return max(0, min(100, v))
+
+
+def echo_text(value: Any, limit: int = 250) -> str:
+    t = " ".join(str(value or "").split())
+    if not t:
+        raise ValueError("empty text")
+    return t[:limit]
+
+
+class EchoDevice:
+    """The few attributes AlexaAPI reads from a device."""
+
+    def __init__(self, d: dict[str, Any]) -> None:
+        self.device_serial_number = d.get("serialNumber")
+        self._device_type = d.get("deviceType")
+        self._device_family = d.get("deviceFamily")
+        self._locale = d.get("locale") or "nl-NL"
+        self._cluster_members = d.get("clusterMembers") or []
+
+
+def echo_login_obj(a: dict[str, Any]):
+    from alexapy import AlexaLogin
+    ECHO_DIR.mkdir(parents=True, exist_ok=True)
+    return AlexaLogin(url=str(a.get("url") or "amazon.de"), email=str(a.get("email") or ""),
+                      password=str(a.get("password") or ""), outputpath=lambda p: str(ECHO_DIR / p),
+                      otp_secret=str(a.get("otp_secret") or ""), oauth=a.get("oauth") or {}, oauth_login=True)
+
+
+def echo_save_tokens(login) -> None:
+    cfg = load_config()
+    a = cfg.setdefault("echo", {})
+    a["oauth"] = {"access_token": login.access_token, "refresh_token": login.refresh_token,
+                  "expires_in": login.expires_in, "mac_dms": login.mac_dms,
+                  "code_verifier": login.code_verifier, "authorization_code": login.authorization_code}
+    a.pop("password", None)  # not needed after the first login; the refresh token is enough
+    save_config(cfg)
+
+
+class EchoCloud:
+    REFRESH = 900  # device list every 15 minutes
+
+    def __init__(self, cfg: dict[str, Any]) -> None:
+        self.a = cfg.get("echo") or {}
+        self.login = None
+        self.wake = asyncio.Event()
+        self.devs: dict[str, dict[str, Any]] = {}
+        self.volume: dict[str, int] = {}
+
+    async def _connect(self) -> None:
+        self.login = echo_login_obj(self.a)
+        await self.login.login(cookies=await self.login.load_cookie())
+        if not await self.login.test_loggedin():
+            raise PermissionError("Amazon login expired: log in again on the setup page")
+        await self.login.finalize_login()
+        echo_save_tokens(self.login)
+        log.info("[echo] logged in")
+
+    async def _fetch(self) -> None:
+        from alexapy import AlexaAPI
+        raw = await AlexaAPI.get_devices(self.login) or []
+        seen = set()
+        for d in raw:
+            if not isinstance(d, dict) or not echo_wanted(d) or not d.get("serialNumber"):
+                continue
+            serial = str(d["serialNumber"])
+            seen.add(serial)
+            self.devs[serial] = d
+            state = {"volume": self.volume.get(serial), "family": d.get("deviceFamily"),
+                     "model": d.get("deviceType")}
+            REG.upsert("echo-" + serial, "echo", d.get("accountName") or "Echo", state,
+                       bool(d.get("online", True)), self._command(serial))
+        for serial in list(self.devs):
+            if serial not in seen:
+                REG.set_online("echo-" + serial, False)
+        ECHO.update(devices=len(seen), error=None, updated=int(time.time()))
+        log.info("[echo] %d Echo device(s)", len(seen))
+
+    def _command(self, serial: str):
+        async def handler(cmd: str, value: Any) -> None:
+            from alexapy import AlexaAPI
+            if cmd == "refresh":
+                self.wake.set()
+                return
+            d = self.devs.get(serial)
+            if d is None or self.login is None:
+                raise RuntimeError("Echo not available yet")
+            api = AlexaAPI(EchoDevice(d), self.login)
+            if cmd == "speak":
+                await api.send_tts(echo_text(value), queue_delay=0)
+            elif cmd == "announce":
+                await api.send_announcement(echo_text(value), method="all", title="SmartThings",
+                                            targets=[serial], queue_delay=0)
+            elif cmd == "command":  # anything you can say to Alexa, e.g. "play Radio 538"
+                await api.run_custom(echo_text(value))
+            elif cmd in ("volume", "volumeUp", "volumeDown"):
+                cur = self.volume.get(serial, 30)
+                v = echo_volume(value if cmd == "volume" else cur + (10 if cmd == "volumeUp" else -10))
+                await api.set_volume(v / 100, queue_delay=0)
+                self.volume[serial] = v
+                REG.upsert("echo-" + serial, "echo", d.get("accountName") or "Echo", {"volume": v})
+            elif cmd == "stop":
+                await api.stop(queue_delay=0)
+            elif cmd == "routine":
+                await api.run_routine(echo_text(value), queue_delay=0)
+            else:
+                raise ValueError(f"unsupported command {cmd}")
+            # the text itself can be personal: only its length goes into the log
+            log.info("[echo] %s: %s%s", d.get("accountName") or serial, cmd,
+                     f" ({len(str(value))} chars)" if cmd in ("speak", "announce", "command", "routine") else
+                     ("" if value is None else f" {value}"))
+        return handler
+
+    async def run(self) -> None:
+        if not echo_configured(self.a):
+            log.info("[echo] not configured (optional: Amazon Echo speak, announce, volume)")
+            return
+        while True:
+            try:
+                if self.login is None:
+                    await self._connect()
+                await self._fetch()
+            except PermissionError as ex:
+                ECHO["error"] = str(ex)
+                log.error("[echo] %s", ex)
+                REG.set_online("echo-", False)
+                return
+            except Exception as ex:  # noqa: BLE001
+                ECHO["error"] = safe_err(ex)[:200]
+                log.warning("[echo] update failed: %s", safe_err(ex))
+                self.login = None
+                await asyncio.sleep(120)
+                continue
+            self.wake.clear()
+            try:
+                await asyncio.wait_for(self.wake.wait(), timeout=self.REFRESH)
+            except asyncio.TimeoutError:
+                pass
 
 
 # ---------------------------------------------------------------- VELUX ACTIVE departure mode (lock / unlock)
@@ -3782,6 +3947,19 @@ twice a day, for the Roomba driver on the hub. The robot itself is controlled lo
 <label>Password</label><input name="password" type="password" autocomplete="off" required>
 <label>Country (2 letters)</label><input name="country" value="NL" maxlength="2" required>
 <button type="submit">Save iRobot and connect</button></form>
+<h3>Amazon Echo (optional)</h3>
+<p>Let SmartThings routines make an Echo speak, announce, set its volume or run anything you can say to Alexa
+("play Radio 538"). Amazon has no official API for this: the bridge uses the Alexa website, like Alexa Media Player
+in Home Assistant, and it can stop working when Amazon changes it. You log in once through this page (Amazon's own
+login page, relayed by the bridge, so 2FA and captchas work); afterwards only a login token is kept.
+{echo_status}</p>
+<form method="post"><input type="hidden" name="section" value="echo">
+<label>Amazon email</label><input name="email" type="email" autocomplete="off" required>
+<label>Password (only for this login, not kept)</label><input name="password" type="password" autocomplete="off" required>
+<label>2FA app secret (optional, fills the code for you)</label><input name="otp_secret" autocomplete="off">
+<label>Amazon site of your Alexa account</label><select name="url">{echo_domains}</select>
+<button type="submit">Start Amazon login</button></form>
+{echo_link}
 <h3>Rain radar (optional)</h3>
 <p>Rain now and in the next 2 hours around your home, with a radius. Buienradar in the Netherlands and Belgium,
 Open-Meteo everywhere else. Also available on the Buienradar device in SmartThings
@@ -3910,7 +4088,9 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
                 return web.json_response({"error": "pairing required: press Pair on the bridge setup page and "
                                                    "Allow your hub"}, status=401)
         resp = await handler(req)
-        if req.path.startswith("/setup"):
+        if req.path.startswith("/setup/echo-auth"):  # Amazon's own login page (relayed): its scripts must run
+            resp.headers["Cache-Control"] = "no-store"
+        elif req.path.startswith("/setup"):
             resp.headers["Cache-Control"] = "no-store"
             resp.headers["X-Frame-Options"] = "DENY"
             resp.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'"
@@ -4019,6 +4199,13 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
                     f"{v.get('name') or k}: {len(v['favorites'])} favorite(s)" for k, v in IROBOT["robots"].items()))
             else:
                 lines.append("iRobot set up, fetching.")
+        if echo_configured(cfg.get("echo") or {}):
+            if ECHO.get("error"):
+                lines.append("Amazon Echo: " + str(ECHO["error"]))
+            elif ECHO.get("updated"):
+                lines.append(f"Amazon Echo connected: {ECHO['devices']} device(s)")
+            else:
+                lines.append("Amazon Echo logged in, fetching devices.")
         if PAIRING["until"] > time.time():
             lines.append(f"SmartThings pairing is open ({int(PAIRING['until'] - time.time())} s left): wait until "
                          "your hub shows up below and press Allow.")
@@ -4070,6 +4257,20 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             'value="setup_key"><input name="key" autocomplete="off" required style="width:100%;padding:8px">'
             '<button type="submit" style="margin-top:14px;padding:10px 18px">Open setup</button></form></body></html>'))
 
+    def echo_status() -> str:
+        a = load_config().get("echo") or {}
+        if ECHO_LOGIN.get("error"):
+            return "Last login attempt: " + str(ECHO_LOGIN["error"])
+        if echo_configured(a):
+            return f"Logged in ({a.get('url', 'amazon.de')}). Log in again only when the bridge reports it expired."
+        return "Not set up yet."
+
+    def echo_link() -> str:
+        if ECHO_LOGIN.get("proxy") is None or ECHO_LOGIN.get("done"):
+            return ""
+        return ('<p><b><a href="' + html.escape(str(ECHO_LOGIN["url"])) + '">Open the Amazon login</a></b> '
+                '(same tab; after the login you come back here).</p>')
+
     async def setup_get(req):
         if not local_only(req):
             return web.Response(status=403, text="setup only from this computer (localhost) or an address in STBRIDGE_SETUP_ALLOW")
@@ -4087,6 +4288,7 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
         # only a masked Access ID: the secret and the local keys never go into the page
         tuya_saved = (f"Saved: Access ID {mask(tu.get('api_key'))}, region {tuya_region}. Enter both again to change "
                       "them." if tuya_cloud_configured(tu) else "Not set up yet.")
+        echo_url = str((load_config().get("echo") or {}).get("url") or "amazon.de")
         pairing_open = PAIRING["until"] > time.time()
         reqs = "".join(
             '<form method="post"><input type="hidden" name="section" value="api_allow">'
@@ -4113,7 +4315,11 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
                 .replace("{rain_radius}", html.escape(str(rb.get("radius_m", int(float(rb.get("radius_km") or 0) * 1000)))))
                 .replace("{rain_thr}", html.escape(str(rb.get("threshold", RAIN_THRESHOLD))))
                 .replace("{velux_ip}", html.escape(str((load_config().get("velux") or {}).get("gateway_ip", ""))))
-                .replace("{tuya_saved}", html.escape(tuya_saved)))
+                .replace("{tuya_saved}", html.escape(tuya_saved))
+                .replace("{echo_status}", html.escape(echo_status()))
+                .replace("{echo_domains}", "".join(
+                    f'<option value="{d}"{" selected" if d == echo_url else ""}>{d}</option>' for d in ECHO_DOMAINS))
+                .replace("{echo_link}", echo_link()))
         for r in TUYA_REGIONS:
             page = page.replace("{tuya_r_" + r + "}", " selected" if tuya_region == r else "")
         return web.Response(text=page, content_type="text/html")
@@ -4156,6 +4362,32 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             r["country"] = str(form.get("country", "NL")).strip().upper()[:2] or "NL"
             save_config(cfg)
             log.info("[setup] iRobot login saved")
+        elif section == "echo":
+            a = cfg.setdefault("echo", {})
+            a["email"] = str(form.get("email", "")).strip()
+            url = str(form.get("url", "amazon.de"))
+            a["url"] = url if url in ECHO_DOMAINS else "amazon.de"
+            otp = "".join(str(form.get("otp_secret", "")).split())
+            if otp:
+                a["otp_secret"] = otp
+            save_config(cfg)
+            login_cfg = dict(a, password=str(form.get("password", "")), oauth={})
+            try:
+                from alexapy import AlexaProxy
+                login = echo_login_obj(login_cfg)
+                base = f"https://{req.host}/setup/echo-auth"
+                proxy = AlexaProxy(login, base)
+                done = f"https://{req.host}/setup/echo-done"
+                ECHO_LOGIN.update(login=login, proxy=proxy, done=False, error=None,
+                                  url=str(proxy.access_url().with_query({"config_flow_id": "stbridge",
+                                                                         "callback_url": done})))
+                login._session.cookie_jar.clear()  # noqa: SLF001
+                login.proxy_url = ECHO_LOGIN["url"]
+                log.info("[setup] Amazon Echo login started")
+            except Exception as ex:  # noqa: BLE001
+                ECHO_LOGIN.update(proxy=None, error=safe_err(ex)[:200])
+                log.warning("[setup] Amazon Echo login could not start: %s", safe_err(ex))
+            raise web.HTTPFound("/setup")
         elif section in ("fglair_settings", "velux_settings"):
             name = section.split("_")[0]
             sec = poll_seconds(form.get("poll_seconds"), 60)
@@ -4400,6 +4632,35 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
         raise web.HTTPFound("/setup")
 
     app.router.add_get("/", root)
+    async def echo_auth(req):
+        if not local_only(req) or plain_from_lan(req) or not key_ok(req):
+            return web.Response(status=403, text="setup only")
+        proxy = ECHO_LOGIN.get("proxy")
+        if proxy is None or ECHO_LOGIN.get("done"):
+            raise web.HTTPFound("/setup")
+        return await proxy.all_handler(req)
+
+    async def echo_done(req):
+        if not local_only(req) or plain_from_lan(req) or not key_ok(req):
+            return web.Response(status=403, text="setup only")
+        login = ECHO_LOGIN.get("login")
+        try:
+            if login is None or not await login.test_loggedin():
+                raise RuntimeError("Amazon did not confirm the login, try again")
+            await login.finalize_login()
+            echo_save_tokens(login)
+            ECHO_LOGIN.update(done=True, error=None, proxy=None)
+            log.info("[setup] Amazon Echo login done")
+            if on_setup:
+                on_setup("echo")
+            await asyncio.sleep(4)
+        except Exception as ex:  # noqa: BLE001
+            ECHO_LOGIN.update(error=safe_err(ex)[:200])
+            log.warning("[setup] Amazon Echo login failed: %s", safe_err(ex))
+        raise web.HTTPFound("/setup")
+
+    app.router.add_route("*", "/setup/echo-auth{tail:.*}", echo_auth)
+    app.router.add_get("/setup/echo-done", echo_done)
     app.router.add_get("/stbridge/info", info)
     app.router.add_post("/stbridge/pair", pair)
     app.router.add_post("/stbridge/srp", srp)
@@ -4472,6 +4733,16 @@ async def demo_devices() -> None:
         REG.upsert("demo-car", "car", "Demo car", car, True, demo_car)
 
     await demo_car("refresh", None)
+    echo = {"volume": 30, "said": []}
+
+    async def demo_echo(cmd, value):
+        if cmd == "volume":
+            echo["volume"] = int(value)
+        elif cmd in ("speak", "announce", "command"):
+            echo["said"] = echo["said"][-4:] + [cmd + ":" + str(value)]
+        REG.upsert("demo-echo", "echo", "Demo Echo", dict(echo), True, demo_echo)
+
+    await demo_echo("refresh", None)
     velux = {"locked": True, "canUnlock": True}
     REG.upsert("demo-rain", "rain", "Demo rain sensor", {"raining": False}, True, dry)
 
@@ -4598,7 +4869,7 @@ async def serve(args) -> None:
     port = int(cfg.get("port", 8787))
     sources = {"aeg": Electrolux, "fglair": FGLair, "skoda": Skoda, "irobot": IRobotCloud, "velux": VeluxCloud,
                "buienradar": Buienradar, "homeconnect": HomeConnect,
-               "samsung": Samsung, "samsungtv": SamsungTV, "tuya": TuyaLocal}
+               "samsung": Samsung, "samsungtv": SamsungTV, "tuya": TuyaLocal, "echo": EchoCloud}
     tasks: dict[str, asyncio.Task] = {}
 
     def start(section: str) -> None:

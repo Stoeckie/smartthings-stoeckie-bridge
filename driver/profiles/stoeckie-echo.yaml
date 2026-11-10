@@ -1,0 +1,14 @@
+name: stoeckie-echo
+components:
+  - id: main
+    capabilities:
+      - id: silvervalley08660.alexaVoice
+        version: 1
+      - id: audioVolume
+        version: 1
+      - id: speechSynthesis
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: Speaker

@@ -89,7 +89,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-10d"
+local BUILD = "2026-11-10e"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -114,6 +114,7 @@ local acModeX = capabilities["silvervalley08660.airconMode"]
 local targetTemp = capabilities["silvervalley08660.targetTemperature"]
 local targetTempF = capabilities["silvervalley08660.targetTemperatureF"] -- same, in °F (profiles ...-f)
 local airflowDir = capabilities["silvervalley08660.airflowDirection"]  -- louver position 1..n (swing off)
+local alexaVoice = (function() local ok, c = pcall(function() return capabilities["silvervalley08660.alexaVoice"] end); return ok and c or nil end)() -- Echo speak/announce/command
 local hAirflow = (function() local ok, c = pcall(function() return capabilities["silvervalley08660.horizontalAirflow"] end); return ok and c or nil end)() -- left/right louvers (profiles ...-h)
 local windKmh = (function() local ok, c = pcall(function() return capabilities["silvervalley08660.windSpeedKmh"] end); return ok and c or nil end)() -- wind on the rain radar device (km/h)
 -- Home Connect: program list with start button, and oven temperature + cooking time (labels EN/NL)
@@ -131,9 +132,10 @@ local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor =
                   velux_lock = "stoeckie-velux-lock", rain = "stoeckie-rain-v4",
                   rainradar = "stoeckie-rainradar-v3", dishwasher = "stoeckie-dishwasher-v2", oven = "stoeckie-oven-v2",
                   washer = "stoeckie-washer-v3", tv = "stoeckie-tv",
-                  tuya_thermostat = "stoeckie-tuya-thermostat", tuya_heater = "stoeckie-tuya-heater" }
+                  tuya_thermostat = "stoeckie-tuya-thermostat", tuya_heater = "stoeckie-tuya-heater",
+                  echo = "stoeckie-echo" }
 local MANUFACTURER = { dryer = "AEG", aircon = "Fujitsu", car = "Skoda", dishwasher = "Home Connect", oven = "Home Connect",
-                       washer = "Samsung", tv = "Samsung", tuya_thermostat = "Tuya", tuya_heater = "Tuya" }
+                       washer = "Samsung", tv = "Samsung", tuya_thermostat = "Tuya", tuya_heater = "Tuya", echo = "Amazon" }
 
 -- bridge value <-> SmartThings value
 local AC_MODE_TO_ST = { auto = "auto", cool = "cool", dry = "dry", fan = "fanOnly", heat = "heat", minheat = "minHeat" }
@@ -873,10 +875,17 @@ local function emit_tuya_heater(dev, s)
   tuya_common(dev, s)
 end
 
+-- Amazon Echo (through the bridge: Alexa web API). The bridge only knows the volume set from SmartThings.
+local function emit_echo(dev, s)
+  if tonumber(s.volume) then
+    try_emit(dev, function() return capabilities.audioVolume.volume({ value = math.floor(s.volume), unit = "%" }) end)
+  end
+end
+
 local EMIT = { dryer = emit_dryer, window = emit_window, sensor = emit_sensor, aircon = emit_aircon, car = emit_car,
                velux_lock = emit_velux_lock, rain = emit_rain,
                rainradar = emit_rainradar, dishwasher = emit_dishwasher, oven = emit_oven, washer = emit_washer,
-  tv = emit_tv, tuya_thermostat = emit_tuya_thermostat, tuya_heater = emit_tuya_heater }
+  tv = emit_tv, tuya_thermostat = emit_tuya_thermostat, tuya_heater = emit_tuya_heater, echo = emit_echo }
 
 -- polling -------------------------------------------------------------------------
 
@@ -909,6 +918,7 @@ local function child_profile(key, device)
     return nil
   end
   -- -v3: course list + Start (own capability washerProgram; -v2 used applianceProgram)
+  if key:match("^echo%-") or key == "demo-echo" then return PROFILE.echo end
   if key:match("^samsung%-") or key == "demo-washer" then return PROFILE.washer end
   -- -v2: program list, start button, oven temperature and cooking time
   if key:match("^homeconnect%-") or key == "demo-dishwasher" or key == "demo-oven" then
@@ -1695,6 +1705,14 @@ local function discovery(driver, opts, should_continue)
   log.info(string.format("[stbridge] scan done, %d bridge(s) found", found))
 end
 
+-- Echo: send the text and show it as the last text (also what a routine sent)
+local function echo_say(driver, device, cmd, text)
+  text = tostring(text or ""):sub(1, 250)
+  if text:match("^%s*$") then return end
+  send(driver, device, cmd, text)
+  if alexaVoice then try_emit(device, function() return alexaVoice.lastText(text) end) end
+end
+
 local driver = Driver("stoeckie-bridge-local", {
   discovery = discovery,
   lifecycle_handlers = {
@@ -1796,6 +1814,16 @@ local driver = Driver("stoeckie-bridge-local", {
     },
     [acFan.ID] = {
       [acFan.commands.setFanMode.NAME] = handle_fan_mode,
+    },
+    ["silvervalley08660.alexaVoice"] = {
+      speak = function(driver, device, cmd) echo_say(driver, device, "speak", cmd.args.text) end,
+      announce = function(driver, device, cmd) echo_say(driver, device, "announce", cmd.args.text) end,
+      voiceCommand = function(driver, device, cmd) echo_say(driver, device, "command", cmd.args.text) end,
+    },
+    [capabilities.speechSynthesis.ID] = {
+      [capabilities.speechSynthesis.commands.speak.NAME] = function(driver, device, cmd)
+        echo_say(driver, device, "speak", cmd.args.phrase)
+      end,
     },
     ["silvervalley08660.horizontalAirflow"] = {
       setPosition = handle_hdir,

@@ -22,3 +22,4 @@ bridge/homeconnect/
 bridge/samsung/
 bridge/data/samsung/
 bridge/docker-compose.override.yml
+bridge/echo/

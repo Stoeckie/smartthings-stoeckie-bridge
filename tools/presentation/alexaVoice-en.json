@@ -1,0 +1,1 @@
+{"tag": "en", "label": "Alexa", "attributes": {"lastText": {"label": "Last text"}}, "commands": {"speak": {"label": "Speak", "arguments": {"text": {"label": "Text"}}}, "announce": {"label": "Announce", "arguments": {"text": {"label": "Text"}}}, "voiceCommand": {"label": "Alexa command", "arguments": {"text": {"label": "Text"}}}}}

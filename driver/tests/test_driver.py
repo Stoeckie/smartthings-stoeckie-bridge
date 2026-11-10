@@ -53,7 +53,8 @@ for _, id in ipairs({ "windowShade", "windowShadeLevel", "refresh", "dryerOperat
                       "silvervalley08660.cookSettings", "silvervalley08660.washerProgram", "dishwasherOperatingState", "ovenOperatingState",
                       "washerOperatingState", "audioVolume", "audioMute", "mediaInputSource", "tvChannel",
                       "ovenSetpoint", "temperatureMeasurement", "remoteControlStatus",
-                      "thermostatHeatingSetpoint", "thermostatMode", "thermostatOperatingState" }) do caps[id].ID = id end
+                      "thermostatHeatingSetpoint", "thermostatMode", "thermostatOperatingState", "speechSynthesis",
+                      "silvervalley08660.alexaVoice" }) do caps[id].ID = id end
 package.loaded["st.capabilities"] = caps
 package.loaded["st.driver"] = function(name, tmpl) DRIVER = tmpl; return { run = function() end } end
 package.loaded["log"] = { info = function(m) print("I " .. m) end, warn = function(m) print("W " .. m) end,
@@ -552,6 +553,37 @@ def test_car_flow(bridge):
     assert state()["charging"] == "CHARGING"
     lua.execute('DRIVER.capability_handlers.switch.on(DRIVER_OBJ, CAR, { component = "climate" })')
     assert state()["climate"] == "ON"
+
+
+def test_echo_flow(bridge):
+    lua = lua53.LuaRuntime(unpack_returned_tuples=True)
+    lua.execute(f'package.path = "{SRC}/?.lua;{HERE}/?.lua;" .. package.path')
+    lua.globals().py_http = py_http
+    lua.execute(HARNESS)
+    lua.execute(f'dofile("{SRC}/init.lua")')
+    lua.execute("math.randomseed(%d)" % random.randrange(1 << 30))
+    lua.execute(f'''
+      PARENT = NEW_DEVICE({{ id = "p1", label = "Bridge", device_network_id = "stbridge-test1",
+                            preferences = {{ ipAddress = "127.0.0.1", port = "{bridge}" }} }})
+      DRIVER.lifecycle_handlers.init(DRIVER_OBJ, PARENT)
+      DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
+      DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
+      for _, d in ipairs(DEVICES) do if d.parent_assigned_child_key == "demo-echo" then ECHO = d end end
+    ''')
+    echo = lua.eval("ECHO")
+    assert echo is not None
+
+    def state():
+        with urllib.request.urlopen(signed_get(f"http://127.0.0.1:{bridge}/stbridge/devices")) as r:
+            devs = json.loads(r.read())["devices"]
+        return next(d for d in devs if d["id"] == "demo-echo")["state"]
+    lua.execute('DRIVER.capability_handlers["silvervalley08660.alexaVoice"].speak(DRIVER_OBJ, ECHO, { args = { text = "Dinner is ready" } })')
+    lua.execute('DRIVER.capability_handlers["silvervalley08660.alexaVoice"].voiceCommand(DRIVER_OBJ, ECHO, { args = { text = "play Radio 538" } })')
+    lua.execute('DRIVER.capability_handlers.speechSynthesis.speak(DRIVER_OBJ, ECHO, { args = { phrase = "Hello" } })')
+    lua.execute('DRIVER.capability_handlers["silvervalley08660.alexaVoice"].announce(DRIVER_OBJ, ECHO, { args = { text = "   " } })')  # empty: nothing sent
+    assert state()["said"] == ["speak:Dinner is ready", "command:play Radio 538", "speak:Hello"]
+    lua.execute('DRIVER.capability_handlers.audioVolume.setVolume(DRIVER_OBJ, ECHO, { args = { volume = 45 } })')
+    assert state()["volume"] == 45
 
 
 def test_velux_lock_flow(bridge):

@@ -1,0 +1,1 @@
+{"tag": "nl", "label": "Alexa", "attributes": {"lastText": {"label": "Laatste tekst"}}, "commands": {"speak": {"label": "Uitspreken", "arguments": {"text": {"label": "Tekst"}}}, "announce": {"label": "Mededeling", "arguments": {"text": {"label": "Tekst"}}}, "voiceCommand": {"label": "Alexa opdracht", "arguments": {"text": {"label": "Tekst"}}}}}
