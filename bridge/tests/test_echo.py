@@ -137,3 +137,11 @@ def test_password_optional():
         assert r.status == 302 and sb.ECHO_LOGIN["proxy"] is not None
         await c.close()
     asyncio.run(main())
+
+
+def test_echo_volumes_from():
+    import stoeckie_bridge as b
+    js = {"volumes": [{"dsn": "G1", "speakerVolume": 40}, {"dsn": "G2", "speakerVolume": None},
+                      {"dsn": "G3", "speakerVolume": 140}, {"bad": 1}]}
+    assert b.echo_volumes_from(js) == {"G1": 40, "G3": 100}
+    assert b.echo_volumes_from(None) == {} and b.echo_volumes_from([]) == {}

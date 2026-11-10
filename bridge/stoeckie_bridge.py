@@ -78,7 +78,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-10h"
+VERSION = "2026-11-11a"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -1007,6 +1007,18 @@ def echo_text(value: Any, limit: int = 250) -> str:
     return t[:limit]
 
 
+def echo_volumes_from(js: Any) -> dict[str, int]:
+    """Speaker volume per serial from Amazon's allDeviceVolumes answer."""
+    out: dict[str, int] = {}
+    for v in (js or {}).get("volumes") or [] if isinstance(js, dict) else []:
+        try:
+            if v.get("dsn") is not None and v.get("speakerVolume") is not None:
+                out[str(v["dsn"])] = echo_volume(v["speakerVolume"])
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return out
+
+
 class EchoDevice:
     """The few attributes AlexaAPI reads from a device."""
 
@@ -1058,6 +1070,7 @@ class EchoCloud:
     async def _fetch(self) -> None:
         from alexapy import AlexaAPI
         raw = await AlexaAPI.get_devices(self.login) or []
+        await self._fetch_volumes()
         seen = set()
         for d in raw:
             if not isinstance(d, dict) or not echo_wanted(d) or not d.get("serialNumber"):
@@ -1069,11 +1082,45 @@ class EchoCloud:
                      "model": d.get("deviceType")}
             REG.upsert("echo-" + serial, "echo", d.get("accountName") or "Echo", state,
                        bool(d.get("online", True)), self._command(serial))
+        missing = [x for x in seen if x not in self.volume]
+        if missing:
+            await self._fetch_player_volumes()
+            for x in missing:
+                if x in self.volume:
+                    d = self.devs[x]
+                    REG.upsert("echo-" + x, "echo", d.get("accountName") or "Echo", {"volume": self.volume[x]},
+                               bool(d.get("online", True)))
+        log.info("[echo] volume known for %d of %d", sum(1 for x in seen if x in self.volume), len(seen))
         for serial in list(self.devs):
             if serial not in seen:
                 REG.set_online("echo-" + serial, False)
         ECHO.update(devices=len(seen), error=None, updated=int(time.time()))
         log.info("[echo] %d Echo device(s)", len(seen))
+
+    async def _fetch_volumes(self) -> None:
+        """Current speaker volume of every Echo (one request for all devices)."""
+        from alexapy import AlexaAPI
+        from alexapy.helpers import get_json_value
+        try:
+            r = await AlexaAPI._static_request("get", self.login, "/api/devices/deviceType/dsn/audio/v1/allDeviceVolumes")
+            js, *_ = await get_json_value(r, None, dict)
+            self.volume.update(echo_volumes_from(js))
+        except Exception as e:  # noqa: BLE001
+            log.info("[echo] volumes not available: %s", type(e).__name__)
+
+    async def _fetch_player_volumes(self) -> None:
+        """Fallback per device: the volume in the player state (for Echos missing from allDeviceVolumes)."""
+        from alexapy import AlexaAPI
+        for serial, d in self.devs.items():
+            if serial in self.volume:
+                continue
+            try:
+                st = await AlexaAPI(EchoDevice(d), self.login).get_state()
+                v = (((st or {}).get("playerInfo") or {}).get("volume") or {}).get("volume")
+                if v is not None:
+                    self.volume[serial] = echo_volume(v)
+            except Exception:  # noqa: BLE001
+                continue
 
     def _command(self, serial: str):
         async def handler(cmd: str, value: Any) -> None:
@@ -1097,7 +1144,8 @@ class EchoCloud:
                 v = echo_volume(value if cmd == "volume" else cur + (10 if cmd == "volumeUp" else -10))
                 await api.set_volume(v / 100, queue_delay=0)
                 self.volume[serial] = v
-                REG.upsert("echo-" + serial, "echo", d.get("accountName") or "Echo", {"volume": v})
+                REG.upsert("echo-" + serial, "echo", d.get("accountName") or "Echo", {"volume": v},
+                           bool(d.get("online", True)))
             elif cmd == "stop":
                 await api.stop(queue_delay=0)
             elif cmd == "routine":
