@@ -78,7 +78,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-10d"
+VERSION = "2026-11-10e"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -3900,9 +3900,10 @@ font-weight:400}.intro{color:var(--sub);font-size:14px;margin:0 4px 18px}
 h2.g{font-size:14px;font-weight:600;color:var(--sub);text-transform:uppercase;letter-spacing:.04em;margin:30px 8px 8px}
 .card{background:var(--card);border-radius:22px;padding:18px 20px;margin:0 0 12px}
 .card h3{font-size:19px;margin:0 0 4px}.list{background:var(--card);border-radius:22px;padding:4px 20px;margin:0 0 8px}
-.item{display:block;padding:13px 0;border-bottom:1px solid var(--line);color:var(--text)}.item:last-child{border-bottom:0}
-.item b{display:block;font-weight:600}.item span{display:block;color:var(--sub);font-size:14px;margin-top:2px}
-.item.bad span{color:var(--warn);font-weight:600}
+.item{display:flex;align-items:center;gap:12px;padding:13px 0;border-bottom:1px solid var(--line);color:var(--text)}
+.item:last-child{border-bottom:0}.item .t{flex:1}.item b{display:block;font-weight:600}
+.item .t span{display:block;color:var(--sub);font-size:14px;margin-top:2px}.item.bad .t span{color:var(--warn);font-weight:600}
+.item .go{color:var(--sub);font-size:22px;line-height:1}.item:hover b,.item:active b{color:var(--accent)}
 .st{color:var(--sub);font-size:14px;line-height:1.5;padding:0 0 12px;margin:0 0 12px;border-bottom:1px solid var(--line)}
 .st.bad{color:var(--warn)}.card p{font-size:14px;line-height:1.5}
 label{display:block;margin:14px 0 6px;font-size:14px;font-weight:600}
@@ -3912,7 +3913,7 @@ button{margin-top:16px;padding:12px 22px;font-size:16px;font-weight:600;border:0
 color:#fff}form+form{margin-top:6px;padding-top:6px;border-top:1px solid var(--line)}.top{font-size:13px;margin:14px 0 0}
 </style></head><body>
 <h1 id="top">Stoeckie Bridge <small>{version}</small></h1>
-<p class="intro">Everything you enter here is stored only locally, in config.json on this computer. Tap a part for its status and settings.</p>
+<p class="intro">Everything you enter here is stored only locally, in config.json on this computer. Tap a part below to open its status and settings.</p>
 {status}
 <h2 class="g">SmartThings</h2>
 <div class="card"><h3 id="hub">SmartThings hub</h3>
@@ -4341,8 +4342,9 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
         blocks = {}
         for anchor, title, summary, lines in sections:
             bad = summary.startswith(("NOT", "error")) or summary == "error"
-            items.append(f'<a class="item{" bad" if bad else ""}" href="#{anchor}"><b>{html.escape(title)}</b>'
-                         f'<span>{html.escape(summary[:1].upper() + summary[1:])}</span></a>')
+            items.append(f'<a class="item{" bad" if bad else ""}" href="#{anchor}"><span class="t"><b>{html.escape(title)}</b>'
+                         f'<span>{html.escape(summary[:1].upper() + summary[1:])}</span></span>'
+                         '<span class="go" aria-hidden="true">&#x203A;</span></a>')
             body = "<br>".join(html.escape(x) for x in [summary[:1].upper() + summary[1:]] + lines)
             blocks[anchor] = f'<div class="st{" bad" if bad else ""}">{body}</div>'
         return '<div class="list">' + "".join(items) + "</div>", blocks
