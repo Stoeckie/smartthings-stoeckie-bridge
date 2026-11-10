@@ -78,7 +78,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-10c"
+VERSION = "2026-11-10d"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -3889,15 +3889,33 @@ def setup_tls(data_dir: Path):
 
 SETUP_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Stoeckie Bridge setup</title>{refresh}
-<style>body{font:15px system-ui,sans-serif;max-width:640px;margin:32px auto;padding:0 16px;color:#222}
-label{display:block;margin:14px 0 4px;font-weight:600}input,textarea,select{width:100%;box-sizing:border-box;padding:8px;
-font:13px ui-monospace,monospace}textarea{height:90px}button{margin-top:18px;padding:10px 18px;font-size:15px}
-.st{padding:10px;border-radius:6px;background:#f2f2f2;margin:12px 0}h2.g{margin-top:44px;border-bottom:1px solid #ccc;padding-bottom:4px}h3{margin-top:30px}.toc{padding-left:20px;line-height:1.6}.top{font-size:13px}</style></head><body>
-<h2 id="top">Stoeckie Bridge <small>{version}</small></h2>
-<p>Everything you enter here is stored only locally, in config.json on this computer. Click a part to go to its status and settings.</p>
+<style>
+:root{--bg:#f2f2f6;--card:#fff;--text:#1c1c1e;--sub:#6e6e73;--line:#e3e3e8;--accent:#3e6ae1;--warn:#e5484d;--field:#f2f2f6}
+@media (prefers-color-scheme:dark){:root{--bg:#000;--card:#1c1c1e;--text:#f2f2f2;--sub:#9a9aa0;--line:#2c2c2e;
+--accent:#4f7cff;--warn:#ff6b6b;--field:#2c2c2e}}
+*{box-sizing:border-box}body{font:16px system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);
+color:var(--text);max-width:680px;margin:0 auto;padding:20px 16px 48px}
+a{color:var(--accent);text-decoration:none}h1{font-size:26px;margin:8px 4px 4px}h1 small{font-size:15px;color:var(--sub);
+font-weight:400}.intro{color:var(--sub);font-size:14px;margin:0 4px 18px}
+h2.g{font-size:14px;font-weight:600;color:var(--sub);text-transform:uppercase;letter-spacing:.04em;margin:30px 8px 8px}
+.card{background:var(--card);border-radius:22px;padding:18px 20px;margin:0 0 12px}
+.card h3{font-size:19px;margin:0 0 4px}.list{background:var(--card);border-radius:22px;padding:4px 20px;margin:0 0 8px}
+.item{display:block;padding:13px 0;border-bottom:1px solid var(--line);color:var(--text)}.item:last-child{border-bottom:0}
+.item b{display:block;font-weight:600}.item span{display:block;color:var(--sub);font-size:14px;margin-top:2px}
+.item.bad span{color:var(--warn);font-weight:600}
+.st{color:var(--sub);font-size:14px;line-height:1.5;padding:0 0 12px;margin:0 0 12px;border-bottom:1px solid var(--line)}
+.st.bad{color:var(--warn)}.card p{font-size:14px;line-height:1.5}
+label{display:block;margin:14px 0 6px;font-size:14px;font-weight:600}
+input,textarea,select{width:100%;padding:12px 14px;border:0;border-radius:14px;background:var(--field);color:var(--text);
+font:15px system-ui,sans-serif}textarea{height:90px}
+button{margin-top:16px;padding:12px 22px;font-size:16px;font-weight:600;border:0;border-radius:999px;background:var(--accent);
+color:#fff}form+form{margin-top:6px;padding-top:6px;border-top:1px solid var(--line)}.top{font-size:13px;margin:14px 0 0}
+</style></head><body>
+<h1 id="top">Stoeckie Bridge <small>{version}</small></h1>
+<p class="intro">Everything you enter here is stored only locally, in config.json on this computer. Tap a part for its status and settings.</p>
 {status}
 <h2 class="g">SmartThings</h2>
-<h3 id="hub">SmartThings hub</h3>
+<div class="card"><h3 id="hub">SmartThings hub</h3>
 {st_hub}
 <p>Until a hub is paired the bridge does not serve your devices on the LAN. After pairing it only accepts signed
 requests from the paired hub. Press Pair; within a minute your hub shows up here with its IP address. Check that it
@@ -3908,9 +3926,9 @@ newer).</p>
 <button type="submit">Pair (open for 5 minutes)</button></form>
 <form method="post"><input type="hidden" name="section" value="api_new_token">
 <button type="submit">New token (pair all hubs again)</button></form>
-<p class="top"><a href="#top">Back to the overview</a></p>
+<p class="top"><a href="#top">Back to the overview</a></p></div>
 <h2 class="g">Climate</h2>
-<h3 id="fglair">Fujitsu air conditioners (FGLair)</h3>
+<div class="card"><h3 id="fglair">Fujitsu air conditioners (FGLair)</h3>
 {st_fglair}
 <p>Email and password of the FGLair app.</p>
 <form method="post"><input type="hidden" name="section" value="fglair">
@@ -3924,8 +3942,8 @@ newer).</p>
 <input name="poll_seconds" type="number" min="30" max="600" value="{fglair_poll}" required>
 <button type="submit">Save setting</button></form>
 <p>Also available per air conditioner in the SmartThings app (Settings).</p>
-<p class="top"><a href="#top">Back to the overview</a></p>
-<h3 id="tuya">Tuya / Smart Life thermostats and heaters (local, optional)</h3>
+<p class="top"><a href="#top">Back to the overview</a></p></div>
+<div class="card"><h3 id="tuya">Tuya / Smart Life thermostats and heaters (local, optional)</h3>
 {st_tuya}
 <p>Thermostats and heaters from the Smart Life (or Tuya Smart) app, controlled on the LAN. On <b>iot.tuya.com</b>
 create a cloud project (data center of your app account, e.g. Central Europe), link your Smart Life app account
@@ -3942,9 +3960,9 @@ local. Keys stay in config.json and are never shown here.</p>
 <button type="submit">Save Tuya and fetch devices</button></form>
 <form method="post"><input type="hidden" name="section" value="tuya_fetch">
 <button type="submit">Fetch devices again (new device, new key after a reset)</button></form>
-<p class="top"><a href="#top">Back to the overview</a></p>
+<p class="top"><a href="#top">Back to the overview</a></p></div>
 <h2 class="g">Appliances</h2>
-<h3 id="aeg">AEG / Electrolux dryer</h3>
+<div class="card"><h3 id="aeg">AEG / Electrolux dryer</h3>
 {st_aeg}
 <p>On <b>developer.electrolux.one</b> (sign in with your AEG / Electrolux account) create an API key and generate
 an access token and a refresh token.</p>
@@ -3953,17 +3971,17 @@ an access token and a refresh token.</p>
 <label>Access token</label><textarea name="access_token" required></textarea>
 <label>Refresh token</label><textarea name="refresh_token" required></textarea>
 <button type="submit">Save AEG and connect</button></form>
-<p class="top"><a href="#top">Back to the overview</a></p>
-<h3 id="homeconnect">Home Connect dishwasher and oven (local, optional)</h3>
+<p class="top"><a href="#top">Back to the overview</a></p></div>
+<div class="card"><h3 id="homeconnect">Home Connect dishwasher and oven (local, optional)</h3>
 {st_homeconnect}
 <p>Set up with the profile files of the Home Connect Profile Downloader in the folder homeconnect next to the bridge (see the README); nothing to enter here.</p>
-<p class="top"><a href="#top">Back to the overview</a></p>
-<h3 id="samsung">Samsung washer (local, experimental)</h3>
+<p class="top"><a href="#top">Back to the overview</a></p></div>
+<div class="card"><h3 id="samsung">Samsung washer (local, experimental)</h3>
 {st_samsung}
 <p>Set up in config.json (see the README); nothing to enter here.</p>
-<p class="top"><a href="#top">Back to the overview</a></p>
+<p class="top"><a href="#top">Back to the overview</a></p></div>
 <h2 class="g">Car</h2>
-<h3 id="skoda">Škoda</h3>
+<div class="card"><h3 id="skoda">Škoda</h3>
 {st_skoda}
 <p>In the MyŠkoda app (8.16 or newer) create an API key: <b>Settings, Smart Home, API keys</b>, and choose your car.
 The VIN (17 characters) is shown in the app with the car and on the registration document.</p>
@@ -3977,9 +3995,9 @@ The VIN (17 characters) is shown in the app with the car and on the registration
 <label>Temperature for climate on (°C)</label><input name="climate_temp" value="{skoda_temp}" required>
 <button type="submit">Save settings</button></form>
 <p>These settings are also available with the car in the SmartThings app (Settings).</p>
-<p class="top"><a href="#top">Back to the overview</a></p>
+<p class="top"><a href="#top">Back to the overview</a></p></div>
 <h2 class="g">Home</h2>
-<h3 id="velux">VELUX ACTIVE departure mode (optional)</h3>
+<div class="card"><h3 id="velux">VELUX ACTIVE departure mode (optional)</h3>
 {st_velux}
 <p>To lock and unlock (departure mode: all windows and blinds blocked) from SmartThings.
 The windows themselves keep running locally over HomeKit. Email and password of the VELUX ACTIVE app.</p>
@@ -3996,8 +4014,8 @@ click Pair gateway, wait until the light on the gateway blinks and then press th
 <label>Update departure mode and rain sensor every (seconds, 30 to 600)</label>
 <input name="poll_seconds" type="number" min="30" max="600" value="{velux_poll}" required>
 <button type="submit">Save setting</button></form>
-<p>Also available on VELUX departure mode in the SmartThings app (Settings).</p><p class="top"><a href="#top">Back to the overview</a></p>
-<h3 id="rain">Rain radar (optional)</h3>
+<p>Also available on VELUX departure mode in the SmartThings app (Settings).</p><p class="top"><a href="#top">Back to the overview</a></p></div>
+<div class="card"><h3 id="rain">Rain radar (optional)</h3>
 {st_rain}
 <p>Rain now and in the next 2 hours around your home, with a radius. Buienradar in the Netherlands and Belgium,
 Open-Meteo everywhere else. Also available on the Buienradar device in SmartThings
@@ -4013,9 +4031,9 @@ Open-Meteo everywhere else. Also available on the Buienradar device in SmartThin
 <label>Radius in meters (0 = only this address, max 25000)</label><input name="radius_m" type="number" min="0" max="25000" value="{rain_radius}">
 <label>Rain from (mm/h)</label><input name="threshold" value="{rain_thr}">
 <button type="submit">Save rain radar</button></form>
-<p class="top"><a href="#top">Back to the overview</a></p>
+<p class="top"><a href="#top">Back to the overview</a></p></div>
 <h2 class="g">Voice and helpers</h2>
-<h3 id="echo">Amazon Echo (optional, unofficial)</h3>
+<div class="card"><h3 id="echo">Amazon Echo (optional, unofficial)</h3>
 {st_echo}
 <p>Let SmartThings routines make an Echo speak, announce, set its volume or run anything you can say to Alexa
 ("play Radio 538"). Amazon has no official API for this: the bridge uses the Alexa website, like Alexa Media Player
@@ -4028,8 +4046,8 @@ login page, relayed by the bridge, so 2FA and captchas work); afterwards only a 
 <label>Amazon site of your Alexa account</label><select name="url">{echo_domains}</select>
 <button type="submit">Start Amazon login</button></form>
 {echo_link}
-<p class="top"><a href="#top">Back to the overview</a></p>
-<h3 id="irobot">iRobot favorites (optional)</h3>
+<p class="top"><a href="#top">Back to the overview</a></p></div>
+<div class="card"><h3 id="irobot">iRobot favorites (optional)</h3>
 {st_irobot}
 <p>Email and password of the iRobot app. The bridge only reads the names and rooms of your favorites,
 twice a day, for the Roomba driver on the hub. The robot itself is controlled locally.</p>
@@ -4038,7 +4056,7 @@ twice a day, for the Roomba driver on the hub. The robot itself is controlled lo
 <label>Password</label><input name="password" type="password" autocomplete="off" required>
 <label>Country (2 letters)</label><input name="country" value="NL" maxlength="2" required>
 <button type="submit">Save iRobot and connect</button></form>
-<p class="top"><a href="#top">Back to the overview</a></p>
+<p class="top"><a href="#top">Back to the overview</a></p></div>
 </body></html>"""
 
 
@@ -4142,8 +4160,7 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
         elif api_paired(cfg):
             seen = PAIRING.get("last_ip") or cfg.get("api_paired_ip")
             summary = "paired" + (f" ({seen})" if seen else "")
-            lines.append("Hub paired" + (f" ({seen})" if seen else "") + ": the LAN API only accepts signed requests "
-                         "from it.")
+            lines.append("The LAN API only accepts signed requests from this hub.")
         else:
             summary = "NOT PAIRED: your devices do not reach SmartThings"
             lines.append("The LAN API is closed until you pair. Press Pair below and Allow your hub.")
@@ -4319,16 +4336,16 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
         return out
 
     def status_html(sections) -> tuple[str, dict[str, str]]:
-        """Overview with links, and the detail block per part."""
+        """Overview (a list like the SmartThings app, each part with its status below it), and the status block per part."""
         items = []
         blocks = {}
         for anchor, title, summary, lines in sections:
-            warn = summary.startswith(("NOT", "error")) or summary == "error"
-            items.append(f'<li><a href="#{anchor}">{html.escape(title)}</a>: '
-                         + (f"<b>{html.escape(summary)}</b>" if warn else html.escape(summary)) + "</li>")
-            body = "<br>".join(html.escape(x) for x in [summary[:1].upper() + summary[1:] + "."] + lines)
-            blocks[anchor] = f'<div class="st">{body}</div>'
-        return "<ul class=\"toc\">" + "".join(items) + "</ul>", blocks
+            bad = summary.startswith(("NOT", "error")) or summary == "error"
+            items.append(f'<a class="item{" bad" if bad else ""}" href="#{anchor}"><b>{html.escape(title)}</b>'
+                         f'<span>{html.escape(summary[:1].upper() + summary[1:])}</span></a>')
+            body = "<br>".join(html.escape(x) for x in [summary[:1].upper() + summary[1:]] + lines)
+            blocks[anchor] = f'<div class="st{" bad" if bad else ""}">{body}</div>'
+        return '<div class="list">' + "".join(items) + "</div>", blocks
 
     def plain_from_lan(req) -> bool:
         """Setup page over plain http from another address than this computer: credentials would cross the LAN
