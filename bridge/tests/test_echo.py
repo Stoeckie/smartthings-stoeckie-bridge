@@ -114,7 +114,7 @@ def test_setup_login_flow():
         assert cfg["echo"]["email"] == "a@b.nl" and "password" not in cfg["echo"]  # the password is not kept
         assert sb.ECHO_LOGIN["proxy"] is not None and "/setup/echo-auth" in sb.ECHO_LOGIN["url"]
         page = await (await c.get("/setup")).text()
-        assert "Open the Amazon login" in page and "secret-pw" not in page
+        assert "Log in at Amazon" in page and "secret-pw" not in page
         # the relayed Amazon page has no setup CSP (its scripts must run), other setup pages keep it
         r = await c.get("/setup")
         assert "Content-Security-Policy" in r.headers

@@ -78,7 +78,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-10e"
+VERSION = "2026-11-10f"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -3910,6 +3910,10 @@ label{display:block;margin:14px 0 6px;font-size:14px;font-weight:600}
 input,textarea,select{width:100%;padding:12px 14px;border:0;border-radius:14px;background:var(--field);color:var(--text);
 font:15px system-ui,sans-serif}textarea{height:90px}
 button{margin-top:16px;padding:12px 22px;font-size:16px;font-weight:600;border:0;border-radius:999px;background:var(--accent);
+color:#fff}.step{border:1px solid var(--line);border-radius:16px;padding:14px 16px;margin:12px 0}.step.active{border:2px solid var(--accent)}
+.step.off{opacity:.55}.step.done summary b::after{content:"  \\2713 done (tap to change)";color:var(--accent);font-weight:400}
+summary{cursor:pointer}.hint{color:var(--sub);font-size:13px}
+a.btn{display:inline-block;margin-top:8px;padding:12px 22px;font-weight:600;border-radius:999px;background:var(--accent);
 color:#fff}form+form{margin-top:6px;padding-top:6px;border-top:1px solid var(--line)}.top{font-size:13px;margin:14px 0 0}
 </style></head><body>
 <h1 id="top">Stoeckie Bridge <small>{version}</small></h1>
@@ -4038,15 +4042,20 @@ Open-Meteo everywhere else. Also available on the Buienradar device in SmartThin
 {st_echo}
 <p>Let SmartThings routines make an Echo speak, announce, set its volume or run anything you can say to Alexa
 ("play Radio 538"). Amazon has no official API for this: the bridge uses the Alexa website, like Alexa Media Player
-in Home Assistant, and it can stop working when Amazon changes it. You log in once through this page (Amazon's own
-login page, relayed by the bridge, so 2FA and captchas work); afterwards only a login token is kept.</p>
+in Home Assistant, and it can stop working when Amazon changes it. Afterwards only a login token is kept.</p>
+<p><b>The login has two steps.</b></p>
+<div class="step{echo_s1}"><details{echo_s1_open}><summary><b>Step 1 of 2: your Amazon account</b></summary>
 <form method="post"><input type="hidden" name="section" value="echo">
 <label>Amazon email</label><input name="email" type="email" autocomplete="off" required>
 <label>Password (only for this login, not kept)</label><input name="password" type="password" autocomplete="off" required>
-<label>2FA app secret (optional, fills the code for you)</label><input name="otp_secret" autocomplete="off">
+<label>Authenticator app key (recommended)</label><input name="otp_secret" autocomplete="off">
+<p class="hint">Through the bridge Amazon often sends no SMS and passkeys do not work. Add an authenticator app at
+Amazon (Login &amp; security, 2-Step Verification, Add new app, Can't scan the barcode) and paste that key here: the
+bridge then fills in the code itself.</p>
 <label>Amazon site of your Alexa account</label><select name="url">{echo_domains}</select>
-<button type="submit">Start Amazon login</button></form>
-{echo_link}
+<button type="submit">Continue to step 2</button></form></details></div>
+<div class="step{echo_s2}" id="echo2"><b>Step 2 of 2: log in at Amazon</b>
+{echo_link}</div>
 <p class="top"><a href="#top">Back to the overview</a></p></div>
 <div class="card"><h3 id="irobot">iRobot favorites (optional)</h3>
 {st_irobot}
@@ -4386,9 +4395,11 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
 
     def echo_link() -> str:
         if ECHO_LOGIN.get("proxy") is None or ECHO_LOGIN.get("done"):
-            return ""
-        return ('<p><b><a href="' + html.escape(str(ECHO_LOGIN["url"])) + '">Open the Amazon login</a></b> '
-                '(same tab; after the login you come back here).</p>')
+            return ('<p class="hint">Available after step 1. You then log in on Amazon\'s own page (relayed by the '
+                    'bridge) and come back here by yourself.</p>')
+        return ('<p class="hint">Amazon\'s own login page opens, relayed by the bridge. Log in there; afterwards you '
+                'come back here by yourself and the status above says connected.</p>'
+                '<a class="btn" href="' + html.escape(str(ECHO_LOGIN["url"])) + '">Log in at Amazon</a>')
 
     async def setup_get(req):
         if not local_only(req):
@@ -4441,7 +4452,12 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
                 .replace("{tuya_saved}", html.escape(tuya_saved))
                 .replace("{echo_domains}", "".join(
                     f'<option value="{d}"{" selected" if d == echo_url else ""}>{d}</option>' for d in ECHO_DOMAINS))
-                .replace("{echo_link}", echo_link()))
+                .replace("{echo_link}", echo_link())
+                .replace("{echo_s1}", " done" if ECHO_LOGIN.get("proxy") is not None and not ECHO_LOGIN.get("done") else "")
+                .replace("{echo_s1_open}", "" if ECHO_LOGIN.get("proxy") is not None and not ECHO_LOGIN.get("done")
+                         else " open")
+                .replace("{echo_s2}", " active" if ECHO_LOGIN.get("proxy") is not None and not ECHO_LOGIN.get("done")
+                         else " off"))
         for r in TUYA_REGIONS:
             page = page.replace("{tuya_r_" + r + "}", " selected" if tuya_region == r else "")
         return web.Response(text=page, content_type="text/html")
@@ -4509,7 +4525,7 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             except Exception as ex:  # noqa: BLE001
                 ECHO_LOGIN.update(proxy=None, error=safe_err(ex)[:200])
                 log.warning("[setup] Amazon Echo login could not start: %s", safe_err(ex))
-            raise web.HTTPFound("/setup")
+            raise web.HTTPFound("/setup#echo2")
         elif section in ("fglair_settings", "velux_settings"):
             name = section.split("_")[0]
             sec = poll_seconds(form.get("poll_seconds"), 60)
@@ -4779,7 +4795,7 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
         except Exception as ex:  # noqa: BLE001
             ECHO_LOGIN.update(error=safe_err(ex)[:200])
             log.warning("[setup] Amazon Echo login failed: %s", safe_err(ex))
-        raise web.HTTPFound("/setup")
+        raise web.HTTPFound("/setup#echo")
 
     app.router.add_route("*", "/setup/echo-auth{tail:.*}", echo_auth)
     app.router.add_get("/setup/echo-done", echo_done)

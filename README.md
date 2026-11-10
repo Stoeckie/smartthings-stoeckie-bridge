@@ -162,10 +162,13 @@ Amazon has no official API to make an Echo speak. Like Alexa Media Player in Hom
 Alexa website through [alexapy](https://gitlab.com/keatontaylor/alexapy) (Apache-2.0). It can stop working when
 Amazon changes that website.
 
-1. On the setup page, under **Amazon Echo**, enter your Amazon email and password, choose the Amazon site of your
-   Alexa account (amazon.de for the Netherlands and Germany) and press **Start Amazon login**.
-2. Click **Open the Amazon login**. That is Amazon's own login page, relayed by the bridge, so 2FA and captchas work
-   as usual. Afterwards you are back on the setup page.
+1. **Step 1** on the setup page, under **Amazon Echo**: enter your Amazon email and password, the key of an
+   authenticator app (recommended, see below) and the Amazon site of your Alexa account, and press
+   **Continue to step 2**.
+2. **Step 2**: press **Log in at Amazon**. That is Amazon's own login page, relayed by the bridge. Afterwards you are
+   back on the setup page. Through the bridge Amazon often sends no SMS and passkeys do not work (a passkey only works
+   on amazon.com itself). Add an authenticator app at Amazon (Login & security, 2-Step Verification, Add new app,
+   Can't scan the barcode) and paste that key in step 1: the bridge then fills in the code itself.
 3. The bridge keeps only a login token in `config.json` (not the password) and creates one device per Echo
    (speakers and screens; not the Alexa app). The texts you send are not written to the log, only their length.
 
