@@ -78,7 +78,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-10b"
+VERSION = "2026-11-10c"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -3892,10 +3892,13 @@ SETUP_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <style>body{font:15px system-ui,sans-serif;max-width:640px;margin:32px auto;padding:0 16px;color:#222}
 label{display:block;margin:14px 0 4px;font-weight:600}input,textarea,select{width:100%;box-sizing:border-box;padding:8px;
 font:13px ui-monospace,monospace}textarea{height:90px}button{margin-top:18px;padding:10px 18px;font-size:15px}
-.st{padding:10px;border-radius:6px;background:#f2f2f2;margin:12px 0}h3{margin-top:36px}</style></head><body>
-<h2>Stoeckie Bridge <small>{version}</small></h2><div class="st">{status}</div>
-<p>Everything you enter here is stored only locally, in config.json on this computer.</p>
-<h3>Pair the SmartThings hub</h3>
+.st{padding:10px;border-radius:6px;background:#f2f2f2;margin:12px 0}h2.g{margin-top:44px;border-bottom:1px solid #ccc;padding-bottom:4px}h3{margin-top:30px}.toc{padding-left:20px;line-height:1.6}.top{font-size:13px}</style></head><body>
+<h2 id="top">Stoeckie Bridge <small>{version}</small></h2>
+<p>Everything you enter here is stored only locally, in config.json on this computer. Click a part to go to its status and settings.</p>
+{status}
+<h2 class="g">SmartThings</h2>
+<h3 id="hub">SmartThings hub</h3>
+{st_hub}
 <p>Until a hub is paired the bridge does not serve your devices on the LAN. After pairing it only accepts signed
 requests from the paired hub. Press Pair; within a minute your hub shows up here with its IP address. Check that it
 is your hub (SmartThings app, hub details, or your router) and press Allow (driver Stoeckie Bridge 2026-11-02b or
@@ -3905,15 +3908,10 @@ newer).</p>
 <button type="submit">Pair (open for 5 minutes)</button></form>
 <form method="post"><input type="hidden" name="section" value="api_new_token">
 <button type="submit">New token (pair all hubs again)</button></form>
-<h3>AEG / Electrolux</h3>
-<p>On <b>developer.electrolux.one</b> (sign in with your AEG / Electrolux account) create an API key and generate
-an access token and a refresh token.</p>
-<form method="post"><input type="hidden" name="section" value="aeg">
-<label>API key</label><input name="api_key" autocomplete="off" required>
-<label>Access token</label><textarea name="access_token" required></textarea>
-<label>Refresh token</label><textarea name="refresh_token" required></textarea>
-<button type="submit">Save AEG and connect</button></form>
-<h3>Fujitsu air conditioners (FGLair)</h3>
+<p class="top"><a href="#top">Back to the overview</a></p>
+<h2 class="g">Climate</h2>
+<h3 id="fglair">Fujitsu air conditioners (FGLair)</h3>
+{st_fglair}
 <p>Email and password of the FGLair app.</p>
 <form method="post"><input type="hidden" name="section" value="fglair">
 <label>Email</label><input name="username" type="email" autocomplete="off" required>
@@ -3926,56 +3924,9 @@ an access token and a refresh token.</p>
 <input name="poll_seconds" type="number" min="30" max="600" value="{fglair_poll}" required>
 <button type="submit">Save setting</button></form>
 <p>Also available per air conditioner in the SmartThings app (Settings).</p>
-<h3>Škoda</h3>
-<p>In the MyŠkoda app (8.16 or newer) create an API key: <b>Settings, Smart Home, API keys</b>, and choose your car.
-The VIN (17 characters) is shown in the app with the car and on the registration document.</p>
-<form method="post"><input type="hidden" name="section" value="skoda">
-<label>API key</label><input name="api_key" autocomplete="off" required>
-<label>VIN</label><input name="vin" maxlength="17" minlength="17" required>
-<button type="submit">Save Škoda and connect</button></form>
-<form method="post"><input type="hidden" name="section" value="skoda_settings">
-<label>Update the car every (minutes, at least 5; Škoda allows 20 requests per hour)</label>
-<input name="poll_minutes" type="number" min="5" max="60" value="{skoda_poll}" required>
-<label>Temperature for climate on (°C)</label><input name="climate_temp" value="{skoda_temp}" required>
-<button type="submit">Save settings</button></form>
-<p>These settings are also available with the car in the SmartThings app (Settings).</p>
-<h3>iRobot (optional)</h3>
-<p>Email and password of the iRobot app. The bridge only reads the names and rooms of your favorites,
-twice a day, for the Roomba driver on the hub. The robot itself is controlled locally.</p>
-<form method="post"><input type="hidden" name="section" value="irobot">
-<label>Email</label><input name="username" type="email" autocomplete="off" required>
-<label>Password</label><input name="password" type="password" autocomplete="off" required>
-<label>Country (2 letters)</label><input name="country" value="NL" maxlength="2" required>
-<button type="submit">Save iRobot and connect</button></form>
-<h3>Amazon Echo (optional)</h3>
-<p>Let SmartThings routines make an Echo speak, announce, set its volume or run anything you can say to Alexa
-("play Radio 538"). Amazon has no official API for this: the bridge uses the Alexa website, like Alexa Media Player
-in Home Assistant, and it can stop working when Amazon changes it. You log in once through this page (Amazon's own
-login page, relayed by the bridge, so 2FA and captchas work); afterwards only a login token is kept.
-{echo_status}</p>
-<form method="post"><input type="hidden" name="section" value="echo">
-<label>Amazon email</label><input name="email" type="email" autocomplete="off" required>
-<label>Password (only for this login, not kept)</label><input name="password" type="password" autocomplete="off" required>
-<label>2FA app secret (optional, fills the code for you)</label><input name="otp_secret" autocomplete="off">
-<label>Amazon site of your Alexa account</label><select name="url">{echo_domains}</select>
-<button type="submit">Start Amazon login</button></form>
-{echo_link}
-<h3>Rain radar (optional)</h3>
-<p>Rain now and in the next 2 hours around your home, with a radius. Buienradar in the Netherlands and Belgium,
-Open-Meteo everywhere else. Also available on the Buienradar device in SmartThings
-(switch it on with the setting Buienradar on the Stoeckie Bridge device). The last change wins.</p>
-<form method="post"><input type="hidden" name="section" value="buienradar">
-<label>Postcode (NL)</label><input name="postcode" value="{rain_pc}" placeholder="1234AB">
-<label>House number (NL)</label><input name="housenumber" value="{rain_nr}" placeholder="12">
-<label>Or address (any country: street number, city, country)</label><input name="address" value="{rain_addr}" placeholder="Rue de la Loi 16, Brussels, Belgium">
-<label>Or latitude, longitude</label><input name="location" value="{rain_loc}" placeholder="52.37, 4.89">
-<label>Source</label><select name="provider"><option value="auto"{rain_p_auto}>Automatic (Buienradar in NL/BE, otherwise Open-Meteo)</option>
-<option value="buienradar"{rain_p_buienradar}>Buienradar (NL/BE, radar, 5 minutes)</option>
-<option value="openmeteo"{rain_p_openmeteo}>Open-Meteo (worldwide, 15 minutes)</option></select>
-<label>Radius in meters (0 = only this address, max 25000)</label><input name="radius_m" type="number" min="0" max="25000" value="{rain_radius}">
-<label>Rain from (mm/h)</label><input name="threshold" value="{rain_thr}">
-<button type="submit">Save rain radar</button></form>
-<h3>Tuya / Smart Life (optional, local)</h3>
+<p class="top"><a href="#top">Back to the overview</a></p>
+<h3 id="tuya">Tuya / Smart Life thermostats and heaters (local, optional)</h3>
+{st_tuya}
 <p>Thermostats and heaters from the Smart Life (or Tuya Smart) app, controlled on the LAN. On <b>iot.tuya.com</b>
 create a cloud project (data center of your app account, e.g. Central Europe), link your Smart Life app account
 with its QR code (Devices, Link App Account) and copy the Access ID and Access Secret from the project overview.
@@ -3991,7 +3942,45 @@ local. Keys stay in config.json and are never shown here.</p>
 <button type="submit">Save Tuya and fetch devices</button></form>
 <form method="post"><input type="hidden" name="section" value="tuya_fetch">
 <button type="submit">Fetch devices again (new device, new key after a reset)</button></form>
-<h3>VELUX ACTIVE departure mode (optional)</h3>
+<p class="top"><a href="#top">Back to the overview</a></p>
+<h2 class="g">Appliances</h2>
+<h3 id="aeg">AEG / Electrolux dryer</h3>
+{st_aeg}
+<p>On <b>developer.electrolux.one</b> (sign in with your AEG / Electrolux account) create an API key and generate
+an access token and a refresh token.</p>
+<form method="post"><input type="hidden" name="section" value="aeg">
+<label>API key</label><input name="api_key" autocomplete="off" required>
+<label>Access token</label><textarea name="access_token" required></textarea>
+<label>Refresh token</label><textarea name="refresh_token" required></textarea>
+<button type="submit">Save AEG and connect</button></form>
+<p class="top"><a href="#top">Back to the overview</a></p>
+<h3 id="homeconnect">Home Connect dishwasher and oven (local, optional)</h3>
+{st_homeconnect}
+<p>Set up with the profile files of the Home Connect Profile Downloader in the folder homeconnect next to the bridge (see the README); nothing to enter here.</p>
+<p class="top"><a href="#top">Back to the overview</a></p>
+<h3 id="samsung">Samsung washer (local, experimental)</h3>
+{st_samsung}
+<p>Set up in config.json (see the README); nothing to enter here.</p>
+<p class="top"><a href="#top">Back to the overview</a></p>
+<h2 class="g">Car</h2>
+<h3 id="skoda">Škoda</h3>
+{st_skoda}
+<p>In the MyŠkoda app (8.16 or newer) create an API key: <b>Settings, Smart Home, API keys</b>, and choose your car.
+The VIN (17 characters) is shown in the app with the car and on the registration document.</p>
+<form method="post"><input type="hidden" name="section" value="skoda">
+<label>API key</label><input name="api_key" autocomplete="off" required>
+<label>VIN</label><input name="vin" maxlength="17" minlength="17" required>
+<button type="submit">Save Škoda and connect</button></form>
+<form method="post"><input type="hidden" name="section" value="skoda_settings">
+<label>Update the car every (minutes, at least 5; Škoda allows 20 requests per hour)</label>
+<input name="poll_minutes" type="number" min="5" max="60" value="{skoda_poll}" required>
+<label>Temperature for climate on (°C)</label><input name="climate_temp" value="{skoda_temp}" required>
+<button type="submit">Save settings</button></form>
+<p>These settings are also available with the car in the SmartThings app (Settings).</p>
+<p class="top"><a href="#top">Back to the overview</a></p>
+<h2 class="g">Home</h2>
+<h3 id="velux">VELUX ACTIVE departure mode (optional)</h3>
+{st_velux}
 <p>To lock and unlock (departure mode: all windows and blinds blocked) from SmartThings.
 The windows themselves keep running locally over HomeKit. Email and password of the VELUX ACTIVE app.</p>
 <form method="post"><input type="hidden" name="section" value="velux">
@@ -4007,7 +3996,50 @@ click Pair gateway, wait until the light on the gateway blinks and then press th
 <label>Update departure mode and rain sensor every (seconds, 30 to 600)</label>
 <input name="poll_seconds" type="number" min="30" max="600" value="{velux_poll}" required>
 <button type="submit">Save setting</button></form>
-<p>Also available on VELUX departure mode in the SmartThings app (Settings).</p></body></html>"""
+<p>Also available on VELUX departure mode in the SmartThings app (Settings).</p><p class="top"><a href="#top">Back to the overview</a></p>
+<h3 id="rain">Rain radar (optional)</h3>
+{st_rain}
+<p>Rain now and in the next 2 hours around your home, with a radius. Buienradar in the Netherlands and Belgium,
+Open-Meteo everywhere else. Also available on the Buienradar device in SmartThings
+(switch it on with the setting Buienradar on the Stoeckie Bridge device). The last change wins.</p>
+<form method="post"><input type="hidden" name="section" value="buienradar">
+<label>Postcode (NL)</label><input name="postcode" value="{rain_pc}" placeholder="1234AB">
+<label>House number (NL)</label><input name="housenumber" value="{rain_nr}" placeholder="12">
+<label>Or address (any country: street number, city, country)</label><input name="address" value="{rain_addr}" placeholder="Rue de la Loi 16, Brussels, Belgium">
+<label>Or latitude, longitude</label><input name="location" value="{rain_loc}" placeholder="52.37, 4.89">
+<label>Source</label><select name="provider"><option value="auto"{rain_p_auto}>Automatic (Buienradar in NL/BE, otherwise Open-Meteo)</option>
+<option value="buienradar"{rain_p_buienradar}>Buienradar (NL/BE, radar, 5 minutes)</option>
+<option value="openmeteo"{rain_p_openmeteo}>Open-Meteo (worldwide, 15 minutes)</option></select>
+<label>Radius in meters (0 = only this address, max 25000)</label><input name="radius_m" type="number" min="0" max="25000" value="{rain_radius}">
+<label>Rain from (mm/h)</label><input name="threshold" value="{rain_thr}">
+<button type="submit">Save rain radar</button></form>
+<p class="top"><a href="#top">Back to the overview</a></p>
+<h2 class="g">Voice and helpers</h2>
+<h3 id="echo">Amazon Echo (optional, unofficial)</h3>
+{st_echo}
+<p>Let SmartThings routines make an Echo speak, announce, set its volume or run anything you can say to Alexa
+("play Radio 538"). Amazon has no official API for this: the bridge uses the Alexa website, like Alexa Media Player
+in Home Assistant, and it can stop working when Amazon changes it. You log in once through this page (Amazon's own
+login page, relayed by the bridge, so 2FA and captchas work); afterwards only a login token is kept.</p>
+<form method="post"><input type="hidden" name="section" value="echo">
+<label>Amazon email</label><input name="email" type="email" autocomplete="off" required>
+<label>Password (only for this login, not kept)</label><input name="password" type="password" autocomplete="off" required>
+<label>2FA app secret (optional, fills the code for you)</label><input name="otp_secret" autocomplete="off">
+<label>Amazon site of your Alexa account</label><select name="url">{echo_domains}</select>
+<button type="submit">Start Amazon login</button></form>
+{echo_link}
+<p class="top"><a href="#top">Back to the overview</a></p>
+<h3 id="irobot">iRobot favorites (optional)</h3>
+{st_irobot}
+<p>Email and password of the iRobot app. The bridge only reads the names and rooms of your favorites,
+twice a day, for the Roomba driver on the hub. The robot itself is controlled locally.</p>
+<form method="post"><input type="hidden" name="section" value="irobot">
+<label>Email</label><input name="username" type="email" autocomplete="off" required>
+<label>Password</label><input name="password" type="password" autocomplete="off" required>
+<label>Country (2 letters)</label><input name="country" value="NL" maxlength="2" required>
+<button type="submit">Save iRobot and connect</button></form>
+<p class="top"><a href="#top">Back to the overview</a></p>
+</body></html>"""
 
 
 def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> web.Application:
@@ -4096,26 +4128,42 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             resp.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'"
         return resp
 
-    def status_text() -> str:
+    def status_sections() -> list[tuple[str, str, str, list[str]]]:
+        """Per part of the page: (anchor, title, one-line summary, detail lines)."""
         cfg = load_config()
         mem = memory_mb()
-        e, f = cfg.get("electrolux") or {}, cfg.get("fglair") or {}
+        out: list[tuple[str, str, str, list[str]]] = []
+
+        # SmartThings hub
         lines = []
-        devs = [d for d in REG.devices.values() if d["type"] == "dryer"]
-        if not aeg_configured(e):
-            lines.append("AEG: not set up yet.")
-        elif devs:
-            lines.append("AEG connected: " + ", ".join(f"{d['name']} ({d['state'].get('applianceState')})" for d in devs))
+        if PAIRING["until"] > time.time():
+            summary = f"pairing open ({int(PAIRING['until'] - time.time())} s left)"
+            lines.append("Pairing is open: wait until your hub shows up below and press Allow.")
+        elif api_paired(cfg):
+            seen = PAIRING.get("last_ip") or cfg.get("api_paired_ip")
+            summary = "paired" + (f" ({seen})" if seen else "")
+            lines.append("Hub paired" + (f" ({seen})" if seen else "") + ": the LAN API only accepts signed requests "
+                         "from it.")
         else:
-            lines.append("AEG set up, no dryer found yet (see bridge.log).")
+            summary = "NOT PAIRED: your devices do not reach SmartThings"
+            lines.append("The LAN API is closed until you pair. Press Pair below and Allow your hub.")
+        if mem:
+            lines.append(f"Memory: {mem[0]:.0f} MB (highest {mem[1]:.0f} MB since the start)")
+        if SETUP_LAN_KEY:
+            lines.append(f"Setup key for a phone or another device on your network: {setup_key()}")
+        out.append(("hub", "SmartThings hub", summary, lines))
+
+        # Fujitsu
+        f = cfg.get("fglair") or {}
         acs = [d for d in REG.devices.values() if d["type"] == "aircon"]
+        lines = []
         if not fglair_configured(f):
-            lines.append("FGLair: not set up yet.")
+            summary = "not set up"
         elif acs:
-            lines.append("FGLair connected: " + ", ".join(
-                f"{d['name']} ({d['state'].get('mode')}, {d['state'].get('setpoint')} C)" for d in acs))
+            summary = f"connected, {len(acs)} air conditioner(s)"
+            lines += [f"{d['name']}: {d['state'].get('mode')}, {d['state'].get('setpoint')} °C" for d in acs]
         else:
-            lines.append("FGLair set up, no air conditioner found yet (see bridge.log).")
+            summary = "set up, no air conditioner found yet (see bridge.log)"
         for d in acs:  # details per unit (also for the demo unit)
             if REG.info.get(d["id"]):
                 lines.append(f"{d['name']}: {REG.info[d['id']]}")
@@ -4126,101 +4174,161 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
                              f"horizontal airflow {g.get('horizontal', '?')}")
             if REG.commands.get(d["id"]):
                 lines.append(f"{d['name']} last commands from SmartThings: " + "; ".join(REG.commands[d["id"]]))
-        k = cfg.get("skoda") or {}
-        cars = [d for d in REG.devices.values() if d["type"] == "car"]
-        if skoda_configured(k):
-            if cars:
-                lines.append("Škoda connected: " + ", ".join(
-                    f"{d['name']} ({d['state'].get('battery')}%, key valid until {d['state'].get('keyExpires') or '?'})"
-                    for d in cars))
-            else:
-                lines.append("Škoda set up, no data yet (see bridge.log).")
-        b = cfg.get("buienradar") or {}
-        if buienradar_enabled(b):
-            rd = REG.devices.get("buienradar")
-            lines.append("Rain radar: " + (rd["state"].get("summary", "") if rd else "fetching")
-                         + f" ({b.get('place') or 'no location'}, radius {b.get('radius_m', 0)} m)")
-        hcs = [d for d in REG.devices.values() if d["id"].startswith("homeconnect-")]
-        if hcs:
-            lines.append("Home Connect (local): " + ", ".join(
-                f"{d['name']} ({'connected' if d.get('online') else 'not connected'}, {d['state'].get('operation', '?')})"
-                for d in hcs))
-        elif homeconnect_configured():
-            lines.append("Home Connect: profiles found, starting (needs Python 3.13, see bridge.log).")
+        out.append(("fglair", "Fujitsu air conditioners (FGLair)", summary, lines))
+
+        # Tuya
         t = cfg.get("tuya") or {}
         tds = [d for d in REG.devices.values() if d["type"] in ("tuya_thermostat", "tuya_heater")]
+        lines = []
         if TUYA.get("fetching"):
-            lines.append("Tuya: fetching the devices from the Tuya cloud...")
+            lines.append("Fetching the devices from the Tuya cloud...")
         elif TUYA.get("error"):
             lines.append("Tuya cloud: " + str(TUYA["error"]))
         if tuya_cloud_configured(t) or t.get("devices") or tds:
             fetched = t.get("fetched")
-            lines.append(f"Tuya: {len(t.get('cloud_devices') or [])} device(s) from the cloud"
+            lines.append(f"{len(t.get('cloud_devices') or [])} device(s) from the cloud"
                          + (time.strftime(" (fetched %Y-%m-%d %H:%M)", time.localtime(fetched)) if fetched else "")
                          + f", {len(t.get('devices') or [])} by hand in config.json")
+            on = sum(1 for d in tds if d.get("online"))
+            summary = f"{on} of {len(tds)} device(s) online" if tds else "set up, no device yet"
+        else:
+            summary = "not set up"
         for d in tds:
             s_ = d["state"]
             temp = s_.get("temperature")
-            lines.append(f"Tuya {d['name']}: {'online' if d.get('online') else 'offline'}, {s_.get('power', '?')}"
+            lines.append(f"{d['name']}: {'online' if d.get('online') else 'offline'}, {s_.get('power', '?')}"
                          + (f", {temp} °C" if temp is not None else "")
                          + (f", set {s_['setpoint']} °C" if s_.get("setpoint") is not None else "")
                          + (f", {s_['mode']}" if s_.get("mode") else "")
                          + (f"; {REG.info[d['id']]}" if REG.info.get(d["id"]) else ""))
             if REG.commands.get(d["id"]):
-                lines.append(f"Tuya {d['name']} last commands from SmartThings: " + "; ".join(REG.commands[d["id"]]))
+                lines.append(f"{d['name']} last commands from SmartThings: " + "; ".join(REG.commands[d["id"]]))
             if (TUYA.get("raw") or {}).get(d["id"]):
-                lines.append(f"Tuya {d['name']} data points: {TUYA['raw'][d['id']]}")
+                lines.append(f"{d['name']} data points: {TUYA['raw'][d['id']]}")
+        out.append(("tuya", "Tuya / Smart Life thermostats and heaters (local)", summary, lines))
+
+        # AEG
+        e = cfg.get("electrolux") or {}
+        devs = [d for d in REG.devices.values() if d["type"] == "dryer"]
+        if not aeg_configured(e):
+            summary, lines = "not set up", []
+        elif devs:
+            summary = "connected"
+            lines = [f"{d['name']}: {d['state'].get('applianceState')}" for d in devs]
+        else:
+            summary, lines = "set up, no dryer found yet (see bridge.log)", []
+        out.append(("aeg", "AEG / Electrolux dryer", summary, lines))
+
+        # Home Connect and Samsung (set up with files, see README)
+        hcs = [d for d in REG.devices.values() if d["id"].startswith("homeconnect-")]
+        if hcs:
+            summary = f"{sum(1 for d in hcs if d.get('online'))} of {len(hcs)} connected"
+            lines = [f"{d['name']}: {'connected' if d.get('online') else 'not connected'}, "
+                     f"{d['state'].get('operation', '?')}" for d in hcs]
+        elif homeconnect_configured():
+            summary, lines = "profiles found, starting", ["Needs Python 3.13 or newer, see bridge.log."]
+        else:
+            summary, lines = "not set up", []
+        out.append(("homeconnect", "Home Connect dishwasher and oven (local)", summary, lines))
+        sss = [d for d in REG.devices.values() if d["id"].startswith("samsung-")]
+        summary = (f"{sum(1 for d in sss if d.get('online'))} of {len(sss)} online" if sss else "not set up")
+        lines = [f"{d['name']}: {'online' if d.get('online') else 'offline'}" for d in sss]
+        out.append(("samsung", "Samsung washer (local, experimental)", summary, lines))
+
+        # Škoda
+        k = cfg.get("skoda") or {}
+        cars = [d for d in REG.devices.values() if d["type"] == "car"]
+        if not skoda_configured(k):
+            summary, lines = "not set up", []
+        elif cars:
+            summary = "connected"
+            lines = [f"{d['name']}: {d['state'].get('battery')}%, key valid until {d['state'].get('keyExpires') or '?'}"
+                     for d in cars]
+        else:
+            summary, lines = "set up, no data yet (see bridge.log)", []
+        out.append(("skoda", "Škoda car", summary, lines))
+
+        # VELUX
         v = cfg.get("velux") or {}
-        if velux_configured(v):
+        lines = []
+        if not velux_configured(v):
+            summary = "not set up"
+        else:
             locks = [d for d in REG.devices.values() if d["type"] == "velux_lock"]
             if VELUX.get("error"):
-                lines.append("VELUX: " + str(VELUX["error"]))
+                summary = "error"
+                lines.append(str(VELUX["error"]))
             elif locks:
                 st = locks[0]["state"]
-                lines.append("VELUX connected: " + ("locked (departure mode)" if st.get("locked") else "unlocked")
-                             + ("" if st.get("canUnlock") else ", unlocking needs Pair gateway first"))
+                summary = "locked (departure mode)" if st.get("locked") else "unlocked"
+                if not st.get("canUnlock"):
+                    lines.append("Unlocking needs Pair gateway first.")
             else:
-                lines.append("VELUX set up, connecting.")
-            p = VELUX_PAIR.get("state")
-            if p == "press":
-                lines.append("VELUX gateway: press the button on the gateway NOW (light blinks). Then reload this page.")
-            elif p == "waiting":
-                lines.append("VELUX gateway: starting to pair...")
-            elif p == "done":
-                lines.append("VELUX gateway paired: unlocking works.")
-            elif p == "failed":
-                lines.append("VELUX pairing failed: " + str(VELUX_PAIR.get("error")))
-        r = cfg.get("irobot") or {}
-        if irobot_configured(r):
-            if IROBOT.get("error"):
-                lines.append("iRobot: " + str(IROBOT["error"]))
-            elif IROBOT.get("updated"):
-                lines.append("iRobot connected: " + ", ".join(
-                    f"{v.get('name') or k}: {len(v['favorites'])} favorite(s)" for k, v in IROBOT["robots"].items()))
-            else:
-                lines.append("iRobot set up, fetching.")
-        if echo_configured(cfg.get("echo") or {}):
-            if ECHO.get("error"):
-                lines.append("Amazon Echo: " + str(ECHO["error"]))
-            elif ECHO.get("updated"):
-                lines.append(f"Amazon Echo connected: {ECHO['devices']} device(s)")
-            else:
-                lines.append("Amazon Echo logged in, fetching devices.")
-        if PAIRING["until"] > time.time():
-            lines.append(f"SmartThings pairing is open ({int(PAIRING['until'] - time.time())} s left): wait until "
-                         "your hub shows up below and press Allow.")
-        elif api_paired(cfg):
-            seen = PAIRING.get("last_ip") or cfg.get("api_paired_ip")
-            if mem:
-                lines.append(f"Memory: {mem[0]:.0f} MB (highest {mem[1]:.0f} MB since the start)")
-            if SETUP_LAN_KEY:
-                lines.append(f"Setup key for a phone or another device on your network: {setup_key()}")
-            lines.append("SmartThings hub paired" + (f" ({seen})" if seen else "")
-                         + ": the LAN API only accepts signed requests from it.")
+                summary = "set up, connecting"
+            pstate = VELUX_PAIR.get("state")
+            lines += {"press": ["Press the button on the gateway NOW (light blinks). Then reload this page."],
+                      "waiting": ["Starting to pair the gateway..."],
+                      "done": ["Gateway paired: unlocking works."],
+                      "failed": ["Pairing failed: " + str(VELUX_PAIR.get("error"))]}.get(pstate, [])
+        out.append(("velux", "VELUX ACTIVE departure mode", summary, lines))
+
+        # Rain radar
+        b = cfg.get("buienradar") or {}
+        if buienradar_enabled(b):
+            rd = REG.devices.get("buienradar")
+            summary = rd["state"].get("summary", "") if rd else "fetching"
+            lines = [f"{b.get('place') or 'no location'}, radius {b.get('radius_m', 0)} m"]
         else:
-            lines.append("WARNING: no SmartThings hub paired yet. The LAN API is closed until you pair: your devices "
-                         "do not reach SmartThings. Press Pair below and Allow your hub.")
-        return "<br>".join(html.escape(x) for x in lines)
+            summary, lines = "off", []
+        out.append(("rain", "Rain radar", summary, lines))
+
+        # Amazon Echo
+        a = cfg.get("echo") or {}
+        lines = []
+        if ECHO_LOGIN.get("error"):
+            lines.append("Last login attempt: " + str(ECHO_LOGIN["error"]))
+        if not echo_configured(a):
+            summary = "not set up"
+        elif ECHO.get("error"):
+            summary = "error"
+            lines.append(str(ECHO["error"]))
+        elif ECHO.get("updated"):
+            summary = f"connected, {ECHO['devices']} device(s)"
+            lines += [d["name"] for d in REG.devices.values() if d["type"] == "echo"]
+        else:
+            summary = "logged in, fetching devices"
+        if echo_configured(a):
+            lines.append(f"Logged in on {a.get('url', 'amazon.de')}. Log in again only when the bridge reports that "
+                         "the login expired.")
+        out.append(("echo", "Amazon Echo", summary, lines))
+
+        # iRobot
+        r = cfg.get("irobot") or {}
+        lines = []
+        if not irobot_configured(r):
+            summary = "not set up"
+        elif IROBOT.get("error"):
+            summary = "error"
+            lines.append(str(IROBOT["error"]))
+        elif IROBOT.get("updated"):
+            summary = "connected"
+            lines = [f"{v_.get('name') or k_}: {len(v_['favorites'])} favorite(s)" for k_, v_ in IROBOT["robots"].items()]
+        else:
+            summary = "set up, fetching"
+        out.append(("irobot", "iRobot favorites", summary, lines))
+        return out
+
+    def status_html(sections) -> tuple[str, dict[str, str]]:
+        """Overview with links, and the detail block per part."""
+        items = []
+        blocks = {}
+        for anchor, title, summary, lines in sections:
+            warn = summary.startswith(("NOT", "error")) or summary == "error"
+            items.append(f'<li><a href="#{anchor}">{html.escape(title)}</a>: '
+                         + (f"<b>{html.escape(summary)}</b>" if warn else html.escape(summary)) + "</li>")
+            body = "<br>".join(html.escape(x) for x in [summary[:1].upper() + summary[1:] + "."] + lines)
+            blocks[anchor] = f'<div class="st">{body}</div>'
+        return "<ul class=\"toc\">" + "".join(items) + "</ul>", blocks
 
     def plain_from_lan(req) -> bool:
         """Setup page over plain http from another address than this computer: credentials would cross the LAN
@@ -4257,14 +4365,6 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             'value="setup_key"><input name="key" autocomplete="off" required style="width:100%;padding:8px">'
             '<button type="submit" style="margin-top:14px;padding:10px 18px">Open setup</button></form></body></html>'))
 
-    def echo_status() -> str:
-        a = load_config().get("echo") or {}
-        if ECHO_LOGIN.get("error"):
-            return "Last login attempt: " + str(ECHO_LOGIN["error"])
-        if echo_configured(a):
-            return f"Logged in ({a.get('url', 'amazon.de')}). Log in again only when the bridge reports it expired."
-        return "Not set up yet."
-
     def echo_link() -> str:
         if ECHO_LOGIN.get("proxy") is None or ECHO_LOGIN.get("done"):
             return ""
@@ -4298,7 +4398,11 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             reqs += f"<p>Allowed {html.escape(PAIRING['allowed'])}: the hub picks up the token at its next poll.</p>"
         elif pairing_open and not reqs:
             reqs = "<p>Waiting for the hub to ask (it asks at every poll).</p>"
-        page = (SETUP_HTML.replace("{version}", "version " + VERSION).replace("{status}", status_text())
+        overview, blocks = status_html(status_sections())
+        page = SETUP_HTML
+        for anchor, block in blocks.items():
+            page = page.replace("{st_" + anchor + "}", block)
+        page = (page.replace("{version}", "version " + VERSION).replace("{status}", overview)
                 .replace("{refresh}", '<meta http-equiv="refresh" content="10">' if pairing_open else "")
                 .replace("{pair_requests}", reqs)
                 .replace("{skoda_poll}", html.escape(str(k.get("poll_minutes", 10))))
@@ -4316,7 +4420,6 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
                 .replace("{rain_thr}", html.escape(str(rb.get("threshold", RAIN_THRESHOLD))))
                 .replace("{velux_ip}", html.escape(str((load_config().get("velux") or {}).get("gateway_ip", ""))))
                 .replace("{tuya_saved}", html.escape(tuya_saved))
-                .replace("{echo_status}", html.escape(echo_status()))
                 .replace("{echo_domains}", "".join(
                     f'<option value="{d}"{" selected" if d == echo_url else ""}>{d}</option>' for d in ECHO_DOMAINS))
                 .replace("{echo_link}", echo_link()))

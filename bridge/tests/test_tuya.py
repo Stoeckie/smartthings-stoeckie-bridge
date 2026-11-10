@@ -321,7 +321,7 @@ def test_setup_page_tuya(fake_tuya):
         assert "Access Secret" in page and 'type="password"' in page
         assert SECRET not in page and "AccessId12345678" not in page and "Ac...78" in page
         assert '<option value="us" selected>' in page
-        assert "Tuya Vloer: online, on, 19.8 °C, set 21.5 °C, heat; 192.168.1.71, protocol 3.4" in page
+        assert "Vloer: online, on, 19.8 °C, set 21.5 °C, heat; 192.168.1.71, protocol 3.4" in page
         sb.REG.devices.pop("tuya-x")
         await c.close()
     asyncio.run(main())

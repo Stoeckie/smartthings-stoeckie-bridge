@@ -96,7 +96,7 @@ def test_commands_and_log(monkeypatch, caplog):
 
 
 def test_setup_page_mentions_echo():
-    assert "Amazon Echo (optional)" in sb.SETUP_HTML and "{echo_link}" in sb.SETUP_HTML
+    assert "Amazon Echo (optional, unofficial)" in sb.SETUP_HTML and "{echo_link}" in sb.SETUP_HTML
 
 
 def test_setup_login_flow():
