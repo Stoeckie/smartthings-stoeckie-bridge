@@ -166,9 +166,10 @@ Amazon changes that website.
    authenticator app (recommended, see below) and the Amazon site of your Alexa account, and press
    **Continue to step 2**.
 2. **Step 2**: press **Log in at Amazon**. That is Amazon's own login page, relayed by the bridge. Afterwards you are
-   back on the setup page. Through the bridge Amazon often sends no SMS and passkeys do not work (a passkey only works
-   on amazon.com itself). Add an authenticator app at Amazon (Login & security, 2-Step Verification, Add new app,
-   Can't scan the barcode) and paste that key in step 1: the bridge then fills in the code itself.
+   back on the setup page. You need Amazon 2-step verification with a code: a passkey does not work through the
+   bridge (it only works on amazon.com itself). Best is an authenticator app: add one at Amazon (Login & security,
+   2-Step Verification, Add new app, Can't scan the barcode) and paste that key in step 1, the bridge then fills in
+   the code itself. A code by SMS may work too, but did not always arrive in tests.
 3. The bridge keeps only a login token in `config.json` (not the password) and creates one device per Echo
    (speakers and screens; not the Alexa app). The texts you send are not written to the log, only their length.
 
