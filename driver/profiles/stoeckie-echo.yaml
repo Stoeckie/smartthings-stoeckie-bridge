@@ -4,6 +4,12 @@ components:
     capabilities:
       - id: silvervalley08660.alexaVoice
         version: 1
+      - id: silvervalley08660.alexaControl
+        version: 1
+      - id: mediaPlayback
+        version: 1
+      - id: mediaTrackControl
+        version: 1
       - id: audioVolume
         version: 1
       - id: speechSynthesis

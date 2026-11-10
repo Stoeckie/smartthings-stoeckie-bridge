@@ -89,7 +89,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-10e"
+local BUILD = "2026-11-11a"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -115,6 +115,7 @@ local targetTemp = capabilities["silvervalley08660.targetTemperature"]
 local targetTempF = capabilities["silvervalley08660.targetTemperatureF"] -- same, in °F (profiles ...-f)
 local airflowDir = capabilities["silvervalley08660.airflowDirection"]  -- louver position 1..n (swing off)
 local alexaVoice = (function() local ok, c = pcall(function() return capabilities["silvervalley08660.alexaVoice"] end); return ok and c or nil end)() -- Echo speak/announce/command
+local alexaControl = (function() local ok, c = pcall(function() return capabilities["silvervalley08660.alexaControl"] end); return ok and c or nil end)() -- Echo do not disturb, music, voice history
 local hAirflow = (function() local ok, c = pcall(function() return capabilities["silvervalley08660.horizontalAirflow"] end); return ok and c or nil end)() -- left/right louvers (profiles ...-h)
 local windKmh = (function() local ok, c = pcall(function() return capabilities["silvervalley08660.windSpeedKmh"] end); return ok and c or nil end)() -- wind on the rain radar device (km/h)
 -- Home Connect: program list with start button, and oven temperature + cooking time (labels EN/NL)
@@ -879,6 +880,38 @@ end
 local function emit_echo(dev, s)
   if tonumber(s.volume) then
     try_emit(dev, function() return capabilities.audioVolume.volume({ value = math.floor(s.volume), unit = "%" }) end)
+  end
+  local mp = capabilities.mediaPlayback
+  if not dev:get_field("echo_cmds") then
+    try_emit(dev, function() return mp.supportedPlaybackCommands({ "play", "pause", "stop" }) end)
+    try_emit(dev, function() return capabilities.mediaTrackControl.supportedTrackControlCommands({ "nextTrack", "previousTrack" }) end)
+    dev:set_field("echo_cmds", true)
+  end
+  if s.playback == "playing" or s.playback == "paused" or s.playback == "stopped" then
+    try_emit(dev, function() return mp.playbackStatus[s.playback]() end)
+  end
+  if not alexaControl then return end
+  local a = alexaControl
+  if s.dnd == "on" or s.dnd == "off" then try_emit(dev, function() return a.doNotDisturb(s.dnd) end) end
+  for _, k in ipairs({ "nextAlarm", "timer", "bluetooth" }) do
+    if type(s[k]) == "string" and s[k] ~= "" then try_emit(dev, function() return a[k](s[k]) end) end
+  end
+  if type(s.nowPlaying) == "string" then
+    try_emit(dev, function() return a.nowPlaying(s.nowPlaying ~= "" and s.nowPlaying or "-") end)
+  end
+  -- a voice command: a new time always gives an event (also the same sentence again), so routines can trigger on it
+  if type(s.lastCommand) == "string" and s.lastCommand ~= "" and type(s.lastCommandTime) == "string" then
+    local prev = dev:get_field("echo_last_t") or dev:get_latest_state("main", a.ID, "lastCommandTime")
+    if prev ~= s.lastCommandTime then
+      dev:set_field("echo_last_t", s.lastCommandTime)
+      local ok, err = pcall(function()
+        dev:emit_event(a.lastCommandTime(s.lastCommandTime))
+        local ev = a.lastCommand(s.lastCommand)
+        ev.state_change = true
+        dev:emit_event(ev)
+      end)
+      if not ok then log.warn("[stbridge] " .. tostring(dev.label) .. ": " .. tostring(err)) end
+    end
   end
 end
 
@@ -1713,6 +1746,14 @@ local function echo_say(driver, device, cmd, text)
   if alexaVoice then try_emit(device, function() return alexaVoice.lastText(text) end) end
 end
 
+-- Echo: a text action (music, phone notification, routine, bluetooth); shown as the last action
+local function echo_act(driver, device, cmd, text)
+  text = tostring(text or ""):sub(1, 250)
+  if cmd ~= "bluetooth" and text:match("^%s*$") then return end
+  send(driver, device, cmd, text)
+  if alexaControl and cmd ~= "bluetooth" then try_emit(device, function() return alexaControl.lastAction(text) end) end
+end
+
 local driver = Driver("stoeckie-bridge-local", {
   discovery = discovery,
   lifecycle_handlers = {
@@ -1819,6 +1860,30 @@ local driver = Driver("stoeckie-bridge-local", {
       speak = function(driver, device, cmd) echo_say(driver, device, "speak", cmd.args.text) end,
       announce = function(driver, device, cmd) echo_say(driver, device, "announce", cmd.args.text) end,
       voiceCommand = function(driver, device, cmd) echo_say(driver, device, "command", cmd.args.text) end,
+    },
+    ["silvervalley08660.alexaControl"] = {
+      setDoNotDisturb = function(driver, device, cmd)
+        local v = cmd.args.state == "on" and "on" or "off"
+        send(driver, device, "dnd", v)
+        if alexaControl then try_emit(device, function() return alexaControl.doNotDisturb(v) end) end
+      end,
+      playMusic = function(driver, device, cmd) echo_act(driver, device, "music", cmd.args.text) end,
+      playSound = function(driver, device, cmd)
+        send(driver, device, "sound", cmd.args.sound)
+        if alexaControl then try_emit(device, function() return alexaControl.sound(cmd.args.sound) end) end
+      end,
+      notifyPhone = function(driver, device, cmd) echo_act(driver, device, "push", cmd.args.text) end,
+      runRoutine = function(driver, device, cmd) echo_act(driver, device, "routine", cmd.args.text) end,
+      setBluetooth = function(driver, device, cmd) echo_act(driver, device, "bluetooth", cmd.args.text) end,
+    },
+    [capabilities.mediaPlayback.ID] = {
+      [capabilities.mediaPlayback.commands.play.NAME] = function(driver, device) send(driver, device, "play") end,
+      [capabilities.mediaPlayback.commands.pause.NAME] = function(driver, device) send(driver, device, "pause") end,
+      [capabilities.mediaPlayback.commands.stop.NAME] = function(driver, device) send(driver, device, "stop") end,
+    },
+    [capabilities.mediaTrackControl.ID] = {
+      [capabilities.mediaTrackControl.commands.nextTrack.NAME] = function(driver, device) send(driver, device, "next") end,
+      [capabilities.mediaTrackControl.commands.previousTrack.NAME] = function(driver, device) send(driver, device, "previous") end,
     },
     [capabilities.speechSynthesis.ID] = {
       [capabilities.speechSynthesis.commands.speak.NAME] = function(driver, device, cmd)

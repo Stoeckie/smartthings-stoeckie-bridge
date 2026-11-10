@@ -145,3 +145,75 @@ def test_echo_volumes_from():
                       {"dsn": "G3", "speakerVolume": 140}, {"bad": 1}]}
     assert b.echo_volumes_from(js) == {"G1": 40, "G3": 100}
     assert b.echo_volumes_from(None) == {} and b.echo_volumes_from([]) == {}
+
+
+def test_echo_helpers_extra():
+    import json
+    import stoeckie_bridge as b
+    assert b.echo_music("spotify: Coldplay") == ("SPOTIFY", "Coldplay")
+    assert b.echo_music("Radio 538") == (None, "Radio 538")
+    assert b.echo_music("radio: 538") == ("TUNEIN", "538")
+    assert b.echo_dnd_from({"doNotDisturbDeviceStatusList": [{"deviceSerialNumber": "A", "enabled": True},
+                                                             {"deviceSerialNumber": "B"}]}) == {"A": True, "B": False}
+    bt = b.echo_bluetooth_from({"bluetoothStates": [{"deviceSerialNumber": "A", "pairedDeviceList": [
+        {"friendlyName": "Speaker", "address": "11:22", "connected": True}, {"friendlyName": "Phone", "address": "33"}]}]})
+    assert bt["A"]["connected"] == "Speaker" and bt["A"]["paired"] == {"Speaker": "11:22", "Phone": "33"}
+    now = 1_800_000_000.0
+    al = b.echo_alarms_from([
+        {"deviceSerialNumber": "A", "type": "Alarm", "status": "ON", "alarmTime": (now + 3600) * 1000},
+        {"deviceSerialNumber": "A", "type": "Alarm", "status": "ON", "alarmTime": (now + 7200) * 1000},
+        {"deviceSerialNumber": "A", "type": "Alarm", "status": "OFF", "alarmTime": (now + 60) * 1000},
+        {"deviceSerialNumber": "A", "type": "Timer", "status": "ON", "remainingTime": 600000},
+        {"deviceSerialNumber": "B", "type": "Reminder", "status": "ON", "alarmTime": (now + 60) * 1000}], now)
+    assert set(al) == {"A"} and set(al["A"]) == {"nextAlarm", "timer"}
+    assert b.echo_player_from({"playerInfo": {"state": "PLAYING", "infoText": {"title": "Song", "subText1": "Band"}}}) \
+        == {"playback": "playing", "nowPlaying": "Song - Band"}
+    assert b.echo_player_from(None) == {"playback": "stopped", "nowPlaying": ""}
+    inner = {"command": "PUSH_VOLUME_CHANGE",
+             "payload": json.dumps({"dopplerId": {"deviceSerialNumber": "A"}, "volumeSetting": 44})}
+    msg = {"directive": {"payload": {"renderingUpdates": [{"resourceMetadata": json.dumps(inner)}]}}}
+    (cmd, pl), = b.echo_push_parse(msg)
+    assert cmd == "PUSH_VOLUME_CHANGE" and b.echo_push_serial(pl) == "A" and pl["volumeSetting"] == 44
+    assert b.echo_push_serial({"key": {"entryId": "1#TYPE#SER"}}) == "SER"
+    assert b.echo_push_parse({"junk": 1}) == []
+    assert b.echo_iso(1_800_000_000_000) == "2027-01-15T08:00:00Z"
+
+
+def test_echo_new_commands(monkeypatch):
+    import asyncio
+    import sys
+    import types
+    import stoeckie_bridge as b
+    calls = []
+
+    class FakeAPI:
+        def __init__(self, dev, login):
+            pass
+
+        def __getattr__(self, name):
+            async def f(*a, **k):
+                calls.append((name, a))
+            return f
+    monkeypatch.setitem(sys.modules, "alexapy", types.SimpleNamespace(AlexaAPI=FakeAPI))
+    cloud = b.EchoCloud({"echo": {}})
+    cloud.login = object()
+    cloud.devs["S1"] = {"serialNumber": "S1", "accountName": "Kitchen", "online": True}
+    cloud.bt["S1"] = {"connected": "", "paired": {"JBL": "AA:BB"}}
+    h = cloud._command("S1")
+
+    async def go():
+        await h("dnd", "on")
+        await h("music", "spotify: Coldplay")
+        await h("music", "Radio 538")
+        await h("sound", "doorbell")
+        await h("push", "Hello")
+        await h("bluetooth", "jbl")
+        await h("bluetooth", "off")
+        await h("pause", None)
+    asyncio.run(go())
+    names = [c[0] for c in calls]
+    assert names == ["set_dnd_state", "play_music", "run_custom", "play_sound", "send_mobilepush", "set_bluetooth",
+                     "disconnect_bluetooth", "pause"]
+    assert calls[1][1] == ("SPOTIFY", "Coldplay") and calls[2][1] == ("play Radio 538",)
+    assert calls[5][1] == ("AA:BB",)
+    assert b.REG.devices["echo-S1"]["state"]["dnd"] == "on"

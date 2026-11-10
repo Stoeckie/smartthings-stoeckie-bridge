@@ -54,7 +54,8 @@ for _, id in ipairs({ "windowShade", "windowShadeLevel", "refresh", "dryerOperat
                       "washerOperatingState", "audioVolume", "audioMute", "mediaInputSource", "tvChannel",
                       "ovenSetpoint", "temperatureMeasurement", "remoteControlStatus",
                       "thermostatHeatingSetpoint", "thermostatMode", "thermostatOperatingState", "speechSynthesis",
-                      "silvervalley08660.alexaVoice" }) do caps[id].ID = id end
+                      "silvervalley08660.alexaVoice", "silvervalley08660.alexaControl", "mediaPlayback",
+                      "mediaTrackControl" }) do caps[id].ID = id end
 package.loaded["st.capabilities"] = caps
 package.loaded["st.driver"] = function(name, tmpl) DRIVER = tmpl; return { run = function() end } end
 package.loaded["log"] = { info = function(m) print("I " .. m) end, warn = function(m) print("W " .. m) end,
@@ -584,6 +585,22 @@ def test_echo_flow(bridge):
     assert state()["said"] == ["speak:Dinner is ready", "command:play Radio 538", "speak:Hello"]
     lua.execute('DRIVER.capability_handlers.audioVolume.setVolume(DRIVER_OBJ, ECHO, { args = { volume = 45 } })')
     assert state()["volume"] == 45
+    ac = 'DRIVER.capability_handlers["silvervalley08660.alexaControl"]'
+    lua.execute(ac + '.setDoNotDisturb(DRIVER_OBJ, ECHO, { args = { state = "on" } })')
+    lua.execute(ac + '.playMusic(DRIVER_OBJ, ECHO, { args = { text = "spotify: Coldplay" } })')
+    lua.execute(ac + '.setBluetooth(DRIVER_OBJ, ECHO, { args = { text = "JBL" } })')
+    lua.execute('DRIVER.capability_handlers.mediaPlayback.pause(DRIVER_OBJ, ECHO, {})')
+    st = state()
+    assert st["dnd"] == "on" and st["playback"] == "paused" and st["nowPlaying"] == "Coldplay" and st["bluetooth"] == "JBL"
+    # a voice command gives a forced event once per new time
+    lua.execute(ac + '.runRoutine(DRIVER_OBJ, ECHO, { args = { text = "x" } })')  # demo ignores, no error
+    lua.execute('DRIVER.capability_handlers["silvervalley08660.alexaVoice"].voiceCommand(DRIVER_OBJ, ECHO, { args = { text = "good night" } })')
+    lua.execute('ECHO.events = {}; DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT); DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)')
+    evs = [dict(e) for e in lua.eval("ECHO.events").values()]
+    cmds = [e for e in evs if str(e["path"]).endswith("lastCommand")]
+    assert len(cmds) == 1 and cmds[0]["arg"] == "good night" and cmds[0]["forced"]
+    paths = {str(e["path"]) for e in evs}
+    assert "cap.mediaPlayback.playbackStatus.paused" in paths  # do not disturb was shown at the command already
 
 
 def test_velux_lock_flow(bridge):

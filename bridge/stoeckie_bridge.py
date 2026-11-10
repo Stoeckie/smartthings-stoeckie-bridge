@@ -78,7 +78,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-11a"
+VERSION = "2026-11-11b"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -1019,6 +1019,138 @@ def echo_volumes_from(js: Any) -> dict[str, int]:
     return out
 
 
+# Alexa sound library ids for the SmartThings list (any other amzn_sfx_ id also works)
+ECHO_SOUNDS = {
+    "doorbell": "amzn_sfx_doorbell_chime_01", "doorbell2": "amzn_sfx_doorbell_01",
+    "bell": "amzn_sfx_church_bell_1x_02", "alarm": "amzn_sfx_scifi_alarm_01", "buzzer": "amzn_sfx_buzz_electronic_01",
+    "bugle": "amzn_sfx_trumpet_bugle_04", "applause": "amzn_sfx_crowd_applause_01", "cat": "amzn_sfx_cat_meow_1x_01",
+    "dog": "amzn_sfx_dog_med_bark_1x_02", "ding": "amzn_sfx_scifi_sheilds_up_01",
+}
+ECHO_PROVIDERS = {"spotify": "SPOTIFY", "amazon": "AMAZON_MUSIC", "tunein": "TUNEIN", "apple": "APPLE_MUSIC",
+                  "deezer": "DEEZER", "radio": "TUNEIN"}
+
+
+def echo_music(text: Any) -> tuple[str | None, str]:
+    """'spotify: Coldplay' -> ("SPOTIFY", "Coldplay"); without a known prefix Alexa picks the default service."""
+    t = echo_text(text)
+    head, sep, rest = t.partition(":")
+    if sep and head.strip().lower() in ECHO_PROVIDERS and rest.strip():
+        return ECHO_PROVIDERS[head.strip().lower()], rest.strip()
+    return None, t
+
+
+def echo_dnd_from(js: Any) -> dict[str, bool]:
+    out: dict[str, bool] = {}
+    for x in (js or {}).get("doNotDisturbDeviceStatusList") or [] if isinstance(js, dict) else []:
+        if isinstance(x, dict) and x.get("deviceSerialNumber"):
+            out[str(x["deviceSerialNumber"])] = bool(x.get("enabled"))
+    return out
+
+
+def echo_bluetooth_from(js: Any) -> dict[str, dict[str, Any]]:
+    """Per serial: the connected device name ('' = none) and the paired devices (name -> address)."""
+    out: dict[str, dict[str, Any]] = {}
+    for x in (js or {}).get("bluetoothStates") or [] if isinstance(js, dict) else []:
+        if not isinstance(x, dict) or not x.get("deviceSerialNumber"):
+            continue
+        paired = [p for p in x.get("pairedDeviceList") or [] if isinstance(p, dict)]
+        con = next((p.get("friendlyName") or p.get("address") or "" for p in paired if p.get("connected")), "")
+        out[str(x["deviceSerialNumber"])] = {"connected": str(con),
+                                             "paired": {str(p.get("friendlyName") or ""): p.get("address")
+                                                        for p in paired if p.get("address")}}
+    return out
+
+
+def echo_alarms_from(items: Any, now: float, tz=None) -> dict[str, dict[str, str]]:
+    """Next active alarm and running timer per serial, as local 'ddd HH:MM' / 'HH:MM'."""
+    import datetime as dt
+    best: dict[str, dict[str, float]] = {}
+    for n in items or []:
+        if not isinstance(n, dict) or n.get("status") != "ON" or not n.get("deviceSerialNumber"):
+            continue
+        serial, kind = str(n["deviceSerialNumber"]), str(n.get("type") or "")
+        when = None
+        if kind == "Timer" and n.get("remainingTime") is not None:
+            try:
+                when = now + float(n["remainingTime"]) / 1000
+            except (TypeError, ValueError):
+                when = None
+            key = "timer"
+        elif kind in ("Alarm", "MusicAlarm"):
+            key = "nextAlarm"
+            try:
+                if n.get("alarmTime"):
+                    when = float(n["alarmTime"]) / 1000
+                if (when is None or when < now) and n.get("originalDate") and n.get("originalTime"):
+                    d = dt.datetime.fromisoformat(f"{n['originalDate']}T{str(n['originalTime'])[:8]}")
+                    when = d.replace(tzinfo=tz).timestamp() if tz else d.timestamp()
+            except (TypeError, ValueError):
+                when = None
+        else:
+            continue
+        if when is None or when < now:
+            continue
+        cur = best.setdefault(serial, {})
+        if key not in cur or when < cur[key]:
+            cur[key] = when
+    out: dict[str, dict[str, str]] = {}
+    for serial, v in best.items():
+        o = {}
+        for key, when in v.items():
+            t = dt.datetime.fromtimestamp(when, tz) if tz else dt.datetime.fromtimestamp(when)
+            o[key] = t.strftime("%H:%M") if key == "timer" or when - now < 20 * 3600 else t.strftime("%a %H:%M")
+        out[serial] = o
+    return out
+
+
+def echo_player_from(js: Any) -> dict[str, str]:
+    p = (js or {}).get("playerInfo") or {} if isinstance(js, dict) else {}
+    state = str(p.get("state") or "").upper()
+    playback = {"PLAYING": "playing", "PAUSED": "paused"}.get(state, "stopped")
+    info = p.get("infoText") or {}
+    title = " - ".join(x for x in (info.get("title"), info.get("subText1")) if x) if isinstance(info, dict) else ""
+    return {"playback": playback, "nowPlaying": (title or "")[:250] if playback != "stopped" else ""}
+
+
+def echo_push_parse(msg: Any) -> list[tuple[str, dict[str, Any]]]:
+    """Alexa push (HTTP2 directive) -> [(command, payload)]."""
+    out = []
+    try:
+        ups = msg["directive"]["payload"]["renderingUpdates"]
+    except (KeyError, TypeError):
+        ups = [msg] if isinstance(msg, dict) and msg.get("command") else []
+    for u in ups or []:
+        meta = u.get("resourceMetadata") if isinstance(u, dict) and "resourceMetadata" in u else u
+        try:
+            meta = json.loads(meta) if isinstance(meta, str) else meta
+            pl = meta.get("payload")
+            pl = json.loads(pl) if isinstance(pl, str) else (pl or {})
+            if meta.get("command"):
+                out.append((str(meta["command"]), pl if isinstance(pl, dict) else {}))
+        except (ValueError, AttributeError, TypeError):
+            continue
+    return out
+
+
+def echo_push_serial(pl: dict[str, Any]) -> str | None:
+    d = pl.get("dopplerId") if isinstance(pl, dict) else None
+    if isinstance(d, dict) and d.get("deviceSerialNumber"):
+        return str(d["deviceSerialNumber"])
+    key = (pl.get("key") or {}).get("entryId") if isinstance(pl, dict) and isinstance(pl.get("key"), dict) else None
+    parts = str(key or "").split("#")
+    return parts[2] if len(parts) > 2 and parts[2] else None
+
+
+def echo_iso(ms: Any) -> str:
+    import datetime as dt
+    try:
+        v = float(ms)
+    except (TypeError, ValueError):
+        return ""
+    v = v / 1000 if v > 1e11 else v
+    return dt.datetime.fromtimestamp(v, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 class EchoDevice:
     """The few attributes AlexaAPI reads from a device."""
 
@@ -1057,6 +1189,13 @@ class EchoCloud:
         self.wake = asyncio.Event()
         self.devs: dict[str, dict[str, Any]] = {}
         self.volume: dict[str, int] = {}
+        self.bt: dict[str, dict[str, Any]] = {}
+        self.last_ts: dict[str, int] = {}  # newest voice history record per serial (ms)
+        self.hist_wake = asyncio.Event()
+        self.status_wake = asyncio.Event()
+        self.player_due: set[str] = set()
+        self.push_ok = False
+        self.bg: list[asyncio.Task] = []
 
     async def _connect(self) -> None:
         self.login = echo_login_obj(self.a)
@@ -1096,6 +1235,161 @@ class EchoCloud:
                 REG.set_online("echo-" + serial, False)
         ECHO.update(devices=len(seen), error=None, updated=int(time.time()))
         log.info("[echo] %d Echo device(s)", len(seen))
+
+    def _set(self, serial: str, state: dict[str, Any]) -> None:
+        d = self.devs.get(serial)
+        if d is not None:
+            REG.upsert("echo-" + serial, "echo", d.get("accountName") or "Echo", state, bool(d.get("online", True)))
+
+    async def _fetch_history(self) -> None:
+        """Newest spoken command per Echo from the Alexa voice history (the text is never logged)."""
+        from alexapy import AlexaAPI
+        start = int((time.time() - (600 if self.last_ts else 86400)) * 1000)
+        recs = await AlexaAPI.get_customer_history_records(self.login, start_time=start, max_record_size=20)
+        if not recs:
+            return
+        newest: dict[str, tuple[int, str]] = {}
+        for r in recs:
+            if not isinstance(r, dict) or not AlexaAPI._is_usable_history_activity(r):
+                continue
+            try:
+                ts = int(float(r.get("creationTimestamp") or 0))
+            except (TypeError, ValueError):
+                continue
+            serial = str(r["deviceSerialNumber"])
+            if ts > newest.get(serial, (self.last_ts.get(serial, 0), ""))[0]:
+                newest[serial] = (ts, str((r.get("description") or {}).get("summary") or ""))
+        for serial, (ts, text) in newest.items():
+            self.last_ts[serial] = ts
+            if serial in self.devs:
+                self._set(serial, {"lastCommand": " ".join(text.split())[:250], "lastCommandTime": echo_iso(ts)})
+                log.info("[echo] %s: voice command (%d chars)", self.devs[serial].get("accountName") or serial,
+                         len(text))
+
+    async def _fetch_status(self) -> None:
+        """Do not disturb, bluetooth, alarms/timers and what is playing (a few requests for all Echos)."""
+        from alexapy import AlexaAPI
+        dnd = echo_dnd_from(await AlexaAPI.get_dnd_state(self.login))
+        self.bt = echo_bluetooth_from(await AlexaAPI.get_bluetooth(self.login)) or self.bt
+        notes = await AlexaAPI.get_notifications(self.login)
+        alarms = echo_alarms_from(notes, time.time()) if notes is not None else None
+        for serial in list(self.devs):
+            st: dict[str, Any] = {}
+            if serial in dnd:
+                st["dnd"] = "on" if dnd[serial] else "off"
+            if serial in self.bt:
+                st["bluetooth"] = self.bt[serial]["connected"] or "none"
+            if alarms is not None:
+                a = alarms.get(serial, {})
+                st["nextAlarm"], st["timer"] = a.get("nextAlarm", "none"), a.get("timer", "none")
+            if st:
+                self._set(serial, st)
+        for serial in list(self.devs):
+            await self._fetch_player(serial)
+
+    async def _fetch_player(self, serial: str) -> None:
+        from alexapy import AlexaAPI
+        d = self.devs.get(serial)
+        if d is None:
+            return
+        try:
+            js = await AlexaAPI(EchoDevice(d), self.login).get_state()
+        except Exception:  # noqa: BLE001
+            return
+        if js is None:
+            return
+        st: dict[str, Any] = dict(echo_player_from(js))
+        v = (((js or {}).get("playerInfo") or {}).get("volume") or {}).get("volume")
+        if v is not None:
+            self.volume[serial] = echo_volume(v)
+            st["volume"] = self.volume[serial]
+        self._set(serial, st)
+
+    async def _on_push(self, msg: Any) -> None:
+        for cmd, pl in echo_push_parse(msg):
+            serial = echo_push_serial(pl)
+            if cmd == "PUSH_VOLUME_CHANGE" and serial and pl.get("volumeSetting") is not None:
+                self.volume[serial] = echo_volume(pl["volumeSetting"])
+                self._set(serial, {"volume": self.volume[serial]})
+            elif cmd == "PUSH_DOPPLER_CONNECTION_CHANGE" and serial in self.devs:
+                self.devs[serial]["online"] = pl.get("dopplerConnectionState") == "ONLINE"
+                self._set(serial, {})
+            elif cmd in ("PUSH_AUDIO_PLAYER_STATE", "PUSH_MEDIA_CHANGE", "PUSH_MEDIA_QUEUE_CHANGE") and serial:
+                self.player_due.add(serial)
+            elif cmd in ("PUSH_BLUETOOTH_STATE_CHANGE", "PUSH_NOTIFICATION_CHANGE"):
+                self.status_wake.set()
+            # a voice command arrives as activity; Amazon does not always send that one, so other pushes also
+            # trigger a (cheap) history check
+            if cmd != "PUSH_MEDIA_PROGRESS_CHANGE":
+                self.hist_wake.set()
+
+    async def _history_loop(self) -> None:
+        while True:
+            try:
+                await asyncio.wait_for(self.hist_wake.wait(), timeout=15)
+                await asyncio.sleep(2)  # the record shows up in the history shortly after the push
+            except asyncio.TimeoutError:
+                pass
+            self.hist_wake.clear()
+            if self.login is None:
+                continue
+            try:
+                await self._fetch_history()
+                for serial in list(self.player_due):
+                    self.player_due.discard(serial)
+                    await self._fetch_player(serial)
+            except Exception as ex:  # noqa: BLE001
+                log.debug("[echo] history: %s", safe_err(ex))
+
+    async def _status_loop(self) -> None:
+        while True:
+            if self.login is not None:
+                try:
+                    await self._fetch_status()
+                except Exception as ex:  # noqa: BLE001
+                    log.info("[echo] status: %s", safe_err(ex))
+            self.status_wake.clear()
+            try:
+                await asyncio.wait_for(self.status_wake.wait(), timeout=300)
+                await asyncio.sleep(2)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _push_loop(self) -> None:
+        """Live events from Amazon (volume, playing, voice activity); without it the history is checked every 15 s."""
+        from alexapy import HTTP2EchoClient
+        while True:
+            if self.login is None:
+                await asyncio.sleep(30)
+                continue
+            closed = asyncio.Event()
+
+            async def on_open() -> None:
+                self.push_ok = True
+                log.info("[echo] live events connected")
+
+            async def on_close() -> None:
+                self.push_ok = False
+                closed.set()
+
+            async def on_error(err: str) -> None:
+                self.push_ok = False
+                log.info("[echo] live events: %s", str(err)[:100])
+                closed.set()
+
+            try:
+                client = HTTP2EchoClient(self.login, self._on_push, on_open, on_close, on_error)
+                await client.async_run()
+                await closed.wait()
+            except Exception as ex:  # noqa: BLE001
+                log.info("[echo] live events unavailable: %s", safe_err(ex))
+            self.push_ok = False
+            await asyncio.sleep(60)
+
+    def _start_background(self) -> None:
+        if not self.bg:
+            self.bg = [asyncio.create_task(self._history_loop()), asyncio.create_task(self._status_loop()),
+                       asyncio.create_task(self._push_loop())]
 
     async def _fetch_volumes(self) -> None:
         """Current speaker volume of every Echo (one request for all devices)."""
@@ -1148,13 +1442,54 @@ class EchoCloud:
                            bool(d.get("online", True)))
             elif cmd == "stop":
                 await api.stop(queue_delay=0)
+                self.player_due.add(serial)
+                self.hist_wake.set()
+            elif cmd in ("play", "pause", "next", "previous"):
+                await getattr(api, cmd)()
+                self.player_due.add(serial)
+                self.hist_wake.set()
             elif cmd == "routine":
                 await api.run_routine(echo_text(value), queue_delay=0)
+            elif cmd == "skill":
+                await api.run_skill(echo_text(value))
+            elif cmd == "dnd":
+                on = str(value).lower() in ("on", "true", "1")
+                await api.set_dnd_state(on)
+                self._set(serial, {"dnd": "on" if on else "off"})
+            elif cmd == "music":
+                provider, phrase = echo_music(value)
+                if provider:
+                    await api.play_music(provider, phrase, queue_delay=0)
+                else:
+                    await api.run_custom("play " + phrase)
+                self.player_due.add(serial)
+                self.hist_wake.set()
+            elif cmd == "sound":
+                name = echo_text(value, 80)
+                sid = ECHO_SOUNDS.get(name.lower(), name)
+                if not sid.startswith("amzn_sfx_"):
+                    raise ValueError("unknown sound")
+                await api.play_sound(sid, queue_delay=0)
+            elif cmd == "push":  # notification in the Alexa app on the phone
+                await api.send_mobilepush(echo_text(value), title="SmartThings", queue_delay=0)
+            elif cmd == "bluetooth":
+                want = str(value or "").strip()
+                if want.lower() in ("", "off", "none", "disconnect"):
+                    await api.disconnect_bluetooth()
+                else:
+                    paired = (self.bt.get(serial) or {}).get("paired") or {}
+                    mac = next((a for n, a in paired.items() if n.lower() == want.lower()), None)
+                    mac = mac or next((a for a in paired.values() if str(a).lower() == want.lower()), None)
+                    if not mac:
+                        raise ValueError("bluetooth device not paired with this Echo")
+                    await api.set_bluetooth(mac)
+                self.status_wake.set()
             else:
                 raise ValueError(f"unsupported command {cmd}")
             # the text itself can be personal: only its length goes into the log
             log.info("[echo] %s: %s%s", d.get("accountName") or serial, cmd,
-                     f" ({len(str(value))} chars)" if cmd in ("speak", "announce", "command", "routine") else
+                     f" ({len(str(value))} chars)" if cmd in ("speak", "announce", "command", "routine", "music",
+                                                              "push", "skill", "bluetooth") else
                      ("" if value is None else f" {value}"))
         return handler
 
@@ -1167,6 +1502,7 @@ class EchoCloud:
                 if self.login is None:
                     await self._connect()
                 await self._fetch()
+                self._start_background()
             except PermissionError as ex:
                 ECHO["error"] = str(ex)
                 log.error("[echo] %s", ex)
@@ -4920,13 +5256,26 @@ async def demo_devices() -> None:
         REG.upsert("demo-car", "car", "Demo car", car, True, demo_car)
 
     await demo_car("refresh", None)
-    echo = {"volume": 30, "said": []}
+    echo = {"volume": 30, "said": [], "dnd": "off", "playback": "stopped", "nowPlaying": "", "bluetooth": "none",
+            "nextAlarm": "07:00", "timer": "none", "lastCommand": "what time is it",
+            "lastCommandTime": "2026-11-11T07:00:00Z"}
 
     async def demo_echo(cmd, value):
         if cmd == "volume":
             echo["volume"] = int(value)
         elif cmd in ("speak", "announce", "command"):
             echo["said"] = echo["said"][-4:] + [cmd + ":" + str(value)]
+            if cmd == "command":
+                echo["lastCommand"] = str(value)[:250]
+                echo["lastCommandTime"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        elif cmd == "dnd":
+            echo["dnd"] = "on" if str(value).lower() in ("on", "true", "1") else "off"
+        elif cmd == "music":
+            echo["playback"], echo["nowPlaying"] = "playing", echo_music(value)[1]
+        elif cmd in ("play", "pause", "stop"):
+            echo["playback"] = {"play": "playing", "pause": "paused"}.get(cmd, "stopped")
+        elif cmd == "bluetooth":
+            echo["bluetooth"] = "none" if str(value).lower() in ("", "off", "none") else str(value)
         REG.upsert("demo-echo", "echo", "Demo Echo", dict(echo), True, demo_echo)
 
     await demo_echo("refresh", None)
