@@ -1,1 +1,1 @@
-{"tag": "nl", "label": "Ingestelde temperatuur", "attributes": {"temperature": {"label": "Ingestelde temperatuur", "displayTemplate": "Ingestelde temperatuur van {{device.label}} is {{value}}"}}, "commands": {"setTemperature": {"label": "Temperatuur instellen"}}}
+{"tag": "nl", "label": "Ingestelde temperatuur (°F)", "attributes": {"temperature": {"label": "Ingestelde temperatuur (°F)", "displayTemplate": "Ingestelde temperatuur van {{device.label}} is {{value}}"}}, "commands": {"setTemperature": {"label": "Temperatuur instellen"}}}

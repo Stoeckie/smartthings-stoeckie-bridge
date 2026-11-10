@@ -356,6 +356,14 @@ def test_aircon_flow(bridge):
     assert app_shows("main:cap.silvervalley08660.targetTemperature.temperature") == 22.0
     lua.execute(f'{h}["silvervalley08660.targetTemperatureF"].setTemperature(DRIVER_OBJ, AC, {{ args = {{ temperature = 68 }} }})')
     assert state()["setpoint"] == 20.0
+    # Fujitsu table: one °F is 0.5 °C (73 °F = 22.5; plain rounding gave 23.0, which the unit shows as 74 °F)
+    for f_val, c_val in ((72, 22.0), (73, 22.5), (74, 23.0), (88, 30.0), (60, 16.0)):
+        lua.execute(f'{h}["silvervalley08660.targetTemperatureF"].setTemperature(DRIVER_OBJ, AC, {{ args = {{ temperature = {f_val} }} }})')
+        assert state()["setpoint"] == c_val, f_val
+    lua.execute(f'{h}.thermostatCoolingSetpoint.setCoolingSetpoint(DRIVER_OBJ, AC, {{ args = {{ setpoint = 73 }} }})')
+    assert state()["setpoint"] == 22.5
+    lua.execute(f'{h}["silvervalley08660.targetTemperatureF"].setTemperature(DRIVER_OBJ, AC, {{ args = {{ temperature = 68 }} }})')
+    assert state()["setpoint"] == 20.0
     # setting "Changes while off: Send now": a change while off goes out right away (and switches the unit on)
     lua.execute(f'{h}.switch.off(DRIVER_OBJ, AC)')
     lua.execute("DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")

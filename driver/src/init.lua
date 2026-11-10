@@ -89,7 +89,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-09j"
+local BUILD = "2026-11-10b"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -145,13 +145,26 @@ local SWING_FROM_ST = { fixed = "off", vertical = "vertical", horizontal = "hori
 -- Temperature unit of an air conditioner: the bridge works in °C. The app takes the range of a temperature
 -- slider as °C and converts range and value to the unit of the location (seen 2026-11-09: the °F slider 60-88
 -- showed as 140-190 °F in a US location). So the °C slider works everywhere and Auto keeps it; a °F command
--- value (above 40) is converted. Setting "°F" keeps the °F slider profile (...-f), whose range is now in °C too.
+-- value (above 40) is converted. Setting "°F" gives the °F slider profile (...-f): since 2026-11-10b that slider has
+-- no temperature unit, so the app shows 60 to 88 as is, in whole degrees.
 local function ac_unit_f(device)
   local p = device.preferences and device.preferences.temperatureUnit
   return p == "F"
 end
 local function c_to_f(c) return math.floor(c * 9 / 5 + 32 + 0.5) end
 local function f_to_c(f) return math.floor(((f - 32) * 5 / 9) * 2 + 0.5) / 2 end
+-- Fujitsu set temperature: the unit uses its own table, 60 to 88 °F is 16 to 30 °C in steps of 0.5 °C per °F
+-- (72 °F = 22.0, 73 °F = 22.5, 74 °F = 23.0; plain rounding sent 73 °F as 23.0, which the unit shows as 74).
+-- Outside that range (Minimum Heat 10 °C) the normal conversion is used.
+local function fj_c_to_f(c)
+  if c >= 16 and c <= 30 then return math.floor(60 + (c - 16) * 2 + 0.5) end
+  return c_to_f(c)
+end
+local function fj_f_to_c(f)
+  f = math.floor(f + 0.5)
+  if f >= 60 and f <= 88 then return 16 + (f - 60) / 2 end
+  return f_to_c(f)
+end
 
 local state = {}       -- parent device.id -> { poll_timer, fast_until }
 local discovered = {}  -- dni -> { ip, port, info }
@@ -513,7 +526,7 @@ local function emit_aircon(dev, s)
     try_emit(dev, function() return coolSetpoint.coolingSetpoint({ value = tonumber(s.setpoint), unit = "C" }) end)
     local f = ac_unit_f(dev)
     if f then
-      try_emit(dev, function() return targetTempF.temperature({ value = c_to_f(tonumber(s.setpoint)), unit = "F" }) end)
+      try_emit(dev, function() return targetTempF.temperature({ value = fj_c_to_f(tonumber(s.setpoint)), unit = "F" }) end)
     end
     -- °C slider: also while a °F profile switch has not happened yet, so it never shows an old value
     if not f or not dev:supports_capability(targetTempF) then
@@ -1304,7 +1317,7 @@ local function show_setting(device, key, v)
   elseif key == "setpoint" then
     try_emit(device, function() return coolSetpoint.coolingSetpoint({ value = v, unit = "C" }) end)
     if ac_unit_f(device) and device:supports_capability(targetTempF) then
-      try_emit(device, function() return targetTempF.temperature({ value = c_to_f(v), unit = "F" }) end)
+      try_emit(device, function() return targetTempF.temperature({ value = fj_c_to_f(v), unit = "F" }) end)
     else
       try_emit(device, function() return targetTemp.temperature({ value = v, unit = "C" }) end)
     end
@@ -1406,14 +1419,14 @@ end
 local function handle_setpoint(driver, device, cmd)
   local v = tonumber(cmd.args.setpoint or cmd.args.temperature)
   if not v then return end
-  if v > 40 then v = f_to_c(v) end   -- a °F value from a US location
+  if v > 40 then v = fj_f_to_c(v) end   -- a °F value from a US location
   send_setpoint(driver, device, v)
 end
 local function handle_setpoint_f(driver, device, cmd)
   local v = tonumber(cmd.args.temperature)
   if not v then return end
   if v <= 40 then send_setpoint(driver, device, math.floor(v * 2 + 0.5) / 2); return end
-  send_setpoint(driver, device, f_to_c(math.floor(v + 0.5)))   -- whole °F, like the unit
+  send_setpoint(driver, device, fj_f_to_c(v))   -- whole °F, with the unit's own table
 end
 local function handle_fan_mode(driver, device, cmd)
   ac_change(driver, device, "fan", cmd.args.fanMode, "fan", cmd.args.fanMode)
