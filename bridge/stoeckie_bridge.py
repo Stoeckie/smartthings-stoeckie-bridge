@@ -78,7 +78,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-09k"
+VERSION = "2026-11-10a"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -4375,7 +4375,11 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
         cmd = str(body.get("cmd", ""))
         if cmd == "diag":  # the driver tells what it shows (driver build, profile, unit); only for the setup page
             if isinstance(body.get("value"), dict):
-                REG.diag[dev_id] = {k: str(v)[:60] for k, v in list(body["value"].items())[:8]}
+                new = {k: str(v)[:60] for k, v in list(body["value"].items())[:8]}
+                if REG.diag.get(dev_id) != new:  # one line per change, so the log shows which driver build runs
+                    log.info("[api] %s: driver build %s, profile %s, unit %s", dev_id, new.get("build", "?"),
+                             new.get("profile", "?"), new.get("unit", "?"))
+                REG.diag[dev_id] = new
             return web.json_response({"ok": True})
         if cmd != "refresh":
             # settings carry an address or postcode: not in the log or on the setup page
