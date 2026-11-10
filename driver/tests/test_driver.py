@@ -362,6 +362,10 @@ def test_aircon_flow(bridge):
         assert state()["setpoint"] == c_val, f_val
     lua.execute(f'{h}.thermostatCoolingSetpoint.setCoolingSetpoint(DRIVER_OBJ, AC, {{ args = {{ setpoint = 73 }} }})')
     assert state()["setpoint"] == 22.5
+    # the app may send the °F slider converted to °C: 73 °F = 22.78 °C must still give 22.5
+    for c_in, c_val in ((22.78, 22.5), (16.11, 16.5), (22.22, 22.0)):
+        lua.execute(f'{h}["silvervalley08660.targetTemperatureF"].setTemperature(DRIVER_OBJ, AC, {{ args = {{ temperature = {c_in} }} }})')
+        assert state()["setpoint"] == c_val, c_in
     lua.execute(f'{h}["silvervalley08660.targetTemperatureF"].setTemperature(DRIVER_OBJ, AC, {{ args = {{ temperature = 68 }} }})')
     assert state()["setpoint"] == 20.0
     # setting "Changes while off: Send now": a change while off goes out right away (and switches the unit on)

@@ -89,7 +89,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-10b"
+local BUILD = "2026-11-10c"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -1425,7 +1425,9 @@ end
 local function handle_setpoint_f(driver, device, cmd)
   local v = tonumber(cmd.args.temperature)
   if not v then return end
-  if v <= 40 then send_setpoint(driver, device, math.floor(v * 2 + 0.5) / 2); return end
+  -- a value of 40 or less is °C: the app can convert the °F slider (73 °F = 22.8 °C, which rounded to 0.5 °C
+  -- gave 23.0, shown by the unit as 74; reported 10-11-2026). Back to whole °F first, then the Fujitsu table.
+  if v <= 40 then v = c_to_f(v) end
   send_setpoint(driver, device, fj_f_to_c(v))   -- whole °F, with the unit's own table
 end
 local function handle_fan_mode(driver, device, cmd)
