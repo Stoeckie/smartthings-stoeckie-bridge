@@ -79,7 +79,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-11g"
+VERSION = "2026-11-11h"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -5790,6 +5790,35 @@ async def st_tool(name: str, a: dict) -> Any:
         return {"device": _label(d), "events": [{"time": e.get("time"), "attribute": f"{e.get('capability')}.{e.get('attribute')}",
                                                  "value": e.get("value"), "unit": e.get("unit")}
                                                 for e in ((j or {}).get("items") or [])[:n]]}
+    if name in ("list_app_routines", "get_routine", "update_routine", "create_routine"):
+        # the routines made in the SmartThings app live on client.smartthings.com (the public /rules only shows
+        # rules made through the API by the same client)
+        c = await st.load()
+        lid = c["loc"]["locationId"]
+        base = "https://client.smartthings.com/rules"
+        if name == "list_app_routines":
+            j = await st.call("GET", f"{base}?locationId={lid}&max=500")
+            items = (j or {}).get("items") or []
+            q = _norm(a.get("name"))
+            return [{"name": x.get("name"), "id": x.get("id"), "status": x.get("status")}
+                    for x in items if not q or q in _norm(x.get("name"))]
+        if name == "get_routine":
+            return await st.call("GET", f"{base}/{a['id']}?locationId={lid}")
+        rule = a.get("rule")
+        if isinstance(rule, str):
+            rule = json.loads(rule)
+        if not isinstance(rule, dict) or not rule.get("name") or not isinstance(rule.get("actions"), list):
+            raise ValueError("rule must be an object with name and actions")
+        body = {"name": rule["name"], "actions": rule["actions"]}
+        for k in ("timeZoneId", "sequence"):
+            if k in rule:
+                body[k] = rule[k]
+        if name == "update_routine":
+            r = await st.call("PUT", f"{base}/{a['id']}?locationId={lid}", body)
+        else:
+            r = await st.call("POST", f"{base}?locationId={lid}", body)
+        log.info("[claude] routine %s %s", "updated" if name == "update_routine" else "created", body["name"])
+        return {"id": (r or {}).get("id"), "name": (r or {}).get("name"), "status": (r or {}).get("status")}
     if name in ("list_routines", "run_routine"):
         c = await st.load()
         lid = c["loc"]["locationId"]
@@ -5846,6 +5875,20 @@ CLAUDE_TOOLS = [
                      "required": ["device"]}, "annotations": {"readOnlyHint": True}},
     {"name": "list_routines", "description": "List the routines of the home (name, id, status).", "inputSchema": _OBJ,
      "annotations": {"readOnlyHint": True}},
+    {"name": "list_app_routines", "description": "List all routines made in the SmartThings app (name, id, status). "
+     "Optional filter: text in the name.", "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}},
+     "annotations": {"readOnlyHint": True}},
+    {"name": "get_routine", "description": "Full definition (Rules API JSON: name, actions with if, conditions, "
+     "commands) of one routine by id.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}},
+                                                         "required": ["id"]}, "annotations": {"readOnlyHint": True}},
+    {"name": "update_routine", "description": "Replace a routine by id with a new definition (object with name and "
+     "actions in the Rules API format, as returned by get_routine). Always read it with get_routine first and keep "
+     "everything that should not change.",
+     "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "rule": {"type": "object"}},
+                     "required": ["id", "rule"]}},
+    {"name": "create_routine", "description": "Create a new routine (object with name and actions in the Rules API "
+     "format). Conditions can use remains (for example mode stays Away for 12 hours).",
+     "inputSchema": {"type": "object", "properties": {"rule": {"type": "object"}}, "required": ["rule"]}},
     {"name": "run_routine", "description": "Run a routine by exact name or id.",
      "inputSchema": {"type": "object", "properties": {"routine": {"type": "string"}}, "required": ["routine"]}},
 ]

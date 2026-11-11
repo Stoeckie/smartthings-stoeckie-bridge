@@ -79,7 +79,7 @@ def test_oauth_and_filter():
         tok = await connect(c)
         h = {**ANTH, "Authorization": "Bearer " + tok["access_token"]}
         r = await c.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, headers=h)
-        assert r.status == 200 and len((await r.json())["result"]["tools"]) == 12
+        assert r.status == 200 and len((await r.json())["result"]["tools"]) == 16
         r = await c.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
                          headers={**EVIL, "Authorization": h["Authorization"]})
         assert r.status == 403
