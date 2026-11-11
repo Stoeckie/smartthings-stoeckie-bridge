@@ -89,7 +89,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-11a"
+local BUILD = "2026-11-11b"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -433,12 +433,32 @@ end
 -- a minute (or until the unit reports it), so the app does not jump back and forth
 local AC_HOLD = {}    -- device.id -> key -> { v = shown, t = os.time() }
 local HOLD_SECS = 60
+-- time of the last command that switches the unit on (on, or a mode). For a minute after it the unit counts
+-- as on, also when a poll in between still says off: a routine sends mode and setpoint together, and a
+-- setpoint that then looked like "unit off" was kept for later and lost (heat 68 became the old 78 °F,
+-- reported 11-11-2026)
+local AC_ON = {}      -- device.id -> os.time()
+local AC_DRIVER       -- the driver, kept from the last air conditioner command (for SEND_LATE)
+local SEND_LATE       -- (dev, pending) sends changes kept while off; defined with ac_change
+local function recently_on(dev)
+  local t = AC_ON[dev.id]
+  return t ~= nil and os.time() - t <= HOLD_SECS
+end
 local function apply_holds(dev, s, raw)
   local h = AC_HOLD[dev.id]
-  if not h then return s end
+  if not h then
+    if s.power == "off" and recently_on(dev) then
+      local c = {}
+      for k, v in pairs(s) do c[k] = v end
+      c.power = "on"
+      return c
+    end
+    return s
+  end
   local c = {}
   for k, v in pairs(s) do c[k] = v end
   local now = os.time()
+  if c.power == "off" and recently_on(dev) then c.power = "on" end   -- the cloud lags behind an on command
   local field = { setpoint = "setpoint", fan = "fan", vdir = "vDir", hdir = "hDir", mode = "mode", swing = "swing" }
   for key, x in pairs(h) do
     local f = field[key]
@@ -450,7 +470,7 @@ local function apply_holds(dev, s, raw)
     if now - x.t > HOLD_SECS or reported == nil or same
         or (key == "setpoint" and tonumber(reported) == tonumber(x.v)) then
       h[key] = nil
-    elseif s.power ~= "off" then
+    elseif c.power ~= "off" then
       if key == "swing" then c.swing = SWING_FROM_ST[x.v] or c.swing
       elseif key == "mode" then c.mode = AC_MODE_FROM_ST[x.v] or c.mode
       elseif key == "vdir" or key == "hdir" or key == "setpoint" then c[f] = tonumber(x.v)
@@ -493,6 +513,9 @@ local function emit_aircon(dev, s)
   local pend = get_pending(dev)
   if s.power ~= "off" then
     if pend or dev:get_field("ac_pending") then set_pending(dev, nil) end
+    -- the unit is on after all (a poll that said off for a moment, or switched on from the remote) while a
+    -- change was kept a moment ago: send it now instead of dropping it
+    if pend and tonumber(pend.t) and os.time() - pend.t <= 120 and SEND_LATE then SEND_LATE(dev, pend) end
     pend = nil
   elseif pend then
     local c = {}
@@ -1265,6 +1288,7 @@ local function handle_switch_on(driver, device, cmd)
     log.info("[stbridge] " .. device.label .. ": switching on with the changes made while off")
     -- a mode switches a Fujitsu on; Minimum Heat is a separate setting, so switch on first
     local rest = {}
+    AC_ON[device.id] = os.time()
     if pend.mode and pend.mode.value ~= "minheat" then
       send(driver, device, pend.mode.what, pend.mode.value)
     else
@@ -1285,6 +1309,7 @@ local function handle_switch_on(driver, device, cmd)
   end
   local s = device:get_field("ac_shown")
   if type(s) == "table" then s.power = "on" end
+  AC_ON[device.id] = os.time()
   send(driver, device, "on")
 end
 local function handle_switch_off(driver, device, cmd)
@@ -1292,6 +1317,7 @@ local function handle_switch_off(driver, device, cmd)
   if is_tuya(device) then return tuya_switch(driver, device, c, false) end
   if c == "verticalSwing" or c == "horizontalSwing" then return swing_toggle(driver, device, c, false) end
   if c ~= "climate" then
+    AC_ON[device.id] = nil
     cancel_pending_timer(device)
     if device:get_field("ac_pending") then set_pending(device, nil) end
     -- off right away for the check in ac_change (the next poll confirms it), so a list opened just after
@@ -1341,6 +1367,7 @@ local function unchanged(device, key, value)
   return false
 end
 unit_off = function(device)
+  if recently_on(device) then return false end
   local shown = device:get_field("ac_shown")
   if type(shown) == "table" and shown.power then return shown.power == "off" end
   local ok, v = pcall(device.get_latest_state, device, "main", capabilities.switch.ID, capabilities.switch.switch.NAME)
@@ -1375,6 +1402,7 @@ local function ac_send(driver, device, what, value, key, shown)
     if key == "swing" then s.vdir, s.hdir = nil, nil end
     if key == "mode" then s.power = "on" end                    -- a mode command switches a Fujitsu on
   end
+  if key == "mode" then AC_ON[device.id] = os.time() end
   local ok = send(driver, device, what, value)
   if not ok then
     device:set_field("ac_shown", nil)
@@ -1404,6 +1432,7 @@ end
 -- * the unit is off: on a Fujitsu a command switches it on, so keep the change and send it when it is switched
 --   on (setting "Changes while off": "Send now" sends right away)
 local function ac_change(driver, device, key, shown, what, value)
+  AC_DRIVER = driver
   log.info(string.format("[stbridge] %s: command %s %s (unit %s)", device.label, key, tostring(shown),
     unit_off(device) and "off" or "on"))
   if unchanged(device, key, shown) then
@@ -1413,6 +1442,7 @@ local function ac_change(driver, device, key, shown, what, value)
   if unit_off(device) and (device.preferences or {}).offChanges ~= "send" then
     local pend = get_pending(device) or {}
     pend[key] = { what = what, value = value, shown = shown }
+    pend.t = os.time()
     if key == "vdir" or key == "hdir" then pend.swing = nil end      -- a position ends swing
     if key == "swing" then pend.vdir, pend.hdir = nil, nil end
     set_pending(device, pend)
@@ -1428,6 +1458,18 @@ local function ac_change(driver, device, key, shown, what, value)
     return
   end
   ac_send(driver, device, what, value, key, shown)
+end
+SEND_LATE = function(device, pend)
+  local driver = AC_DRIVER
+  if not driver then return end
+  device.thread:call_with_delay(1, function()
+    log.info("[stbridge] " .. device.label .. ": unit is on, sending the changes kept a moment ago")
+    if pend.mode and pend.mode.value ~= "minheat" then ac_send(driver, device, pend.mode.what, pend.mode.value, "mode", pend.mode.shown) end
+    for _, k in ipairs(PENDING_ORDER) do
+      local x = pend[k]
+      if x then ac_send(driver, device, x.what, x.value, k, x.shown) end
+    end
+  end)
 end
 local function handle_ac_mode(driver, device, cmd)
   -- Off (our list has it, the standard list allows it) switches the unit off; Off again while off (a list
