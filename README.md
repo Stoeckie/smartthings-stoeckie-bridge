@@ -213,6 +213,20 @@ Short drops (a reconnect or one missed poll) are ignored: Connection only turns 
 
 Every drop is remembered. When the connection is back, the device shows **Last drop**: time (UTC), how long it lasted and the reason (for example "session closed" or "timeout"). Older drops are in the device history.
 
+## Claude on web and phone (optional)
+
+Claude (claude.ai, the phone apps and Claude Desktop) can check and control your SmartThings home through the bridge, also when you are away. Claude's servers call the bridge, so it needs a public https address; the bridge itself only listens on 127.0.0.1 (port 8789) and a tunnel forwards to it. Tested with [Tailscale Funnel](https://tailscale.com/kb/1223/) (free, outbound only, no port forward on the router).
+
+Tools: list rooms, devices and scenes, read one device or many at once (which lights are on, is everything locked), send commands (switch, level, shades, setpoints, locks), run scenes and routines, read and set the location mode, read the recent history of a device.
+
+Setup:
+1. Install Tailscale on the bridge pc, sign in, enable Funnel for the tailnet, then `tailscale funnel --bg 8789`.
+2. Setup page, **Claude on web and phone**: set a password (at least 12 characters). Put the public address in `claude.public_url` in config.json (for example `https://bridge.tailxxxx.ts.net`).
+3. SmartThings access: the bridge uses its own SmartThings login with a refresh token it keeps renewing (`claude.st` in config.json). Either a SmartThings OAuth-In app (client id, secret and redirect `https://<public address>/st/callback`, then **Sign in at SmartThings** on the setup page) or, when your account may not create OAuth apps (HTTP 403 on /apps), a SmartThings CLI login of its own profile (`smartthings locations --profile claude`), whose refresh token goes into `claude.st.refresh_token` with the CLI client id.
+4. In Claude: **Customize > Connectors > Add custom connector**, URL `https://<public address>/mcp`, keep the detected settings (Sign in now, Register automatically), Add, Connect, enter the password.
+
+Security: only Anthropic's published outbound addresses (160.79.104.0/21, 153.61.208.0/20) may use the MCP, token and registration endpoints (the address comes from the tunnel's X-Forwarded-For); OAuth 2.1 with PKCE and dynamic client registration, only redirect addresses on claude.ai or claude.com; the sign-in page locks for 15 minutes after 5 wrong passwords; access tokens last 1 hour, refresh tokens 90 days and rotate; tokens are stored only as SHA-256 hashes (claude-tokens.json). The setup page can end all Claude sessions, switch locks to lock only or read only, or switch Claude access off. Only the tool name and commands are logged, never what you ask Claude.
+
 ## Security and privacy
 
 * Credentials only live in `config.json` on the bridge pc (in `.gitignore`), never in the code or the driver.
