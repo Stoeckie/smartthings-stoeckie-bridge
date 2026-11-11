@@ -24,6 +24,8 @@ DEVICES = [
 def test_helpers():
     assert sb.echo_wanted(DEVICES[0]) and sb.echo_wanted(DEVICES[1])
     assert not sb.echo_wanted(DEVICES[2]) and not sb.echo_wanted(DEVICES[3])
+    assert not sb.echo_wanted({"capabilities": ["AUDIO_PLAYER"], "deviceFamily": "WHA", "serialNumber": "g"})
+    assert not sb.echo_wanted({"capabilities": ["AUDIO_PLAYER"], "deviceFamily": "ECHO", "clusterMembers": ["a"]})
     assert sb.echo_volume("55.4") == 55 and sb.echo_volume(130) == 100 and sb.echo_volume(-3) == 0
     assert sb.echo_text("  hello\n world ") == "hello world"
     assert len(sb.echo_text("x" * 400)) == 250
