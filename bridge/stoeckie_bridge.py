@@ -78,7 +78,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-11d"
+VERSION = "2026-11-11e"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -992,9 +992,8 @@ def echo_wanted(d: dict[str, Any]) -> bool:
     """Speakers and screens that can play audio; not the Alexa app, Fire TV remotes or third party devices."""
     caps = set(d.get("capabilities") or [])
     fam = str(d.get("deviceFamily") or "")
-    # WHA = multi-room speaker groups (made in the Alexa app): no device of their own in SmartThings
-    return ("AUDIO_PLAYER" in caps and fam not in ("VOX", "THIRD_PARTY_AVS_MEDIA_DISPLAY", "TABLET", "WHA")
-            and not d.get("clusterMembers"))
+    # speaker groups from the Alexa app (WHA) also get a device: speak or play music on the whole group
+    return "AUDIO_PLAYER" in caps and fam not in ("VOX", "THIRD_PARTY_AVS_MEDIA_DISPLAY", "TABLET")
 
 
 def echo_volume(value: Any) -> int:

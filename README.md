@@ -189,7 +189,7 @@ Each Echo device has:
   recordings saved). The text is shown in SmartThings but never written to the bridge log.
 
 Volume, playing and connection come in live (Amazon push); do not disturb, alarms and bluetooth every 5 minutes.
-Speaker groups made in the Alexa app get no device. Everything goes through the Amazon cloud: without internet none
+Speaker groups made in the Alexa app get a device too (speak or play music on the whole group). Everything goes through the Amazon cloud: without internet none
 of this works.
 
 ## VELUX ACTIVE departure mode
