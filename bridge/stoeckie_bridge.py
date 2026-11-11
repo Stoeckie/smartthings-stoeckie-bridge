@@ -78,7 +78,7 @@ from typing import Any
 
 from aiohttp import web
 
-VERSION = "2026-11-11b"
+VERSION = "2026-11-11c"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -1019,6 +1019,7 @@ def echo_volumes_from(js: Any) -> dict[str, int]:
     return out
 
 
+ECHO_TEXT_CMDS = ("speak", "announce", "command", "routine", "music", "push", "skill", "bluetooth")
 # Alexa sound library ids for the SmartThings list (any other amzn_sfx_ id also works)
 ECHO_SOUNDS = {
     "doorbell": "amzn_sfx_doorbell_chime_01", "doorbell2": "amzn_sfx_doorbell_01",
@@ -5139,6 +5140,9 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
         if cmd != "refresh":
             # settings carry an address or postcode: not in the log or on the setup page
             shown = None if cmd == "settings" or body.get("value") is None else body.get("value")
+            # texts for an Echo (spoken, notification, music, routine) can be personal: only their length
+            if dev_id.startswith("echo-") and cmd in ECHO_TEXT_CMDS and shown is not None:
+                shown = f"({len(str(shown))} chars)"
             REG.note_command(dev_id, cmd, shown)
             log.info("[api] %s: %s %s", dev_id, cmd, "" if shown is None else shown)
         try:

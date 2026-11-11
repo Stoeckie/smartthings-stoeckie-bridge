@@ -217,3 +217,8 @@ def test_echo_new_commands(monkeypatch):
     assert calls[1][1] == ("SPOTIFY", "Coldplay") and calls[2][1] == ("play Radio 538",)
     assert calls[5][1] == ("AA:BB",)
     assert b.REG.devices["echo-S1"]["state"]["dnd"] == "on"
+
+
+def test_echo_text_not_in_api_log():
+    import stoeckie_bridge as b
+    assert "speak" in b.ECHO_TEXT_CMDS and "push" in b.ECHO_TEXT_CMDS and "volume" not in b.ECHO_TEXT_CMDS
