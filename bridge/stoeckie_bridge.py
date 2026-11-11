@@ -5434,6 +5434,10 @@ CLAUDE_REDIRECT_HOSTS = ("claude.ai", "claude.com")
 CLAUDE_TOKENS = DATA / "claude-tokens.json"
 ST_API = "https://api.smartthings.com/v1"
 ST_OAUTH = "https://api.smartthings.com/oauth"
+# A SmartThings CLI login (own profile, made once on a pc with the CLI) also works: public client with PKCE, the
+# bridge keeps refreshing it. Used when the account may not create OAuth apps (403 on /apps).
+ST_CLI_CLIENT = "d18cf96e-c626-4433-bf51-ddbb10c5d1ed"
+ST_CLI_REFRESH = "https://auth-global.api.smartthings.com/oauth/token"
 ST_SCOPES = ("r:devices:* x:devices:* r:locations:* x:locations:* r:scenes:* x:scenes:* r:rules:* x:rules:*")
 CLAUDE_STATE: dict[str, Any] = {"codes": {}, "fails": [], "st_states": {}, "ip_warned": False}
 
@@ -5536,20 +5540,21 @@ class STCloud:
     @staticmethod
     def configured(cfg: dict[str, Any] | None = None) -> bool:
         s = claude_cfg(cfg).get("st") or {}
-        return bool(s.get("client_id") and s.get("client_secret") and s.get("refresh_token"))
+        return bool(s.get("client_id") and s.get("refresh_token"))
 
     async def _token(self, session, force: bool = False) -> str:
         async with self.lock:
             cfg = load_config()
             s = (cfg.get("claude") or {}).get("st") or {}
-            if not (s.get("client_id") and s.get("client_secret")):
+            if not s.get("client_id"):
                 raise RuntimeError("SmartThings is not connected yet (bridge setup page, Claude part)")
             if not force and s.get("access_token") and float(s.get("expires", 0)) > time.time() + 300:
                 return s["access_token"]
             if not s.get("refresh_token"):
                 raise RuntimeError("SmartThings is not connected yet (bridge setup page, Claude part)")
-            auth = aiohttp.BasicAuth(s["client_id"], s["client_secret"])
-            async with session.post(ST_OAUTH + "/token", auth=auth, data={
+            cli = not s.get("client_secret")
+            auth = None if cli else aiohttp.BasicAuth(s["client_id"], s["client_secret"])
+            async with session.post(ST_CLI_REFRESH if cli else ST_OAUTH + "/token", auth=auth, data={
                     "grant_type": "refresh_token", "client_id": s["client_id"], "refresh_token": s["refresh_token"]}) as r:
                 j = await r.json(content_type=None)
                 if r.status != 200 or "access_token" not in j:
@@ -6123,7 +6128,7 @@ def claude_setup_html(cfg: dict[str, Any]) -> str:
     c = claude_cfg(cfg)
     s = c.get("st") or {}
     t = claude_tokens()
-    st_state = ("connected" if STCloud.configured(cfg) else
+    st_state = (("connected (CLI login)" if not s.get("client_secret") else "connected") if STCloud.configured(cfg) else
                 "app ready, not signed in yet" if s.get("client_id") else "no SmartThings app yet")
     rows = [
         ("Claude access", "on" if c.get("enabled") else "off"),
