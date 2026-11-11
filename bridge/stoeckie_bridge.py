@@ -79,7 +79,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-11f"
+VERSION = "2026-11-11g"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -6204,6 +6204,20 @@ async def claude_start() -> None:
     await runner.setup()
     await web.TCPSite(runner, "127.0.0.1", port).start()   # only this pc: the tunnel forwards to it
     log.info("[claude] MCP server on 127.0.0.1:%d (%s)", port, "on" if c.get("enabled") else "off until a password is set")
+
+    async def keep_st_login():
+        # a SmartThings refresh token expires after 29 days without use: read the locations twice a day, which
+        # renews the access token (and with it the refresh token) whenever it is due, also when Claude is not used
+        while True:
+            await asyncio.sleep(60)
+            try:
+                if STCloud.configured():
+                    await ST_CLOUD.call("GET", "/locations")
+            except Exception as ex:  # noqa: BLE001
+                log.warning("[claude] SmartThings keep-alive: %s", str(ex)[:160])
+            await asyncio.sleep(12 * 3600)
+
+    asyncio.create_task(keep_st_login())
 
 
 
