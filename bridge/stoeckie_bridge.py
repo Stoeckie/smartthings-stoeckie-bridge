@@ -76,9 +76,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-11e"
+VERSION = "2026-11-11f"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -4304,6 +4305,7 @@ color:#fff}form+form{margin-top:6px;padding-top:6px;border-top:1px solid var(--l
 </style></head><body>
 <h1 id="top">Stoeckie Bridge <small>{version}</small></h1>
 <p class="intro">Everything you enter here is stored only locally, in config.json on this computer. Tap a part below to open its status and settings.</p>
+<p class="intro"><a href="/setup/claude">Claude on web and phone (SmartThings control)</a></p>
 {status}
 <h2 class="g">SmartThings</h2>
 <div class="card"><h3 id="hub">SmartThings hub</h3>
@@ -5155,6 +5157,21 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
 
     app.middlewares.append(guard)
     app.router.add_get("/setup", setup_get)
+
+    async def claude_setup(req):
+        if not local_only(req):
+            return web.Response(status=403, text="setup only from this computer or an allowed address")
+        if plain_from_lan(req):
+            return no_https(req) if https_port is None else web.Response(status=403, text="use https for the setup page")
+        if not key_ok(req):
+            return key_page()
+        if req.method == "POST":
+            go = await claude_setup_post(await req.post(), load_config())
+            raise web.HTTPFound(go or "/setup/claude")
+        return web.Response(content_type="text/html", text=claude_setup_html(load_config()),
+                            headers={"Cache-Control": "no-store"})
+
+    app.router.add_route("*", "/setup/claude", claude_setup)
     app.router.add_post("/setup", setup_post)
     async def root(_req):
         raise web.HTTPFound("/setup")
@@ -5400,6 +5417,791 @@ def seed_from_env(cfg: dict[str, Any]) -> None:
         log.info("[setup] FGLair login taken from environment")
 
 
+# ---------------------------------------------------------------- Claude (web and phone): MCP server
+#
+# Claude on claude.ai (web, phone apps) reaches the bridge through a public https address (Tailscale Funnel on
+# this pc forwards it to 127.0.0.1:<claude.port>; nothing listens on the LAN for this). Three locks:
+# * only Anthropic's published outbound addresses may use the MCP and token endpoints (claude.allowed_ips);
+# * OAuth 2.1 with PKCE: connecting the connector in Claude opens a sign-in page here that asks the password set
+#   on the setup page (stored as a PBKDF2 hash); Claude gets a 1 h access token and a rotating refresh token;
+# * the SmartThings side uses an own OAuth app with a rotating refresh token in config.json (claude.st).
+# Tokens are stored only as SHA-256 hashes (claude-tokens.json next to config.json). Nothing Claude asks or the
+# answers are logged, only the tool name.
+
+CLAUDE_DEFAULT_PORT = 8789
+ANTHROPIC_NETS = ("160.79.104.0/21", "153.61.208.0/20")  # platform.claude.com/docs/en/api/ip-addresses
+CLAUDE_REDIRECT_HOSTS = ("claude.ai", "claude.com")
+CLAUDE_TOKENS = DATA / "claude-tokens.json"
+ST_API = "https://api.smartthings.com/v1"
+ST_OAUTH = "https://api.smartthings.com/oauth"
+ST_SCOPES = ("r:devices:* x:devices:* r:locations:* x:locations:* r:scenes:* x:scenes:* r:rules:* x:rules:*")
+CLAUDE_STATE: dict[str, Any] = {"codes": {}, "fails": [], "st_states": {}, "ip_warned": False}
+
+
+def claude_cfg(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    return (cfg if cfg is not None else load_config()).get("claude") or {}
+
+
+def claude_hash_password(pw: str, salt: bytes | None = None) -> str:
+    salt = salt or secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", pw.encode("utf-8"), salt, 300_000)
+    return "pbkdf2$300000$" + base64.b64encode(salt).decode() + "$" + base64.b64encode(dk).decode()
+
+
+def claude_check_password(pw: str, stored: str) -> bool:
+    try:
+        _, n, salt, dk = stored.split("$")
+        got = hashlib.pbkdf2_hmac("sha256", pw.encode("utf-8"), base64.b64decode(salt), int(n))
+        return hmac.compare_digest(got, base64.b64decode(dk))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _h(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def claude_tokens() -> dict[str, Any]:
+    try:
+        return json.loads(CLAUDE_TOKENS.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {"clients": {}, "access": {}, "refresh": {}}
+
+
+def claude_save_tokens(t: dict[str, Any]) -> None:
+    now = time.time()
+    for k in ("access", "refresh"):
+        t[k] = {h: v for h, v in t.get(k, {}).items() if v.get("exp", 0) > now}
+    tmp = CLAUDE_TOKENS.with_suffix(".tmp")
+    tmp.write_text(json.dumps(t, indent=1), encoding="utf-8")
+    tmp.replace(CLAUDE_TOKENS)
+
+
+def claude_redirect_ok(uri: str) -> bool:
+    from urllib.parse import urlsplit
+    u = urlsplit(uri or "")
+    host = (u.hostname or "").lower()
+    return u.scheme == "https" and any(host == h or host.endswith("." + h) for h in CLAUDE_REDIRECT_HOSTS)
+
+
+def claude_client_ip(req) -> str:
+    """The address of the caller. Behind Tailscale Funnel the request comes from this pc (loopback) with the real
+    address in X-Forwarded-For."""
+    remote = req.remote or ""
+    try:
+        loop = ipaddress.ip_address(remote).is_loopback
+    except ValueError:
+        loop = False
+    if loop:
+        xff = req.headers.get("X-Forwarded-For", "")
+        if xff:
+            return xff.split(",")[0].strip()
+        return ""
+    return remote
+
+
+def claude_ip_allowed(req, cfg: dict[str, Any]) -> bool:
+    c = claude_cfg(cfg)
+    if c.get("ip_filter", True) is False:
+        return True
+    ip_s = claude_client_ip(req)
+    if not ip_s:
+        # no forwarded address (the tunnel did not add one): OAuth still protects every call
+        if not CLAUDE_STATE["ip_warned"]:
+            CLAUDE_STATE["ip_warned"] = True
+            log.warning("[claude] the tunnel gives no caller address, address filter not applied")
+        return True
+    try:
+        ip = ipaddress.ip_address(ip_s)
+    except ValueError:
+        return False
+    nets = list(ANTHROPIC_NETS) + list(c.get("allowed_ips") or [])
+    return any(ip in ipaddress.ip_network(n, strict=False) for n in nets)
+
+
+def claude_public_url(req, cfg: dict[str, Any]) -> str:
+    u = str(claude_cfg(cfg).get("public_url") or "").rstrip("/")
+    if u:
+        return u
+    return f"https://{req.host}"
+
+
+# ---------- SmartThings with the bridge's own OAuth app
+
+class STCloud:
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.cache: dict[str, Any] = {"t": 0}
+
+    @staticmethod
+    def configured(cfg: dict[str, Any] | None = None) -> bool:
+        s = claude_cfg(cfg).get("st") or {}
+        return bool(s.get("client_id") and s.get("client_secret") and s.get("refresh_token"))
+
+    async def _token(self, session, force: bool = False) -> str:
+        async with self.lock:
+            cfg = load_config()
+            s = (cfg.get("claude") or {}).get("st") or {}
+            if not (s.get("client_id") and s.get("client_secret")):
+                raise RuntimeError("SmartThings is not connected yet (bridge setup page, Claude part)")
+            if not force and s.get("access_token") and float(s.get("expires", 0)) > time.time() + 300:
+                return s["access_token"]
+            if not s.get("refresh_token"):
+                raise RuntimeError("SmartThings is not connected yet (bridge setup page, Claude part)")
+            auth = aiohttp.BasicAuth(s["client_id"], s["client_secret"])
+            async with session.post(ST_OAUTH + "/token", auth=auth, data={
+                    "grant_type": "refresh_token", "client_id": s["client_id"], "refresh_token": s["refresh_token"]}) as r:
+                j = await r.json(content_type=None)
+                if r.status != 200 or "access_token" not in j:
+                    log.warning("[claude] SmartThings token refresh failed: HTTP %s %s", r.status,
+                                str(j.get("error") if isinstance(j, dict) else "")[:80])
+                    raise RuntimeError("SmartThings login expired: connect SmartThings again on the bridge setup page")
+            cfg = load_config()
+            s = cfg.setdefault("claude", {}).setdefault("st", {})
+            s["access_token"] = j["access_token"]
+            s["expires"] = time.time() + float(j.get("expires_in", 86400))
+            if j.get("refresh_token"):
+                s["refresh_token"] = j["refresh_token"]
+            save_config(cfg)
+            log.info("[claude] SmartThings token refreshed")
+            return s["access_token"]
+
+    async def call(self, method: str, path: str, body: Any = None, retry: bool = True) -> Any:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            tok = await self._token(session)
+            url = path if path.startswith("http") else ST_API + path
+            async with session.request(method, url, json=body, headers={"Authorization": "Bearer " + tok,
+                                                                          "Accept": "application/json"}) as r:
+                if r.status == 401 and retry:
+                    await self._token(session, force=True)
+                    return await self.call(method, path, body, False)
+                txt = await r.text()
+                try:
+                    j = json.loads(txt) if txt else None
+                except ValueError:
+                    j = txt
+                if r.status >= 400:
+                    err = j.get("error") if isinstance(j, dict) else j
+                    raise RuntimeError(f"SmartThings {method} {path.split('?')[0]}: HTTP {r.status} {str(err)[:300]}")
+                return j
+
+    async def all(self, path: str) -> list[Any]:
+        items, nxt = [], path
+        for _ in range(20):
+            if not nxt:
+                break
+            j = await self.call("GET", nxt)
+            items += (j or {}).get("items") or []
+            nxt = (((j or {}).get("_links") or {}).get("next") or {}).get("href")
+        return items
+
+    async def load(self, force: bool = False) -> dict[str, Any]:
+        c = self.cache
+        if not force and c.get("loc") and time.time() - c["t"] < 120:
+            return c
+        locs = await self.all("/locations")
+        if not locs:
+            raise RuntimeError("no SmartThings location")
+        want = str(claude_cfg().get("location") or "").lower()
+        c["loc"] = next((x for x in locs if want and (x["locationId"] == want or x["name"].lower() == want)), locs[0])
+        lid = c["loc"]["locationId"]
+        c["rooms"] = await self.all(f"/locations/{lid}/rooms")
+        c["devices"] = await self.all(f"/devices?locationId={lid}")
+        c["t"] = time.time()
+        return c
+
+
+ST_CLOUD = STCloud()
+
+
+def _norm(s: Any) -> str:
+    import unicodedata
+    s = unicodedata.normalize("NFD", str(s or "").lower())
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", s).split())
+
+
+def _label(d: dict) -> str:
+    return d.get("label") or d.get("name") or ""
+
+
+def _caps(d: dict) -> list[str]:
+    out: list[str] = []
+    for c in d.get("components") or []:
+        for x in c.get("capabilities") or []:
+            if x.get("id") not in out:
+                out.append(x.get("id"))
+    return out
+
+
+def _room(c: dict, rid: Any) -> str:
+    return next((r.get("name") for r in c.get("rooms") or [] if r.get("roomId") == rid), "")
+
+
+def _brief(c: dict, d: dict) -> dict:
+    return {"name": _label(d), "id": d.get("deviceId"), "room": _room(c, d.get("roomId")),
+            "type": (d.get("ocf") or {}).get("ocfDeviceType") or d.get("deviceTypeName") or d.get("type"),
+            "capabilities": _caps(d)}
+
+
+def st_flat_status(s: dict) -> dict:
+    out: dict[str, Any] = {}
+    for comp, cs in (s.get("components") or {}).items():
+        for cap, attrs in (cs or {}).items():
+            for a, v in (attrs or {}).items():
+                if not isinstance(v, dict) or v.get("value") is None:
+                    continue
+                if re.match(r"^(supported|available)", a) or len(json.dumps(v["value"])) > 300:
+                    continue
+                key = ("" if comp == "main" else comp + ".") + cap + "." + a
+                out[key] = f"{v['value']} {v['unit']}" if v.get("unit") else v["value"]
+    return out
+
+
+def st_find_device(c: dict, q: str) -> dict:
+    if not q:
+        raise ValueError("device is required")
+    devs = c.get("devices") or []
+    for d in devs:
+        if d.get("deviceId") == q:
+            return d
+    n = _norm(q)
+    hits = [d for d in devs if _norm(_label(d)) == n]
+    if not hits:
+        hits = [d for d in devs if n in _norm(_label(d))]
+    if not hits:
+        words = n.split()
+        hits = [d for d in devs if all(w in _norm(_label(d) + " " + _room(c, d.get("roomId"))) for w in words)]
+    if len(hits) == 1:
+        return hits[0]
+    if not hits:
+        raise ValueError(f'No device matches "{q}". Use list_devices.')
+    raise ValueError(f'"{q}" matches {len(hits)} devices: ' + "; ".join(
+        f"{_label(d)} ({_room(c, d.get('roomId'))}, {d.get('deviceId')})" for d in hits[:15]) +
+        ". Use the exact name or the id.")
+
+
+def st_lock_check(cmd: str, capability: str) -> None:
+    mode = str(claude_cfg().get("locks") or "full").lower()
+    if capability != "lock" or mode == "full" or (mode == "lock" and cmd == "lock"):
+        return
+    raise ValueError(f"Locks are {'lock only' if mode == 'lock' else 'read only'} for Claude (bridge setting).")
+
+
+GET_MANY_KEYS = ("switch.switch", "switchLevel.level", "temperatureMeasurement.temperature", "lock.lock",
+                 "contactSensor.contact", "motionSensor.motion", "powerMeter.power", "battery.battery",
+                 "windowShade.windowShade", "thermostatMode.thermostatMode", "thermostatHeatingSetpoint.heatingSetpoint",
+                 "airConditionerMode.airConditionerMode", "presenceSensor.presence",
+                 "relativeHumidityMeasurement.humidity", "mediaPlayback.playbackStatus")
+
+
+async def st_tool(name: str, a: dict) -> Any:
+    st = ST_CLOUD
+    if name == "list_rooms":
+        c = await st.load(True)
+        return {"location": c["loc"]["name"], "rooms": [
+            {"name": r.get("name"), "id": r.get("roomId"),
+             "devices": sum(1 for d in c["devices"] if d.get("roomId") == r.get("roomId"))} for r in c["rooms"]]}
+    if name == "list_devices":
+        c = await st.load(True)
+        ds = c["devices"]
+        if a.get("room"):
+            ds = [d for d in ds if _norm(a["room"]) in _norm(_room(c, d.get("roomId")))]
+        if a.get("name"):
+            ds = [d for d in ds if _norm(a["name"]) in _norm(_label(d))]
+        if a.get("capability"):
+            ds = [d for d in ds if a["capability"] in _caps(d)]
+        return {"count": len(ds), "devices": [_brief(c, d) for d in ds]}
+    if name == "get_status":
+        c = await st.load()
+        d = st_find_device(c, a.get("device", ""))
+        s, h = await asyncio.gather(st.call("GET", f"/devices/{d['deviceId']}/status"),
+                                    st.call("GET", f"/devices/{d['deviceId']}/health"), return_exceptions=True)
+        if isinstance(s, Exception):
+            raise s
+        return {**_brief(c, d), "health": None if isinstance(h, Exception) else (h or {}).get("state"),
+                "status": st_flat_status(s)}
+    if name == "get_many":
+        r = await st_tool("list_devices", a)
+        if r["count"] > 80:
+            raise ValueError(f"{r['count']} devices; narrow it down with room, name or capability")
+
+        async def one(d):
+            try:
+                s = st_flat_status({"components": {"main": await st.call("GET", f"/devices/{d['id']}/components/main/status")}})
+                return {"name": d["name"], "room": d["room"],
+                        **{k.split(".")[1]: s[k] for k in GET_MANY_KEYS if k in s}}
+            except Exception as ex:  # noqa: BLE001
+                return {"name": d["name"], "room": d["room"], "error": str(ex)[:120]}
+        out = []
+        for i in range(0, len(r["devices"]), 10):
+            out += await asyncio.gather(*(one(d) for d in r["devices"][i:i + 10]))
+        return out
+    if name == "send_command":
+        c = await st.load()
+        d = st_find_device(c, a.get("device", ""))
+        cap, cmd = str(a.get("capability", "")), str(a.get("command", ""))
+        if not cap or not cmd:
+            raise ValueError("capability and command are required")
+        st_lock_check(cmd, cap)
+        body = {"commands": [{"component": a.get("component") or "main", "capability": cap, "command": cmd,
+                              "arguments": a.get("args") or []}]}
+        r = await st.call("POST", f"/devices/{d['deviceId']}/commands", body)
+        log.info("[claude] command %s %s to %s", cap, cmd, _label(d))
+        return {"device": _label(d), "room": _room(c, d.get("roomId")), "sent": body["commands"][0],
+                "result": (((r or {}).get("results") or [{}])[0]).get("status", "ACCEPTED")}
+    if name in ("list_scenes", "run_scene"):
+        c = await st.load()
+        scenes = await st.all(f"/scenes?locationId={c['loc']['locationId']}")
+        if name == "list_scenes":
+            return [{"name": x.get("sceneName"), "id": x.get("sceneId")} for x in scenes]
+        q = str(a.get("scene", ""))
+        hits = [x for x in scenes if x.get("sceneId") == q or _norm(x.get("sceneName")) == _norm(q)] or \
+               [x for x in scenes if _norm(q) and _norm(q) in _norm(x.get("sceneName"))]
+        if len(hits) != 1:
+            raise ValueError(("Several scenes match: " + "; ".join(x.get("sceneName") for x in hits)) if hits
+                             else f'No scene matches "{q}"')
+        await st.call("POST", f"/scenes/{hits[0]['sceneId']}/execute")
+        log.info("[claude] scene %s", hits[0].get("sceneName"))
+        return {"ran": hits[0].get("sceneName")}
+    if name in ("get_mode", "set_mode"):
+        c = await st.load()
+        lid = c["loc"]["locationId"]
+        modes = (await st.call("GET", f"/locations/{lid}/modes") or {}).get("items") or []
+        if name == "get_mode":
+            cur = await st.call("GET", f"/locations/{lid}/modes/current") or {}
+            return {"current": cur.get("label") or cur.get("name"), "modes": [m.get("label") or m.get("name") for m in modes]}
+        m = next((m for m in modes if _norm(m.get("label") or m.get("name")) == _norm(a.get("mode"))), None)
+        if not m:
+            raise ValueError("Unknown mode. Modes: " + ", ".join(m.get("label") or m.get("name") for m in modes))
+        await st.call("PUT", f"/locations/{lid}/modes/current", {"modeId": m["id"]})
+        log.info("[claude] mode %s", m.get("label") or m.get("name"))
+        return {"mode": m.get("label") or m.get("name")}
+    if name == "device_history":
+        c = await st.load()
+        d = st_find_device(c, a.get("device", ""))
+        n = max(1, min(100, int(a.get("limit") or 20)))
+        j = await st.call("GET", f"/history/devices?locationId={c['loc']['locationId']}&deviceId={d['deviceId']}&limit={n}")
+        return {"device": _label(d), "events": [{"time": e.get("time"), "attribute": f"{e.get('capability')}.{e.get('attribute')}",
+                                                 "value": e.get("value"), "unit": e.get("unit")}
+                                                for e in ((j or {}).get("items") or [])[:n]]}
+    if name in ("list_routines", "run_routine"):
+        c = await st.load()
+        lid = c["loc"]["locationId"]
+        rules = await st.all(f"/rules?locationId={lid}")
+        if name == "list_routines":
+            return [{"name": x.get("name"), "id": x.get("id"), "status": x.get("status")} for x in rules]
+        x = next((y for y in rules if y.get("id") == a.get("routine") or _norm(y.get("name")) == _norm(a.get("routine"))), None)
+        if not x:
+            raise ValueError(f'No routine named "{a.get("routine")}"')
+        await st.call("POST", f"/rules/execute/{x['id']}?locationId={lid}")
+        log.info("[claude] routine %s", x.get("name"))
+        return {"ran": x.get("name")}
+    raise ValueError("unknown tool " + name)
+
+
+_OBJ = {"type": "object", "properties": {}}
+CLAUDE_TOOLS = [
+    {"name": "list_rooms", "description": "List the rooms of the SmartThings home with the number of devices in each.",
+     "inputSchema": _OBJ, "annotations": {"readOnlyHint": True}},
+    {"name": "list_devices", "description": "List SmartThings devices (name, id, room, type, capabilities). Optional "
+     "filters: room, text in the name, capability id (switch, lock, temperatureMeasurement, thermostatHeatingSetpoint, ...).",
+     "inputSchema": {"type": "object", "properties": {"room": {"type": "string"}, "name": {"type": "string"},
+                                                      "capability": {"type": "string"}}},
+     "annotations": {"readOnlyHint": True}},
+    {"name": "get_status", "description": "Current state of one device (by name or id): every attribute with its "
+     "value (switch.switch, temperatureMeasurement.temperature, lock.lock, battery.battery, ...) and online state.",
+     "inputSchema": {"type": "object", "properties": {"device": {"type": "string"}}, "required": ["device"]},
+     "annotations": {"readOnlyHint": True}},
+    {"name": "get_many", "description": "Main values of many devices at once (switch, level, temperature, lock, "
+     "contact, motion, power, battery, shade, thermostat). Filter by room, capability or name. For questions like "
+     "'which lights are on' or 'is everything locked'.",
+     "inputSchema": {"type": "object", "properties": {"room": {"type": "string"}, "capability": {"type": "string"},
+                                                      "name": {"type": "string"}}},
+     "annotations": {"readOnlyHint": True}},
+    {"name": "send_command", "description": "Send a command to a device (by name or id). Examples: capability "
+     "'switch' command 'on'/'off'; 'switchLevel' 'setLevel' args [50]; 'windowShade' 'open'/'close'/'pause'; "
+     "'windowShadeLevel' 'setShadeLevel' args [30]; 'thermostatHeatingSetpoint' 'setHeatingSetpoint' args [20]; "
+     "'lock' 'lock'/'unlock'; 'colorTemperature' 'setColorTemperature' args [2700]. Use get_status first to see the "
+     "capabilities of the device.",
+     "inputSchema": {"type": "object", "properties": {"device": {"type": "string"}, "capability": {"type": "string"},
+                                                      "command": {"type": "string"}, "args": {"type": "array", "items": {}},
+                                                      "component": {"type": "string", "description": "default main"}},
+                     "required": ["device", "capability", "command"]}},
+    {"name": "list_scenes", "description": "List the scenes (manual routines) of the home.", "inputSchema": _OBJ,
+     "annotations": {"readOnlyHint": True}},
+    {"name": "run_scene", "description": "Run a scene by name or id.",
+     "inputSchema": {"type": "object", "properties": {"scene": {"type": "string"}}, "required": ["scene"]}},
+    {"name": "get_mode", "description": "Current location mode (Home, Away, Night, ...) and the modes available.",
+     "inputSchema": _OBJ, "annotations": {"readOnlyHint": True}},
+    {"name": "set_mode", "description": "Set the location mode by name.",
+     "inputSchema": {"type": "object", "properties": {"mode": {"type": "string"}}, "required": ["mode"]}},
+    {"name": "device_history", "description": "Recent events of one device, newest first (default 20, at most 100).",
+     "inputSchema": {"type": "object", "properties": {"device": {"type": "string"}, "limit": {"type": "number"}},
+                     "required": ["device"]}, "annotations": {"readOnlyHint": True}},
+    {"name": "list_routines", "description": "List the routines of the home (name, id, status).", "inputSchema": _OBJ,
+     "annotations": {"readOnlyHint": True}},
+    {"name": "run_routine", "description": "Run a routine by exact name or id.",
+     "inputSchema": {"type": "object", "properties": {"routine": {"type": "string"}}, "required": ["routine"]}},
+]
+
+
+async def claude_rpc(m: dict) -> dict | None:
+    mid, method, params = m.get("id"), m.get("method"), m.get("params") or {}
+    if method == "initialize":
+        return {"jsonrpc": "2.0", "id": mid, "result": {
+            "protocolVersion": params.get("protocolVersion") or "2025-06-18",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "stoeckie-smartthings", "version": VERSION},
+            "instructions": "SmartThings home control. Find devices with list_devices or get_many before sending "
+                            "commands. Device names are matched loosely; when several match, ask which one."}}
+    if method is None or str(method).startswith("notifications/"):
+        return None
+    if method == "ping":
+        return {"jsonrpc": "2.0", "id": mid, "result": {}}
+    if method == "tools/list":
+        return {"jsonrpc": "2.0", "id": mid, "result": {"tools": CLAUDE_TOOLS}}
+    if method == "tools/call":
+        name = params.get("name")
+        if name not in {t["name"] for t in CLAUDE_TOOLS}:
+            return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": f"unknown tool {name}"}}
+        try:
+            r = await st_tool(name, params.get("arguments") or {})
+            return {"jsonrpc": "2.0", "id": mid, "result": {"content": [{"type": "text", "text": json.dumps(r, ensure_ascii=False)}]}}
+        except Exception as ex:  # noqa: BLE001
+            log.info("[claude] tool %s failed: %s", name, str(ex)[:160])
+            return {"jsonrpc": "2.0", "id": mid, "result": {"isError": True, "content": [{"type": "text", "text": str(ex)}]}}
+    return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": f"method not found: {method}"}}
+
+
+CLAUDE_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>{title}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer">
+<style>body{{font:16px system-ui,sans-serif;max-width:420px;margin:40px auto;padding:0 16px;background:#fff;color:#111}}
+input{{font:inherit;width:100%;box-sizing:border-box;padding:10px;margin:8px 0}}button{{font:inherit;padding:10px 20px}}
+@media (prefers-color-scheme:dark){{body{{background:#111;color:#eee}}}}</style></head><body>{body}</body></html>"""
+
+
+def claude_html(title: str, body: str, status: int = 200) -> web.Response:
+    return web.Response(status=status, content_type="text/html", text=CLAUDE_PAGE.format(title=html.escape(title), body=body),
+                        headers={"Cache-Control": "no-store", "X-Frame-Options": "DENY",
+                                 "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https:"})
+
+
+def make_claude_app() -> web.Application:
+    app = web.Application(client_max_size=256 * 1024)
+
+    def deny() -> web.Response:
+        return web.json_response({"error": "forbidden"}, status=403)
+
+    def guarded(req) -> bool:
+        cfg = load_config()
+        if not claude_cfg(cfg).get("enabled"):
+            return False
+        ok = claude_ip_allowed(req, cfg)
+        if not ok:
+            log.warning("[claude] refused %s %s from %s", req.method, req.path, claude_client_ip(req))
+        return ok
+
+    async def prm(req):
+        if not guarded(req):
+            return deny()
+        base = claude_public_url(req, load_config())
+        return web.json_response({"resource": base + "/mcp", "authorization_servers": [base],
+                                  "bearer_methods_supported": ["header"]})
+
+    async def asm(req):
+        if not guarded(req):
+            return deny()
+        base = claude_public_url(req, load_config())
+        return web.json_response({
+            "issuer": base, "authorization_endpoint": base + "/authorize", "token_endpoint": base + "/token",
+            "registration_endpoint": base + "/register", "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code", "refresh_token"],
+            "code_challenge_methods_supported": ["S256"], "token_endpoint_auth_methods_supported": ["none"],
+            "scopes_supported": ["smartthings"]})
+
+    async def register(req):
+        if not guarded(req):
+            return deny()
+        try:
+            j = await req.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response({"error": "invalid_client_metadata"}, status=400)
+        uris = [str(u) for u in (j.get("redirect_uris") or [])]
+        if not uris or not all(claude_redirect_ok(u) for u in uris):
+            log.warning("[claude] registration refused: redirect %s", uris[:2])
+            return web.json_response({"error": "invalid_redirect_uri"}, status=400)
+        t = claude_tokens()
+        if len(t.get("clients", {})) >= 50:
+            return web.json_response({"error": "too many clients"}, status=429)
+        cid = "c_" + secrets.token_urlsafe(18)
+        t.setdefault("clients", {})[cid] = {"redirect_uris": uris, "name": str(j.get("client_name") or "")[:80],
+                                            "t": int(time.time())}
+        claude_save_tokens(t)
+        log.info("[claude] client registered: %s", str(j.get("client_name") or "?")[:40])
+        return web.json_response({"client_id": cid, "client_id_issued_at": int(time.time()), "redirect_uris": uris,
+                                  "token_endpoint_auth_method": "none", "grant_types": ["authorization_code", "refresh_token"],
+                                  "response_types": ["code"], "client_name": j.get("client_name")}, status=201)
+
+    def client_redirect_ok(cid: str, uri: str) -> bool:
+        if not claude_redirect_ok(uri):
+            return False
+        c = claude_tokens().get("clients", {}).get(cid)
+        if c:
+            return uri in c["redirect_uris"]
+        # Claude's published client identity (a metadata URL on claude.ai / claude.com)
+        return claude_redirect_ok(cid)
+
+    def too_many_fails() -> bool:
+        now = time.time()
+        CLAUDE_STATE["fails"] = [t for t in CLAUDE_STATE["fails"] if now - t < 900]
+        return len(CLAUDE_STATE["fails"]) >= 5
+
+    def auth_form(p: dict, msg: str = "") -> web.Response:
+        hidden = "".join(f'<input type="hidden" name="{k}" value="{html.escape(str(p.get(k, "")))}">'
+                         for k in ("client_id", "redirect_uri", "state", "code_challenge", "code_challenge_method",
+                                   "scope", "resource"))
+        return claude_html("Stoeckie Bridge sign in", (
+            "<h2>Connect Claude to your home</h2><p>Claude asks to control your SmartThings home through the "
+            "Stoeckie Bridge. Enter the bridge password for Claude to allow it.</p>"
+            + (f"<p><b>{html.escape(msg)}</b></p>" if msg else "") +
+            f'<form method="post">{hidden}<input type="password" name="password" autocomplete="current-password" '
+            'autofocus required><button type="submit">Allow</button></form>'))
+
+    async def authorize_get(req):
+        cfg = load_config()
+        c = claude_cfg(cfg)
+        if not c.get("enabled") or not c.get("password_hash"):
+            return claude_html("Not available", "<p>Claude access is not switched on in the bridge.</p>", 403)
+        p = dict(req.query)
+        if p.get("response_type") != "code" or p.get("code_challenge_method") != "S256" or not p.get("code_challenge"):
+            return claude_html("Error", "<p>Invalid request (code flow with PKCE S256 required).</p>", 400)
+        if not client_redirect_ok(p.get("client_id", ""), p.get("redirect_uri", "")):
+            return claude_html("Error", "<p>Unknown client or redirect address.</p>", 400)
+        return auth_form(p)
+
+    async def authorize_post(req):
+        cfg = load_config()
+        c = claude_cfg(cfg)
+        if not c.get("enabled") or not c.get("password_hash"):
+            return claude_html("Not available", "<p>Claude access is not switched on in the bridge.</p>", 403)
+        f = await req.post()
+        p = {k: str(f.get(k, "")) for k in ("client_id", "redirect_uri", "state", "code_challenge",
+                                             "code_challenge_method", "scope", "resource")}
+        if p["code_challenge_method"] != "S256" or not p["code_challenge"] or \
+                not client_redirect_ok(p["client_id"], p["redirect_uri"]):
+            return claude_html("Error", "<p>Invalid request.</p>", 400)
+        if too_many_fails():
+            log.warning("[claude] sign in blocked: too many wrong passwords (from %s)", claude_client_ip(req))
+            return auth_form(p, "Too many wrong passwords. Try again in 15 minutes.")
+        if not claude_check_password(str(f.get("password", "")), c["password_hash"]):
+            CLAUDE_STATE["fails"].append(time.time())
+            log.warning("[claude] wrong password (from %s)", claude_client_ip(req))
+            await asyncio.sleep(2)
+            return auth_form(p, "Wrong password.")
+        code = secrets.token_urlsafe(32)
+        CLAUDE_STATE["codes"] = {k: v for k, v in CLAUDE_STATE["codes"].items() if v["exp"] > time.time()}
+        CLAUDE_STATE["codes"][_h(code)] = {"client_id": p["client_id"], "redirect_uri": p["redirect_uri"],
+                                           "challenge": p["code_challenge"], "exp": time.time() + 300}
+        log.info("[claude] sign in allowed (from %s)", claude_client_ip(req))
+        from urllib.parse import urlencode
+        q = {"code": code}
+        if p["state"]:
+            q["state"] = p["state"]
+        sep = "&" if "?" in p["redirect_uri"] else "?"
+        raise web.HTTPFound(p["redirect_uri"] + sep + urlencode(q))
+
+    def issue(t: dict, cid: str) -> dict:
+        at, rt = secrets.token_urlsafe(32), secrets.token_urlsafe(40)
+        now = time.time()
+        t.setdefault("access", {})[_h(at)] = {"client_id": cid, "exp": now + 3600}
+        t.setdefault("refresh", {})[_h(rt)] = {"client_id": cid, "exp": now + 90 * 86400}
+        claude_save_tokens(t)
+        return {"access_token": at, "token_type": "Bearer", "expires_in": 3600, "refresh_token": rt, "scope": "smartthings"}
+
+    async def token(req):
+        if not guarded(req):
+            return deny()
+        f = await req.post()
+        gt = str(f.get("grant_type", ""))
+        err = lambda e, s=400: web.json_response({"error": e}, status=s, headers={"Cache-Control": "no-store"})  # noqa: E731
+        if gt == "authorization_code":
+            x = CLAUDE_STATE["codes"].pop(_h(str(f.get("code", ""))), None)
+            if not x or x["exp"] < time.time():
+                return err("invalid_grant")
+            if str(f.get("client_id", "")) not in ("", x["client_id"]) or str(f.get("redirect_uri", "")) != x["redirect_uri"]:
+                return err("invalid_grant")
+            ver = str(f.get("code_verifier", ""))
+            chal = base64.urlsafe_b64encode(hashlib.sha256(ver.encode()).digest()).decode().rstrip("=")
+            if not ver or not hmac.compare_digest(chal, x["challenge"]):
+                return err("invalid_grant")
+            log.info("[claude] Claude connected")
+            return web.json_response(issue(claude_tokens(), x["client_id"]), headers={"Cache-Control": "no-store"})
+        if gt == "refresh_token":
+            t = claude_tokens()
+            x = t.get("refresh", {}).pop(_h(str(f.get("refresh_token", ""))), None)
+            if not x or x["exp"] < time.time():
+                claude_save_tokens(t)
+                return err("invalid_grant")
+            return web.json_response(issue(t, x["client_id"]), headers={"Cache-Control": "no-store"})
+        return err("unsupported_grant_type")
+
+    def bearer_ok(req) -> bool:
+        a = req.headers.get("Authorization", "")
+        if not a.startswith("Bearer "):
+            return False
+        x = claude_tokens().get("access", {}).get(_h(a[7:].strip()))
+        return bool(x and x["exp"] > time.time())
+
+    async def mcp(req):
+        if not guarded(req):
+            return deny()
+        base = claude_public_url(req, load_config())
+        if not bearer_ok(req):
+            return web.json_response({"error": "invalid_token"}, status=401, headers={
+                "WWW-Authenticate": f'Bearer resource_metadata="{base}/.well-known/oauth-protected-resource"'})
+        if req.method == "GET":
+            return web.Response(status=405, headers={"Allow": "POST"})
+        if req.method == "DELETE":
+            return web.Response(status=200)
+        try:
+            body = await req.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}}, status=400)
+        msgs = body if isinstance(body, list) else [body]
+        out = [r for r in [await claude_rpc(m) for m in msgs if isinstance(m, dict)] if r is not None]
+        if not out:
+            return web.Response(status=202)
+        for m in msgs:
+            if isinstance(m, dict) and m.get("method") == "tools/call":
+                log.info("[claude] tool %s", (m.get("params") or {}).get("name"))
+        return web.json_response(out if isinstance(body, list) else out[0])
+
+    async def st_callback(req):
+        """SmartThings OAuth app: the browser comes back here after signing in at Samsung."""
+        state = req.query.get("state", "")
+        exp = CLAUDE_STATE["st_states"].pop(state, 0)
+        if not state or exp < time.time():
+            return claude_html("Error", "<p>Expired or unknown request. Start again on the bridge setup page.</p>", 400)
+        code = req.query.get("code", "")
+        cfg = load_config()
+        s = cfg.setdefault("claude", {}).setdefault("st", {})
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+                async with session.post(ST_OAUTH + "/token", auth=aiohttp.BasicAuth(s["client_id"], s["client_secret"]),
+                                        data={"grant_type": "authorization_code", "code": code, "client_id": s["client_id"],
+                                              "redirect_uri": s["redirect_uri"]}) as r:
+                    j = await r.json(content_type=None)
+            if "access_token" not in j:
+                raise RuntimeError(f"HTTP {r.status} {str(j.get('error') if isinstance(j, dict) else '')[:80]}")
+        except Exception as ex:  # noqa: BLE001
+            log.warning("[claude] SmartThings sign in failed: %s", ex)
+            return claude_html("Error", f"<p>SmartThings sign in failed: {html.escape(str(ex))}</p>", 502)
+        cfg = load_config()
+        s = cfg.setdefault("claude", {}).setdefault("st", {})
+        s.update(access_token=j["access_token"], refresh_token=j.get("refresh_token"),
+                 expires=time.time() + float(j.get("expires_in", 86400)), installed_app_id=j.get("installed_app_id"))
+        save_config(cfg)
+        ST_CLOUD.cache["t"] = 0
+        log.info("[claude] SmartThings connected")
+        return claude_html("SmartThings connected", "<h2>SmartThings connected</h2><p>You can close this page.</p>")
+
+    app.router.add_get("/.well-known/oauth-protected-resource", prm)
+    app.router.add_get("/.well-known/oauth-protected-resource/mcp", prm)
+    app.router.add_get("/.well-known/oauth-authorization-server", asm)
+    app.router.add_get("/.well-known/oauth-authorization-server/mcp", asm)
+    app.router.add_post("/register", register)
+    app.router.add_get("/authorize", authorize_get)
+    app.router.add_post("/authorize", authorize_post)
+    app.router.add_post("/token", token)
+    app.router.add_route("*", "/mcp", mcp)
+    app.router.add_get("/st/callback", st_callback)
+    return app
+
+
+def claude_setup_html(cfg: dict[str, Any]) -> str:
+    c = claude_cfg(cfg)
+    s = c.get("st") or {}
+    t = claude_tokens()
+    st_state = ("connected" if STCloud.configured(cfg) else
+                "app ready, not signed in yet" if s.get("client_id") else "no SmartThings app yet")
+    rows = [
+        ("Claude access", "on" if c.get("enabled") else "off"),
+        ("Password", "set" if c.get("password_hash") else "not set"),
+        ("Public address", html.escape(str(c.get("public_url") or "not set")) + ("/mcp" if c.get("public_url") else "")),
+        ("SmartThings", st_state),
+        ("Claude sessions", f"{len(t.get('refresh', {}))} active"),
+        ("Locks", html.escape(str(c.get("locks") or "full"))),
+    ]
+    tbl = "".join(f"<tr><td>{k}</td><td><b>{v}</b></td></tr>" for k, v in rows)
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Claude access</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font:15px system-ui,sans-serif;max-width:640px;
+margin:32px auto;padding:0 16px}}td{{padding:4px 12px 4px 0}}input,select{{font:inherit;padding:8px;margin:4px 0}}
+form{{margin:14px 0;padding-top:10px;border-top:1px solid #ccc}}</style></head><body>
+<p><a href="/setup">Back to setup</a></p><h2>Claude on web and phone</h2><table>{tbl}</table>
+<form method="post"><input type="hidden" name="act" value="password"><b>Password for Claude</b><br>
+<input type="password" name="pw" minlength="12" autocomplete="new-password" required placeholder="at least 12 characters">
+<input type="password" name="pw2" minlength="12" autocomplete="new-password" required placeholder="again">
+<br><button type="submit">Save password and switch Claude access on</button></form>
+<form method="post"><input type="hidden" name="act" value="st"><b>SmartThings</b><br>
+<button type="submit" {'disabled' if not s.get('client_id') else ''}>Sign in at SmartThings</button></form>
+<form method="post"><input type="hidden" name="act" value="locks"><b>Locks</b><br><select name="locks">
+{''.join(f'<option value="{v}"{" selected" if (c.get("locks") or "full") == v else ""}>{l}</option>' for v, l in (("full", "lock and unlock"), ("lock", "lock only"), ("read", "read only")))}
+</select> <button type="submit">Save</button></form>
+<form method="post"><input type="hidden" name="act" value="revoke"><b>Sign Claude out</b><br>
+<button type="submit">End all Claude sessions</button></form>
+<form method="post"><input type="hidden" name="act" value="off"><button type="submit">Switch Claude access off</button></form>
+</body></html>"""
+
+
+async def claude_setup_post(form, cfg: dict[str, Any]) -> str | None:
+    """Handles the Claude part of the setup page; returns a URL to send the browser to, or None."""
+    act = str(form.get("act", ""))
+    c = cfg.setdefault("claude", {})
+    if act == "password":
+        pw, pw2 = str(form.get("pw", "")), str(form.get("pw2", ""))
+        if len(pw) >= 12 and pw == pw2:
+            c["password_hash"] = claude_hash_password(pw)
+            c["enabled"] = True
+            save_config(cfg)
+            log.info("[setup] Claude password saved, Claude access on")
+    elif act == "locks":
+        v = str(form.get("locks", "full"))
+        c["locks"] = v if v in ("full", "lock", "read") else "full"
+        save_config(cfg)
+        log.info("[setup] Claude locks: %s", c["locks"])
+    elif act == "revoke":
+        t = claude_tokens()
+        t["access"], t["refresh"] = {}, {}
+        claude_save_tokens(t)
+        log.info("[setup] all Claude sessions ended")
+    elif act == "off":
+        c["enabled"] = False
+        save_config(cfg)
+        log.info("[setup] Claude access off")
+    elif act == "st":
+        s = c.get("st") or {}
+        if s.get("client_id") and s.get("redirect_uri"):
+            from urllib.parse import urlencode
+            state = secrets.token_urlsafe(24)
+            CLAUDE_STATE["st_states"][state] = time.time() + 600
+            return ST_OAUTH + "/authorize?" + urlencode({"client_id": s["client_id"], "response_type": "code",
+                                                         "redirect_uri": s["redirect_uri"], "scope": ST_SCOPES,
+                                                         "state": state})
+    return None
+
+
+async def claude_start() -> None:
+    cfg = load_config()
+    c = claude_cfg(cfg)
+    port = int(c.get("port") or CLAUDE_DEFAULT_PORT)
+    runner = web.AppRunner(make_claude_app(), access_log=None)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", port).start()   # only this pc: the tunnel forwards to it
+    log.info("[claude] MCP server on 127.0.0.1:%d (%s)", port, "on" if c.get("enabled") else "off until a password is set")
+
+
+
 async def serve(args) -> None:
     cfg = load_config()
     seed_from_env(cfg)
@@ -5462,6 +6264,11 @@ async def serve(args) -> None:
                 log.info("[bridge] memory %.0f MB (highest %.0f MB), %d tasks", m[0], m[1], len(asyncio.all_tasks()))
 
     asyncio.create_task(memory_log())
+    if not args.demo:
+        try:
+            await claude_start()
+        except OSError as ex:
+            log.warning("[claude] MCP server not started: %s", ex)
     if args.demo:
         asyncio.create_task(demo_devices())
     else:
