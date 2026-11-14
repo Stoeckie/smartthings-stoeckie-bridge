@@ -79,7 +79,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-14a"
+VERSION = "2026-11-14b"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -2431,90 +2431,6 @@ class Buienradar:
 
 
 BUIENRADAR: dict[str, Any] = {"source": None}
-
-
-# ---------------------------------------------------------------- YouLess energy monitor (LS110/LS120), local
-
-def youless_state(e: dict[str, Any] | None, a: dict[str, Any] | None) -> dict[str, Any]:
-    """Flatten YouLess /e (P1 meter) or /a (optical sensor) into what the Edge driver needs."""
-    def num(v):
-        try:
-            return float(str(v).replace(",", ".").strip())
-        except (TypeError, ValueError):
-            return None
-    st: dict[str, Any] = {}
-    if e:
-        st["power"] = num(e.get("pwr"))
-        p1, p2, n1, n2 = (num(e.get(k)) for k in ("p1", "p2", "n1", "n2"))
-        if p1 is not None and p2 is not None:
-            st["importKwh"] = round(p1 + p2, 3)
-        if n1 is not None and n2 is not None:
-            st["exportKwh"] = round(n1 + n2, 3)
-        gas = num(e.get("gas"))
-        if gas is not None and gas > 0:
-            st["gasM3"] = round(gas, 3)
-    elif a:
-        st["power"] = num(a.get("pwr"))
-        st["importKwh"] = num(a.get("cnt"))
-    return {k: v for k, v in st.items() if v is not None}
-
-
-class YouLess:
-    POLL = 10
-
-    def __init__(self, cfg: dict[str, Any]) -> None:
-        y = cfg.get("youless") or {}
-        hosts = y.get("hosts") or ([y["host"]] if y.get("host") else [])
-        self.hosts = [str(h).strip() for h in hosts if str(h).strip()]
-        self.poll = max(5, int(y.get("poll_seconds") or self.POLL))
-        self.ids: dict[str, str] = {}
-
-    async def _read(self, session, host: str) -> None:
-        dev_id = self.ids.get(host)
-        if not dev_id:
-            async with session.get(f"http://{host}/d") as r:
-                info = await r.json(content_type=None)
-            mac = str(info.get("mac") or host).replace(":", "").lower()
-            dev_id = self.ids[host] = f"youless-{mac[-6:]}"
-            log.info("[youless] %s model %s at %s", dev_id, info.get("model"), host)
-        e = a = None
-        try:
-            async with session.get(f"http://{host}/e") as r:
-                if r.status == 200:
-                    data = await r.json(content_type=None)
-                    e = data[0] if isinstance(data, list) and data else None
-        except Exception:  # noqa: BLE001  older firmware without /e
-            e = None
-        if e is None:
-            async with session.get(f"http://{host}/a?f=j") as r:
-                a = await r.json(content_type=None)
-        REG.upsert(dev_id, "energy", "YouLess", youless_state(e, a), True, self._command(host))
-
-    def _command(self, host: str):
-        async def handler(cmd: str, value: Any) -> None:
-            if cmd != "refresh":
-                raise ValueError(f"unsupported command {cmd}")
-        return handler
-
-    async def run(self) -> None:
-        if not self.hosts:
-            log.info("[youless] off (optional: set youless.host in config.json)")
-            return
-        import aiohttp
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
-            fails: dict[str, int] = {}
-            while True:
-                for host in self.hosts:
-                    try:
-                        await self._read(session, host)
-                        fails[host] = 0
-                    except Exception as ex:  # noqa: BLE001
-                        fails[host] = fails.get(host, 0) + 1
-                        if fails[host] in (1, 10) or fails[host] % 360 == 0:
-                            log.warning("[youless] %s: %s", host, ex)
-                        if host in self.ids and fails[host] >= 3:
-                            REG.set_online(self.ids[host], False)
-                await asyncio.sleep(self.poll)
 
 
 # ---------------------------------------------------------------- Home Connect (Bosch / Siemens / Neff / Gaggenau), local
@@ -5397,9 +5313,6 @@ async def demo_devices() -> None:
     rain = rain_summary([0.0] * 4 + [0.5, 1.2, 0.8] + [0.0] * 17)
     rain.update(dewPointNow=7.4, dewPointMax=11.2, humidHours=48)
     REG.upsert("demo-rainradar", "rainradar", "Demo rain radar", rain, True, dry)
-    REG.upsert("demo-energy", "energy", "Demo YouLess",
-               youless_state({"pwr": -510, "p1": "100.5", "p2": "200.25", "n1": "10", "n2": "20.5", "gas": "1234.567"},
-                             None), True, dry)
     dish = {"power": "on", "operation": "run", "door": "closed", "program": "eco50", "remainingTime": 3600,
             "completionTime": _iso_in(3600), "progress": 40, "remoteStartAllowed": False,
             "remoteControlActive": True, "programs": ["eco50", "auto2", "quick45", "machineCare"]}
@@ -6361,8 +6274,7 @@ async def serve(args) -> None:
     port = int(cfg.get("port", 8787))
     sources = {"aeg": Electrolux, "fglair": FGLair, "skoda": Skoda, "irobot": IRobotCloud, "velux": VeluxCloud,
                "buienradar": Buienradar, "homeconnect": HomeConnect,
-               "samsung": Samsung, "samsungtv": SamsungTV, "tuya": TuyaLocal, "echo": EchoCloud,
-               "youless": YouLess}
+               "samsung": Samsung, "samsungtv": SamsungTV, "tuya": TuyaLocal, "echo": EchoCloud}
     tasks: dict[str, asyncio.Task] = {}
 
     def start(section: str) -> None:

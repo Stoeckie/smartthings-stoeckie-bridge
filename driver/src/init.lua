@@ -89,7 +89,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-14a"
+local BUILD = "2026-11-11b"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -134,10 +134,9 @@ local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor =
                   rainradar = "stoeckie-rainradar-v3", dishwasher = "stoeckie-dishwasher-v2", oven = "stoeckie-oven-v2",
                   washer = "stoeckie-washer-v3", tv = "stoeckie-tv",
                   tuya_thermostat = "stoeckie-tuya-thermostat", tuya_heater = "stoeckie-tuya-heater",
-                  echo = "stoeckie-echo", energy = "stoeckie-energy" }
+                  echo = "stoeckie-echo" }
 local MANUFACTURER = { dryer = "AEG", aircon = "Fujitsu", car = "Skoda", dishwasher = "Home Connect", oven = "Home Connect",
-                       washer = "Samsung", tv = "Samsung", tuya_thermostat = "Tuya", tuya_heater = "Tuya", echo = "Amazon",
-                       energy = "YouLess" }
+                       washer = "Samsung", tv = "Samsung", tuya_thermostat = "Tuya", tuya_heater = "Tuya", echo = "Amazon" }
 
 -- bridge value <-> SmartThings value
 local AC_MODE_TO_ST = { auto = "auto", cool = "cool", dry = "dry", fan = "fanOnly", heat = "heat", minheat = "minHeat" }
@@ -751,37 +750,6 @@ local function emit_rainradar(dev, s)
   end
 end
 
--- YouLess energy monitor (P1 meter or optical sensor), local via the bridge. The bridge reads it every 10 s;
--- the platform takes about one event a minute per device, so power goes out at most once a minute (every 15 s
--- for a jump of 500 W or more) and the meter totals at most every 5 minutes.
-local ENERGY_LAST = {}  -- device.id -> { pw = value, pt = time, et = time }
-local function emit_energy(dev, s)
-  local l = ENERGY_LAST[dev.id] or {}
-  ENERGY_LAST[dev.id] = l
-  local now = os.time()
-  local pw = tonumber(s.power)
-  if pw then
-    local age = now - (l.pt or 0)
-    if age >= 60 or (age >= 15 and math.abs(pw - (l.pw or pw)) >= 500) or not l.pt then
-      if try_emit(dev, function() return capabilities.powerMeter.power({ value = pw, unit = "W" }) end) then
-        l.pw, l.pt = pw, now
-      end
-    end
-  end
-  if now - (l.et or 0) >= 300 then
-    l.et = now
-    if tonumber(s.importKwh) then
-      try_emit(dev, function() return capabilities.energyMeter.energy({ value = tonumber(s.importKwh), unit = "kWh" }) end)
-    end
-    if tonumber(s.exportKwh) then
-      comp_emit(dev, "export", function() return capabilities.energyMeter.energy({ value = tonumber(s.exportKwh), unit = "kWh" }) end)
-    end
-    if tonumber(s.gasM3) then
-      comp_emit(dev, "gas", function() return capabilities.gasMeter.gasMeterVolume({ value = tonumber(s.gasM3), unit = "m^3" }) end)
-    end
-  end
-end
-
 -- Home Connect (Bosch / Siemens) dishwasher and oven, local via the bridge
 local function hc_common(dev, s)
   try_emit(dev, function() return s.power == "on" and capabilities.switch.switch.on() or capabilities.switch.switch.off() end)
@@ -973,8 +941,7 @@ end
 local EMIT = { dryer = emit_dryer, window = emit_window, sensor = emit_sensor, aircon = emit_aircon, car = emit_car,
                velux_lock = emit_velux_lock, rain = emit_rain,
                rainradar = emit_rainradar, dishwasher = emit_dishwasher, oven = emit_oven, washer = emit_washer,
-  tv = emit_tv, tuya_thermostat = emit_tuya_thermostat, tuya_heater = emit_tuya_heater, echo = emit_echo,
-  energy = emit_energy }
+  tv = emit_tv, tuya_thermostat = emit_tuya_thermostat, tuya_heater = emit_tuya_heater, echo = emit_echo }
 
 -- polling -------------------------------------------------------------------------
 
@@ -1008,7 +975,6 @@ local function child_profile(key, device)
   end
   -- -v3: course list + Start (own capability washerProgram; -v2 used applianceProgram)
   if key:match("^echo%-") or key == "demo-echo" then return PROFILE.echo end
-  if key:match("^youless%-") or key == "demo-energy" then return PROFILE.energy end
   if key:match("^samsung%-") or key == "demo-washer" then return PROFILE.washer end
   -- -v2: program list, start button, oven temperature and cooking time
   if key:match("^homeconnect%-") or key == "demo-dishwasher" or key == "demo-oven" then

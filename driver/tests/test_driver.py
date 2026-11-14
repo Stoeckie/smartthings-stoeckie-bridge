@@ -87,8 +87,7 @@ function NEW_DEVICE(info)
                                          rain = { id = "rain" }, graph = { id = "graph" },
                                          dewNow = { id = "dewNow" }, dewMax = { id = "dewMax" },
                                          verticalSwing = { id = "verticalSwing" }, horizontalSwing = { id = "horizontalSwing" },
-                                         floor = { id = "floor" }, childLock = { id = "childLock" },
-                                         export = { id = "export" }, gas = { id = "gas" } } },
+                                         floor = { id = "floor" }, childLock = { id = "childLock" } } },
               manufacturer = info.manufacturer, profile_name = info.profile }
   function d:get_field(k) return self.fields[k] end
   -- like the hub: a persisted table comes back as a proxy: fields can be read, but next() and pairs() see
@@ -710,34 +709,6 @@ def test_rainradar(bridge):
     assert paths == []
     latest = sorted(k for k in rr.latest.keys())
     assert "main:cap.rainSensor.rain.undetected" in latest and "dewMax:cap.temperatureMeasurement.temperature" in latest
-
-
-def test_youless_energy(bridge):
-    lua = lua53.LuaRuntime(unpack_returned_tuples=True)
-    lua.execute(f'package.path = "{SRC}/?.lua;{HERE}/?.lua;" .. package.path')
-    lua.globals().py_http = py_http
-    lua.execute(HARNESS)
-    lua.execute(f'dofile("{SRC}/init.lua")')
-    lua.execute("math.randomseed(%d)" % random.randrange(1 << 30))
-    lua.execute(f'''
-      PARENT = NEW_DEVICE({{ id = "p1", label = "Bridge", device_network_id = "stbridge-test1",
-                            preferences = {{ ipAddress = "127.0.0.1", port = "{bridge}" }} }})
-      DRIVER.lifecycle_handlers.init(DRIVER_OBJ, PARENT)
-      DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
-      DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
-      for _, d in ipairs(DEVICES) do if d.parent_assigned_child_key == "demo-energy" then EN = d end end
-    ''')
-    en = lua.eval("EN")
-    assert en.profile_name == "stoeckie-energy" or en.new_profile in (None, "stoeckie-energy")
-    ev = {f"{en.events[i].comp}:{en.events[i].path}": en.events[i].arg for i in range(1, len(en.events) + 1)}
-    assert ev["main:cap.powerMeter.power"] == {"value": -510, "unit": "W"} or ev["main:cap.powerMeter.power"]["value"] == -510
-    assert ev["main:cap.energyMeter.energy"]["value"] == 300.75
-    assert ev["export:cap.energyMeter.energy"]["value"] == 30.5
-    assert ev["gas:cap.gasMeter.gasMeterVolume"]["value"] == 1234.567
-    # the next poll a moment later sends nothing again (power at most once a minute, totals every 5 min)
-    lua.execute("EN.events = {}; DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)")
-    en = lua.eval("EN")
-    assert len(en.events) == 0
 
 
 def test_dryer_no_completion_time_spam(bridge):
