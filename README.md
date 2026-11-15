@@ -32,7 +32,7 @@ Electrolux / FGLair / Škoda / iRobot / Amazon Echo / VELUX / Buienradar / Open-
 1. Download this repository (Code → Download ZIP) and copy the `bridge` folder to the pc, e.g. `C:\StoeckieBridge`.
 2. Double-click `install.bat`. It installs Python if needed (winget), the packages, a firewall rule for port 8787 (Windows asks once) and a scheduled task that starts the bridge at logon and restarts it on failure. Then the setup page opens.
 3. Fill in the sections you need on the setup page (`setup.bat` or http://localhost:8787/setup, only reachable on the pc itself). See the brand pages for where to get each key.
-4. `check.bat` tests the AEG and FGLair logins. `restart.bat` restarts the bridge, `stop.bat` stops it and switches its autostart off. Log: `bridge.log`.
+4. `check.bat` tests the AEG and FGLair logins. `restart.bat` restarts the bridge, `stop.bat` stops it and switches its autostart off. Log: `bridge.log` (one file per day, a week is kept).
 
 Set the Windows network to **Private** and give the pc a fixed IP (DHCP reservation), otherwise the hub can not reach the bridge.
 

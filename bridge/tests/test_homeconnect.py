@@ -124,3 +124,38 @@ def test_commands(monkeypatch):
     hc.apps["OVEN"] = app2
     with pytest.raises(ValueError, match="Remote Start"):
         asyncio.run(h("start", "hotAir"))
+
+
+def test_off_stops_a_running_program_first(monkeypatch):
+    # the oven refused Standby while heating: off worked only from the Siemens app (DS 15-11)
+    import asyncio
+    monkeypatch.setattr(sb, "load_config", lambda: {})
+    monkeypatch.setattr(sb, "save_config", lambda cfg: None)
+
+    async def no_sleep(_):
+        return None
+    monkeypatch.setattr(sb.asyncio, "sleep", no_sleep)
+    order = []
+
+    class Power:
+        enum = {1: "On", 2: "Standby"}
+
+        async def set_value(self, v):
+            order.append(("power", v))
+
+    class Abort:
+        async def execute(self, v):
+            order.append(("abort", v))
+
+    hc = sb.HomeConnect({})
+    app, _ = oven_app(op="Run")
+    app.settings = {"BSH.Common.Setting.PowerState": Power()}
+    app.commands = {"BSH.Common.Command.AbortProgram": Abort()}
+    hc.apps["OVEN"], hc.kinds["OVEN"] = app, "oven"
+    asyncio.run(hc._command("OVEN")("off", None))
+    assert order == [("abort", 1), ("power", "Standby")]
+    order.clear()
+    app.status["BSH.Common.Status.OperationState"] = E("Ready")
+    asyncio.run(hc._command("OVEN")("off", None))
+    assert order == [("power", "Standby")]
+    assert sb.hc_program_active("Run") and not sb.hc_program_active("Ready") and not sb.hc_program_active(None)

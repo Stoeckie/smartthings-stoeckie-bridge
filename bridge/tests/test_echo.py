@@ -223,3 +223,14 @@ def test_echo_new_commands(monkeypatch):
 def test_echo_text_not_in_api_log():
     import stoeckie_bridge as b
     assert "speak" in b.ECHO_TEXT_CMDS and "push" in b.ECHO_TEXT_CMDS and "volume" not in b.ECHO_TEXT_CMDS
+
+
+def test_history_wait_and_rate_limit():
+    # with live events the voice history is not polled every 15 s any more (Amazon: Too Many Requests)
+    assert sb.echo_history_wait(True) >= 300 and 30 <= sb.echo_history_wait(False) <= 120
+
+    class AlexapyTooManyRequestsError(Exception):
+        pass
+    assert sb.echo_too_many(AlexapyTooManyRequestsError("x"))
+    assert sb.echo_too_many(RuntimeError("Too Many Requests"))
+    assert not sb.echo_too_many(RuntimeError("timeout"))

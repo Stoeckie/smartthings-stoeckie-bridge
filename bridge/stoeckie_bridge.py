@@ -79,13 +79,14 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-14b"
+VERSION = "2026-11-15a"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
 DATA.mkdir(parents=True, exist_ok=True)
 CONFIG_FILE = DATA / "config.json"
 LOG_FILE = DATA / "bridge.log"
+LOG_DAYS = 7  # days of bridge.log kept
 # Extra networks allowed to open the setup page, e.g. "192.168.2.0/24" (Docker without host networking)
 SETUP_ALLOW = [ipaddress.ip_network(n.strip(), strict=False)
                for n in os.environ.get("STBRIDGE_SETUP_ALLOW", "").split(",") if n.strip()]
@@ -1165,6 +1166,20 @@ class EchoDevice:
         self._cluster_members = d.get("clusterMembers") or []
 
 
+ECHO_LIMIT_PAUSE = 900  # seconds without voice history requests after "Too Many Requests"
+
+
+def echo_history_wait(push_ok: bool) -> int:
+    """Seconds between voice history checks when no live event asks for one. With live events working the
+    history is only read after an event (and every 10 min as a safety net); without them once a minute.
+    Every 15 s got the account rate limited by Amazon (bursts of "Too Many Requests")."""
+    return 600 if push_ok else 60
+
+
+def echo_too_many(ex: BaseException) -> bool:
+    return "TooManyRequests" in type(ex).__name__ or "Too Many Requests" in str(ex)
+
+
 def echo_login_obj(a: dict[str, Any]):
     from alexapy import AlexaLogin
     ECHO_DIR.mkdir(parents=True, exist_ok=True)
@@ -1329,7 +1344,7 @@ class EchoCloud:
     async def _history_loop(self) -> None:
         while True:
             try:
-                await asyncio.wait_for(self.hist_wake.wait(), timeout=15)
+                await asyncio.wait_for(self.hist_wake.wait(), timeout=echo_history_wait(self.push_ok))
                 await asyncio.sleep(2)  # the record shows up in the history shortly after the push
             except asyncio.TimeoutError:
                 pass
@@ -1342,7 +1357,12 @@ class EchoCloud:
                     self.player_due.discard(serial)
                     await self._fetch_player(serial)
             except Exception as ex:  # noqa: BLE001
-                log.debug("[echo] history: %s", safe_err(ex))
+                if echo_too_many(ex):
+                    log.info("[echo] Amazon says too many requests: voice history paused for %d min", ECHO_LIMIT_PAUSE // 60)
+                    await asyncio.sleep(ECHO_LIMIT_PAUSE)
+                    self.hist_wake.clear()
+                else:
+                    log.debug("[echo] history: %s", safe_err(ex))
 
     async def _status_loop(self) -> None:
         while True:
@@ -2470,6 +2490,11 @@ HC_PROGRAMS = {
 HC_PROGRAM_NAME = {v: k for k, v in HC_PROGRAMS.items()}
 HC_DEFAULT = {"dishwasher": {"program": "eco50"}, "oven": {"program": "hotAir", "setpoint": 180, "duration": 0}}
 HC_SETPOINT = "Cooking.Oven.Option.SetpointTemperature"
+
+
+def hc_program_active(op: Any) -> bool:
+    """True while a program runs, waits or is paused (operation state as the appliance reports it)."""
+    return str(op or "") in ("Run", "DelayedStart", "Pause", "ActionRequired")
 HC_DURATION = "BSH.Common.Option.Duration"
 
 
@@ -2689,6 +2714,15 @@ class HomeConnect:
                     raise ValueError("no power setting")
                 values = list((e.enum or {}).values())
                 target = "On" if cmd == "on" else ("Off" if "Off" in values else "Standby")
+                if cmd == "off" and hc_program_active(_hc_val(app.status, "BSH.Common.Status.OperationState")):
+                    # an oven refuses Standby while it heats: stop the program first (what the app does)
+                    c = app.commands.get("BSH.Common.Command.AbortProgram")
+                    if c is not None:
+                        try:
+                            await c.execute(1)
+                            await asyncio.sleep(2)
+                        except Exception as ex:  # noqa: BLE001
+                            log.info("[homeconnect] %s stop before off: %s", ha_id, safe_err(ex))
                 await e.set_value(target)
             elif cmd == "program":
                 key = str(value or "")
@@ -6411,14 +6445,16 @@ def setup_logging(verbose: bool) -> None:
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
     root = logging.getLogger()
     root.setLevel(logging.DEBUG if verbose else logging.INFO)
-    fh = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+    # one file per day, a week kept (bridge.log.2026-11-14, ...), so a problem can still be looked up days later
+    fh = logging.handlers.TimedRotatingFileHandler(LOG_FILE, when="midnight", backupCount=LOG_DAYS, encoding="utf-8")
     fh.setFormatter(fmt)
     root.addHandler(fh)
     if sys.stdout is not None:  # pythonw has no console
         sh = logging.StreamHandler(sys.stdout)
         sh.setFormatter(fmt)
         root.addHandler(sh)
-    for noisy in ("aiohttp.access", "tinytuya"):  # tinytuya debug lines can carry a local key
+    # httpx logs every request (the Echo live events ping twice a minute), alexapy every retry (its "Giving up" stays)
+    for noisy in ("aiohttp.access", "tinytuya", "httpx", "alexapy.alexaapi"):  # tinytuya debug lines can carry a local key
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
