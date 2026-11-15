@@ -89,7 +89,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-11b"
+local BUILD = "2026-11-15a"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -1325,7 +1325,9 @@ local function handle_switch_off(driver, device, cmd)
     local s = device:get_field("ac_shown")
     if type(s) == "table" then s.power = "off" end
   end
-  local aircon = c ~= "climate" and type(device:get_field("ac_shown")) == "table"
+  -- get_field in brackets: for a device without this field (oven, dishwasher, dryer, ...) it returns nothing
+  -- at all and type() then fails, so "off" never reached the bridge (2026-11-15: the oven could not be switched off)
+  local aircon = c ~= "climate" and type((device:get_field("ac_shown"))) == "table"
   local ok = send(driver, device, c == "climate" and "climate_off" or "off")
   if ok and aircon then
     try_emit(device, function() return acModeX.mode("off") end)

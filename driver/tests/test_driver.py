@@ -952,3 +952,12 @@ def test_tuya_thermostat_and_heater(bridge):
     lua.execute(f'{h}.thermostatHeatingSetpoint.setHeatingSetpoint(DRIVER_OBJ, HE, {{ args = {{ setpoint = 72 }} }})')
     assert state("demo-tuya-heater")["setpoint"] == 22.0
     assert shows(he, "main:cap.thermostatHeatingSetpoint.heatingSetpoint") == 22.0
+
+
+def test_get_field_result_is_wrapped_before_type():
+    """On the hub get_field returns nothing at all for a missing field; type() of nothing is an error.
+    2026-11-15: switch off failed that way for every device without the air conditioner field (the oven)."""
+    import re
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "src" / "init.lua").read_text(encoding="utf-8")
+    assert not re.findall(r"type\(\w+:get_field\([^()]*\)\)", src)
