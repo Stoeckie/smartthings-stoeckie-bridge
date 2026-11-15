@@ -79,7 +79,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-15a"
+VERSION = "2026-11-15b"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -3209,8 +3209,8 @@ class Samsung:
                     sess, port = await self._call(host, self._open, host)
                 except Exception as ex:  # noqa: BLE001
                     fails += 1
-                    if fails <= 3 or fails % 30 == 0:
-                        log.info("[samsung] %s (%s): %r", name, host, ex)
+                    if fails <= 3 or fails % 120 == 0:  # the first three, then about once an hour
+                        log.info("[samsung] %s (%s): %r (%d tries, next in %d s)", name, host, ex, fails, self.RETRY)
                     if fails >= 2:
                         # no answer: switched off (its wifi sleeps) or another local client holds the only session.
                         # The device shows offline. When it was not washing (or did not answer at all since the
@@ -3221,7 +3221,10 @@ class Samsung:
                             REG.upsert(dev_id, kind, name, last, online=False)
                         else:
                             REG.set_online(dev_id, False)
-                    await asyncio.sleep(self.RETRY if fails < 10 else 2 * self.RETRY)
+                    # every RETRY seconds, also when it has been off for long: a washer that is switched on shows
+                    # up within half a minute (it was a minute after 10 failures; the log line every 30 failures
+                    # made that look like half an hour)
+                    await asyncio.sleep(self.RETRY)
                     continue
                 self.sessions[host] = sess
                 REG.set_online(dev_id, True)
