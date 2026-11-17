@@ -79,7 +79,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-17a"
+VERSION = "2026-11-17b"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -2820,8 +2820,10 @@ class HomeConnect:
 
         app = HomeAppliance(desc, host, "Stoeckie Bridge", app_id, prof["key"], prof.get("iv") or None,
                             session=session, logger=log, reconect=True, connection_callback=on_conn)
-        REG.upsert(dev_id, kind, name, {"model": prof.get("vib"), "brand": prof.get("brand")}, online=False,
-                   handler=self._command(ha_id))
+        # no state at all until the appliance reports: the driver emits nothing for an empty state, while a state
+        # with only model and brand read as "off, stopped" and made "done" routines fire at every bridge start
+        info = {"model": prof.get("vib"), "brand": prof.get("brand")}
+        REG.upsert(dev_id, kind, name, {}, online=False, handler=self._command(ha_id))
         while True:
             try:
                 await app.connect()
@@ -2839,7 +2841,7 @@ class HomeConnect:
                 else:
                     st = hc_state(app, kind, self.selection(ha_id))
                     if st != last:
-                        REG.upsert(dev_id, kind, name, st, online=state["connected"])
+                        REG.upsert(dev_id, kind, name, {**info, **st}, online=state["connected"])
                         last = st
                     else:
                         REG.set_online(dev_id, state["connected"])
