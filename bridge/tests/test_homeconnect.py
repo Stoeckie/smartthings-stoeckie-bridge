@@ -159,3 +159,25 @@ def test_off_stops_a_running_program_first(monkeypatch):
     asyncio.run(hc._command("OVEN")("off", None))
     assert order == [("power", "Standby")]
     assert sb.hc_program_active("Run") and not sb.hc_program_active("Ready") and not sb.hc_program_active(None)
+
+
+class Delayed(App):
+    status = dict(App.status, **{"BSH.Common.Status.OperationState": E("DelayedStart")})
+    options = dict(App.options, **{"BSH.Common.Option.StartInRelative": E(3600)})
+
+
+def test_delayed_start_counts_the_wait():
+    app = Delayed()
+    st = sb.hc_state(app, "dishwasher")
+    assert st["operation"] == "delayedStart"
+    assert 4190 <= st["remainingTime"] <= 4200          # 3600 s wait + 600 s program
+    # the appliance does not count StartInRelative down: the first sighting is the anchor
+    app._stb_delay = (3600, sb.time.monotonic() - 600)
+    assert 3590 <= sb.hc_state(app, "dishwasher")["remainingTime"] <= 3600
+    assert sb.hc_delay_left(App(), "Run") is None
+
+
+def test_no_state_before_the_appliance_reports():
+    class Fresh:
+        settings, status, options = {}, {}, {}
+    assert sb.hc_known(Fresh()) is False and sb.hc_known(App()) is True

@@ -79,7 +79,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-15b"
+VERSION = "2026-11-17a"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -2492,6 +2492,37 @@ HC_DEFAULT = {"dishwasher": {"program": "eco50"}, "oven": {"program": "hotAir", 
 HC_SETPOINT = "Cooking.Oven.Option.SetpointTemperature"
 
 
+def hc_known(app) -> bool:
+    """False right after connecting, while the appliance has not told its power or operation state yet. A state
+    built then would read "off, inactive" and make SmartThings report a running appliance as stopped (and routines
+    announce that it is done) every time the bridge starts."""
+    return (_hc_val(app.status, "BSH.Common.Status.OperationState") is not None
+            or _hc_val(app.settings, "BSH.Common.Setting.PowerState") is not None)
+
+
+def hc_delay_left(app, op: Any) -> float | None:
+    """Seconds until a delayed start begins, else None. Uses StartInRelative; when the appliance does not count
+    that value down itself, the moment it was first seen is the anchor."""
+    if str(op or "") != "DelayedStart":
+        try:
+            app.__dict__.pop("_stb_delay", None)
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+    v = _hc_val(app.options, "BSH.Common.Option.StartInRelative")
+    if not isinstance(v, (int, float)) or v <= 0:
+        return None
+    now = time.monotonic()
+    seen = getattr(app, "_stb_delay", None)
+    if not seen or seen[0] != v:
+        seen = (v, now)
+        try:
+            app._stb_delay = seen
+        except Exception:  # noqa: BLE001
+            pass
+    return max(0.0, float(v) - (now - seen[1]))
+
+
 def hc_program_active(op: Any) -> bool:
     """True while a program runs, waits or is paused (operation state as the appliance reports it)."""
     return str(op or "") in ("Run", "DelayedStart", "Pause", "ActionRequired")
@@ -2604,6 +2635,11 @@ def hc_state(app, kind: str, sel: dict[str, Any] | None = None) -> dict[str, Any
     running = op in ("Run", "Pause", "DelayedStart", "ActionRequired")
     remaining = _hc_val(app.options, "BSH.Common.Option.RemainingProgramTime") if running else None
     progress = _hc_val(app.options, "BSH.Common.Option.ProgramProgress") if running else None
+    # delayed start: the program has not begun, so the time left is the wait plus the program itself (without the
+    # wait the completion time moved along with the clock until the program really started)
+    wait = hc_delay_left(app, op)
+    if wait is not None and isinstance(remaining, (int, float)):
+        remaining = remaining + wait
     st = {
         "power": "on" if power == "On" else "off",
         "operation": HC_OPERATION.get(str(op), str(op).lower() if op else "inactive"),
@@ -2640,6 +2676,7 @@ class HomeConnect:
     name (give the appliances a fixed IP in the router)."""
 
     POLL = 5
+    FIRST_STATE_POLLS = 12      # wait at most a minute for the first real state after connecting
 
     def __init__(self, cfg: dict[str, Any]) -> None:
         self.cfg = cfg
@@ -2794,14 +2831,18 @@ class HomeConnect:
                 await asyncio.sleep(60)
         self.apps[ha_id] = app
         last = None
+        waited = 0
         while True:
             try:
-                st = hc_state(app, kind, self.selection(ha_id))
-                if st != last:
-                    REG.upsert(dev_id, kind, name, st, online=state["connected"])
-                    last = st
+                if last is None and not hc_known(app) and waited < self.FIRST_STATE_POLLS:
+                    waited += 1     # no state from the appliance yet: say nothing instead of "off, inactive"
                 else:
-                    REG.set_online(dev_id, state["connected"])
+                    st = hc_state(app, kind, self.selection(ha_id))
+                    if st != last:
+                        REG.upsert(dev_id, kind, name, st, online=state["connected"])
+                        last = st
+                    else:
+                        REG.set_online(dev_id, state["connected"])
             except Exception as ex:  # noqa: BLE001
                 log.debug("[homeconnect] %s: state: %s", name, ex)
             try:  # next check after POLL seconds, or right after a command
