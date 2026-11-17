@@ -177,7 +177,165 @@ def test_delayed_start_counts_the_wait():
     assert sb.hc_delay_left(App(), "Run") is None
 
 
-def test_no_state_before_the_appliance_reports():
-    class Fresh:
+POWER, OPER = "BSH.Common.Setting.PowerState", "BSH.Common.Status.OperationState"
+
+
+class Ent:
+    """An entity as the library has it: a value (maybe from the description) and update callbacks."""
+
+    def __init__(self, v=None):
+        self.value, self.enum, self.cbs = v, None, []
+
+    def register_callback(self, cb):
+        self.cbs.append(cb)
+
+    async def report(self, v):                  # the appliance tells its value
+        self.value = v
+        for cb in self.cbs:
+            await cb(self)
+
+
+def test_first_state_waits_for_the_appliance():
+    import asyncio
+
+    class Oven:                                 # the description gives the oven power "On" before it has said anything
+        def __init__(self):
+            self.settings, self.status, self.options = {POWER: Ent("On")}, {OPER: Ent()}, {}
+
+    first = sb.HcReported(Oven(), 3)
+    assert first.has_key and not first.ready()  # not connected: nothing, whatever the description says
+    first.connected = True
+    assert [first.ready() for _ in range(4)] == [False, False, False, True]    # silent appliance: after the limit
+    app = Oven()
+    first = sb.HcReported(app, 3)
+    first.connected = True
+    asyncio.run(app.status[OPER].report("Run"))
+    assert first.ready()
+
+    class Fridge:                               # no power or operation state at all: shown once connected
         settings, status, options = {}, {}, {}
-    assert sb.hc_known(Fresh()) is False and sb.hc_known(App()) is True
+    first = sb.HcReported(Fridge(), 3)
+    assert not first.has_key and not first.ready()
+    first.connected = True
+    assert first.ready()
+
+
+def run_one(monkeypatch, scenario):
+    """Run HomeConnect._run_one against a fake library; scenario(app, dev, states) drives the appliance."""
+    import asyncio
+    import sys
+    import types
+    monkeypatch.setattr(sb, "load_config", lambda: {})
+    monkeypatch.setattr(sb, "save_config", lambda cfg: None)
+    reg = sb.Registry()
+    states = []                                 # every state the bridge showed, in order
+    upsert = reg.upsert
+
+    def spy(dev_id, dev_type, name, state, online=True, handler=None):
+        states.append(dict(state))
+        upsert(dev_id, dev_type, name, state, online=online, handler=handler)
+    reg.upsert = spy
+    monkeypatch.setattr(sb, "REG", reg)
+    monkeypatch.setattr(sb.HomeConnect, "POLL", 0.05)
+    made = {}
+
+    class FakeAppliance:
+        active_program = None
+        selected_program = None
+
+        def __init__(self, desc, host, name, app_id, key, iv, **kw):
+            self.cb = kw["connection_callback"]
+            # as the library does: values from the description before the appliance has said anything
+            self.settings, self.status = {POWER: Ent("On")}, {OPER: Ent()}
+            self.options, self.programs, self.commands = {}, {}, {}
+            made["app"] = self
+
+        async def connect(self):
+            return None
+
+    fake = types.ModuleType("homeconnect_websocket")
+    fake.HomeAppliance = FakeAppliance
+    fake.parse_device_description = lambda *xml: {}
+    monkeypatch.setitem(sys.modules, "homeconnect_websocket", fake)
+
+    async def main():
+        hc = sb.HomeConnect({})
+        prof = {"haId": "OVEN1", "type": "Oven", "brand": "SIEMENS", "vib": "X1", "key": "k", "xml": ("<d/>", "<f/>")}
+        task = asyncio.create_task(hc._run_one(prof, "appid", None))
+        try:
+            await asyncio.sleep(0.3)            # several polls: the socket is up, the appliance has not reported
+            await scenario(made["app"], lambda: reg.devices["homeconnect-OVEN1"], states)
+        finally:
+            task.cancel()
+    asyncio.run(main())
+    return states
+
+
+def test_bridge_start_shows_no_state_from_the_description(monkeypatch):
+    # DS 17-11: at every bridge start the oven showed "on" for some seconds (the description says power On) and a
+    # running dishwasher showed "stopped", so the "done" notification came. Nothing may be shown before the
+    # appliance itself has reported.
+    import asyncio
+
+    async def standby_oven(app, dev, states):
+        assert dev()["state"] == {} and dev()["online"] is False
+        await app.settings[POWER].report("Standby")
+        await app.status[OPER].report("Inactive")
+        await app.cb("connected")               # the library calls this after reading all values
+        await asyncio.sleep(0.8)
+        assert dev()["online"] is True
+        assert dev()["state"]["power"] == "off" and dev()["state"]["operation"] == "inactive"
+
+    states = run_one(monkeypatch, standby_oven)
+    assert not any(st.get("power") == "on" for st in states), states
+
+    async def running_oven(app, dev, states):
+        await app.settings[POWER].report("On")
+        await app.status[OPER].report("Run")
+        await app.cb("connected")
+        await asyncio.sleep(0.8)
+        assert dev()["state"]["operation"] == "run"
+
+    states = run_one(monkeypatch, running_oven)
+    shown = [st["operation"] for st in states if "operation" in st]
+    assert shown and set(shown) == {"run"}, states  # never "inactive" (= ready, the "done" trigger) on the way
+
+
+def test_connected_but_silent_appliance_is_shown_after_a_minute(monkeypatch):
+    import asyncio
+    monkeypatch.setattr(sb.HomeConnect, "FIRST_STATE_POLLS", 30)     # 30 polls of 0.05 s in this test
+
+    async def silent(app, dev, states):
+        await app.cb("connected")
+        await asyncio.sleep(1.0)                # connected for a while, power and operation state never came
+        assert dev()["state"] == {}
+        for _ in range(100):                    # shown with what there is once the limit has passed
+            if dev()["state"]:
+                break
+            await asyncio.sleep(0.1)
+        assert dev()["state"].get("power") == "on"
+
+    run_one(monkeypatch, silent)
+
+
+def test_the_library_fills_values_from_the_description():
+    # the reason for HcReported, checked against the real library when it is installed
+    import asyncio
+    import pytest
+    hc = pytest.importorskip("homeconnect_websocket")
+    desc = {"info": {},
+            "setting": [{"uid": 539, "name": POWER, "access": "readwrite", "available": True, "initValue": "2",
+                         "protocolType": "Integer", "enumeration": {"1": "Off", "2": "On", "3": "Standby"}}],
+            "status": [{"uid": 552, "name": OPER, "access": "read", "available": True, "protocolType": "Integer",
+                        "enumeration": {"1": "Inactive", "2": "Ready", "3": "Run"}}]}
+
+    async def main():
+        app = hc.HomeAppliance(desc, "127.0.0.1", "test", "id", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        first = sb.HcReported(app, 3)
+        assert sb.hc_state(app, "oven")["power"] == "on"        # before the appliance has said anything
+        assert first.has_key and not first.real
+        await app._update_entities([{"uid": 539, "value": 3}, {"uid": 552, "value": 3}])   # the appliance reports
+        await asyncio.sleep(0.05)
+        st = sb.hc_state(app, "oven")
+        assert first.real and st["power"] == "off" and st["operation"] == "run"
+    asyncio.run(main())

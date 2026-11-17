@@ -79,7 +79,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-17b"
+VERSION = "2026-11-17c"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -2492,12 +2492,45 @@ HC_DEFAULT = {"dishwasher": {"program": "eco50"}, "oven": {"program": "hotAir", 
 HC_SETPOINT = "Cooking.Oven.Option.SetpointTemperature"
 
 
-def hc_known(app) -> bool:
-    """False right after connecting, while the appliance has not told its power or operation state yet. A state
-    built then would read "off, inactive" and make SmartThings report a running appliance as stopped (and routines
-    announce that it is done) every time the bridge starts."""
-    return (_hc_val(app.status, "BSH.Common.Status.OperationState") is not None
-            or _hc_val(app.settings, "BSH.Common.Setting.PowerState") is not None)
+HC_KEY_VALUES = (("status", "BSH.Common.Status.OperationState"), ("settings", "BSH.Common.Setting.PowerState"))
+
+
+class HcReported:
+    """When may the first state of an appliance be shown?
+
+    The library fills values from the appliance description before the appliance has said anything (the Siemens
+    oven: power "On"), and a value that is still unknown reads as "off, inactive". A state built right after the
+    bridge starts is therefore not the state of the appliance: SmartThings showed the oven as on for some seconds
+    and a running appliance as ready or stopped, so "done" routines fired at every bridge start.
+
+    The appliance has reported once the library has read all its values (it calls the connection callback only
+    after that) and the power or operation state really came in. An appliance without those two values, or one
+    that stays silent for `limit` polls after connecting, is shown with what there is."""
+
+    def __init__(self, app, limit: int) -> None:
+        self.connected = False      # the connection callback has said "connected" at least once
+        self.real = False           # power or operation state received from the appliance itself
+        self.limit = limit
+        self.waited = 0
+        self.has_key = False
+        for group, name in HC_KEY_VALUES:
+            entity = (getattr(app, group, None) or {}).get(name)
+            register = getattr(entity, "register_callback", None)
+            if callable(register):
+                register(self._on_value)
+                self.has_key = True
+
+    async def _on_value(self, _entity) -> None:
+        self.real = True
+
+    def ready(self) -> bool:
+        """True when a state may be built. Call once per poll: it counts the polls spent waiting."""
+        if not self.connected:
+            return False
+        if self.real or not self.has_key:
+            return True
+        self.waited += 1
+        return self.waited > self.limit
 
 
 def hc_delay_left(app, op: Any) -> float | None:
@@ -2676,7 +2709,7 @@ class HomeConnect:
     name (give the appliances a fixed IP in the router)."""
 
     POLL = 5
-    FIRST_STATE_POLLS = 12      # wait at most a minute for the first real state after connecting
+    FIRST_STATE_POLLS = 12      # once connected: wait at most a minute for the power or operation state
 
     def __init__(self, cfg: dict[str, Any]) -> None:
         self.cfg = cfg
@@ -2815,13 +2848,17 @@ class HomeConnect:
         async def on_conn(new_state) -> None:
             up = str(new_state).lower() == "connected"
             state["connected"] = up
+            if up:      # the library calls this after it has read all values of the appliance
+                first.connected = True
+                wake.set()      # show the state now instead of at the next poll
             REG.set_online(dev_id, up)
             log.info("[homeconnect] %s (%s): %s", name, host, str(new_state).split(".")[-1].lower())
 
         app = HomeAppliance(desc, host, "Stoeckie Bridge", app_id, prof["key"], prof.get("iv") or None,
                             session=session, logger=log, reconect=True, connection_callback=on_conn)
-        # no state at all until the appliance reports: the driver emits nothing for an empty state, while a state
-        # with only model and brand read as "off, stopped" and made "done" routines fire at every bridge start
+        first = HcReported(app, self.FIRST_STATE_POLLS)
+        # no state at all until the appliance reports (see HcReported): the driver emits nothing for an empty
+        # state, while a state with only model and brand read as "off, stopped"
         info = {"model": prof.get("vib"), "brand": prof.get("brand")}
         REG.upsert(dev_id, kind, name, {}, online=False, handler=self._command(ha_id))
         while True:
@@ -2833,12 +2870,14 @@ class HomeConnect:
                 await asyncio.sleep(60)
         self.apps[ha_id] = app
         last = None
-        waited = 0
         while True:
             try:
-                if last is None and not hc_known(app) and waited < self.FIRST_STATE_POLLS:
-                    waited += 1     # no state from the appliance yet: say nothing instead of "off, inactive"
+                if last is None and not first.ready():
+                    pass    # nothing from the appliance yet: say nothing instead of the description's values
                 else:
+                    if last is None and first.has_key and not first.real:
+                        log.warning("[homeconnect] %s: connected, but no power or operation state received: "
+                                    "showing what there is", name)
                     st = hc_state(app, kind, self.selection(ha_id))
                     if st != last:
                         REG.upsert(dev_id, kind, name, {**info, **st}, online=state["connected"])
