@@ -93,7 +93,7 @@ def test_not_configured_without_pin():
 def test_setup_page_and_forms():
     from aiohttp.test_utils import TestClient, TestServer
     sb.save_config({"unifi": {"host": "192.0.2.1", "api_key": "k" * 32, "pin": "ab" * 32}})
-    sb.UNIFI["policies"] = [{"id": "p1", "name": "Block Internet IoT", "enabled": True, "blocking": True}]
+    sb.UNIFI["policies"] = [{"id": "0e0fd705-bbc7-5307-8252-3c25e8b0c3b7", "name": "Block Internet IoT", "enabled": True, "blocking": True}]
     started = []
 
     async def main():
@@ -102,9 +102,10 @@ def test_setup_page_and_forms():
         page = await (await c.get("/setup")).text()
         assert 'id="unifi"' in page and "Block Internet IoT (block)" in page and "{unifi" not in page
         assert "k" * 32 not in page                                   # the key never goes into the page
-        r = await c.post("/setup", data={"section": "unifi_add", "id": "p1", "minutes": "45", "name": ""},
+        r = await c.post("/setup", data={"section": "unifi_add", "id": "0e0fd705-bbc7-5307-8252-3c25e8b0c3b7", "minutes": "45", "name": "IOT internet access 60 minutes"},
                          allow_redirects=False)
-        assert r.status == 302 and sb.load_config()["unifi"]["switches"] == [{"id": "p1", "minutes": 45, "name": ""}]
+        assert r.status == 302 and sb.load_config()["unifi"]["switches"] == [
+            {"id": "0e0fd705-bbc7-5307-8252-3c25e8b0c3b7", "minutes": 45, "name": "IOT internet access 60 minutes"}]
         assert started[-1] == "unifi"
         page = await (await c.get("/setup")).text()
         assert "back after 45 min" in page and "Block Internet IoT (block)</option>" not in page
@@ -112,8 +113,14 @@ def test_setup_page_and_forms():
         assert r.status == 400
         r = await c.post("/setup", data={"section": "unifi", "host": "x y", "api_key": "k" * 32}, allow_redirects=False)
         assert r.status == 400
-        r = await c.post("/setup", data={"section": "unifi_remove", "id": "p1"}, allow_redirects=False)
+        r = await c.post("/setup", data={"section": "unifi_remove", "id": "0e0fd705-bbc7-5307-8252-3c25e8b0c3b7"}, allow_redirects=False)
         assert r.status == 302 and sb.load_config()["unifi"]["switches"] == []
         await c.close()
 
     asyncio.run(main())
+
+
+def test_policy_list_ids_as_text():
+    lst = sb.unifi_policy_list([dict(BLOCK, id=12), dict(BLOCK, id=None, _id="ab-1"), dict(BLOCK, id=None),
+                                dict(BLOCK, id="s", metadata={"origin": "SYSTEM_DEFINED"}), "junk"])
+    assert [x["id"] for x in lst] == ["12", "ab-1"]

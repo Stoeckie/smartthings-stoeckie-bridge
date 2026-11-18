@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-18a"
+VERSION = "2026-11-18b"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -899,7 +899,7 @@ class Skoda:
 
 UNIFI: dict[str, Any] = {"policies": [], "error": None, "updated": 0, "site": None}
 UNIFI_POLL = 60  # seconds between two reads of the chosen policies (also how soon "back after X min" happens)
-UNIFI_READONLY = ("id", "index", "metadata")  # fields the API sends but does not take back in a PUT
+UNIFI_READONLY = ("id", "_id", "index", "metadata")  # fields the API sends but does not take back in a PUT
 
 
 def unifi_configured(u: dict[str, Any]) -> bool:
@@ -923,6 +923,21 @@ def unifi_put_body(policy: dict[str, Any], enabled: bool) -> dict[str, Any]:
     body = {k: v for k, v in policy.items() if k not in UNIFI_READONLY}
     body["enabled"] = bool(enabled)
     return body
+
+
+def unifi_policy_id(policy: dict[str, Any]) -> str | None:
+    for k in ("id", "_id"):
+        if policy.get(k) not in (None, ""):
+            return str(policy[k])
+    return None
+
+
+def unifi_policy_list(policies: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The policies a switch can be made for: own ones (not the built-in ones), with an id, ids always as text."""
+    return [{"id": unifi_policy_id(p), "name": str(p.get("name") or unifi_policy_id(p)), "enabled": p.get("enabled"),
+             "blocking": unifi_blocking(p)}
+            for p in policies if isinstance(p, dict) and unifi_policy_id(p)
+            and str((p.get("metadata") or {}).get("origin", "USER_DEFINED")).upper() != "SYSTEM_DEFINED"]
 
 
 def unifi_minutes(value: Any, default: int = 60) -> int:
@@ -1089,12 +1104,12 @@ class UnifiFirewall:
             while True:
                 try:
                     if time.time() - last_list > 3600 or not UNIFI["policies"]:
-                        UNIFI["policies"] = [
-                            {"id": p.get("id"), "name": p.get("name"), "enabled": p.get("enabled"),
-                             "blocking": unifi_blocking(p)}
-                            for p in await self._all_policies()
-                            if (p.get("metadata") or {}).get("origin", "USER_DEFINED") == "USER_DEFINED"]
+                        allp = await self._all_policies()
+                        UNIFI["policies"] = unifi_policy_list(allp)
                         last_list = time.time()
+                        log.info("[unifi] connected: %d policies, %d of them own", len(allp), len(UNIFI["policies"]))
+                        if allp and not UNIFI["policies"]:
+                            log.warning("[unifi] no usable policy id, fields of a policy: %s", sorted(allp[0])[:20])
                     await self._round()
                     UNIFI["error"], UNIFI["updated"] = None, int(time.time())
                 except PermissionError as ex:
@@ -5429,7 +5444,8 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
                 return web.Response(status=400, text="choose a policy")
             lst = [x for x in u.get("switches") or [] if isinstance(x, dict) and x.get("id") != pid]
             if section == "unifi_add":
-                if pid not in {p_["id"] for p_ in UNIFI["policies"]}:
+                if pid not in {str(p_["id"]) for p_ in UNIFI["policies"]}:
+                    log.warning("[setup] UniFi policy %s not in the list of %d policies", pid, len(UNIFI["policies"]))
                     return web.Response(status=400, text="unknown policy (connect first)")
                 lst.append({"id": pid, "minutes": unifi_minutes(form.get("minutes")),
                             "name": str(form.get("name", "")).strip()[:50]})
