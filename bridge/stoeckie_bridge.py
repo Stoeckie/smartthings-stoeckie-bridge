@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-18b"
+VERSION = "2026-11-18c"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -1108,8 +1108,12 @@ class UnifiFirewall:
                         UNIFI["policies"] = unifi_policy_list(allp)
                         last_list = time.time()
                         log.info("[unifi] connected: %d policies, %d of them own", len(allp), len(UNIFI["policies"]))
-                        if allp and not UNIFI["policies"]:
-                            log.warning("[unifi] no usable policy id, fields of a policy: %s", sorted(allp[0])[:20])
+                        if allp:
+                            kinds: dict[str, int] = {}
+                            for p in allp:
+                                k = f"{(p.get('metadata') or {}).get('origin')}/{'id' if unifi_policy_id(p) else 'no id'}"
+                                kinds[k] = kinds.get(k, 0) + 1
+                            log.info("[unifi] policy kinds %s, fields %s", kinds, sorted(allp[-1])[:25])
                     await self._round()
                     UNIFI["error"], UNIFI["updated"] = None, int(time.time())
                 except PermissionError as ex:

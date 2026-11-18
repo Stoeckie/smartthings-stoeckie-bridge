@@ -215,7 +215,8 @@ Setup:
 
 1. In UniFi make a **local user** (no access from the cloud) with only the Network application. Logged in as that user: UniFi Network, **Settings, Control Plane, Integrations, Create API Key**. Keep the description short (a long one gives "Failed to create API key"). The key has the rights of that user.
 2. Setup page of the bridge, section UniFi: the console IP and the key. The key is stored in `config.json` and never shown again.
-3. Choose a policy, the minutes and (optional) a name, **Add switch**. The switch appears in SmartThings at the next poll of the Edge driver.
+3. Choose a policy, the minutes and (optional) a name, **Add switch**. Only policies the Network API gives an id are listed. Seen on Network 10.6: own policies without an id (most likely the rules that were traffic rules before the switch to the zone-based firewall); those can not be switched this way. Make such a rule again as a new policy in the Policy Table (same devices, same action) and remove the old one.
+4. The switch appears in SmartThings at the next poll of the Edge driver.
 
 ## Offline notification
 
