@@ -254,6 +254,14 @@ try {
         $extra = @("$($prefs.allowExtra)" -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
         $allow = (@($allow) + $extra | Where-Object { $_ }) -join ","
     }
+    # PowerShell remoting (WinRM) on the target: from this pc, plus "remoteFrom" in remote-target.json (comma
+    # separated addresses or networks, e.g. the own trusted network so another own pc can manage it too)
+    $winrmFrom = @($myIp)
+    if ($prefs.remoteFrom) {
+        $winrmFrom += @("$($prefs.remoteFrom)" -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    }
+    $winrmFrom = @($winrmFrom | Where-Object { $_ } | Select-Object -Unique)
+    $lanSetup = [bool]$prefs.lanSetup
     $sleepDefault = if ($null -ne $prefs.noSleep) { [bool]$prefs.noSleep } else { $true }
     $noSleep = Ask-Yes "Slaapstand uitzetten op $Target (nodig voor een bridge die altijd draait)?" $sleepDefault
     $prefs.noSleep = $noSleep
@@ -277,8 +285,8 @@ try {
     }
 
     Write-Host "Firewall, taak en bridge instellen op $Target..."
-    Invoke-Command -Session $session -ArgumentList $remoteDir, $taskName, $allow, $noSleep, $myIp {
-        param($d, $taskName, $allow, $noSleep, $myIp)
+    Invoke-Command -Session $session -ArgumentList $remoteDir, $taskName, $allow, $noSleep, $myIp, $winrmFrom, $lanSetup {
+        param($d, $taskName, $allow, $noSleep, $myIp, $winrmFrom, $lanSetup)
         if (-not (Test-Path "$d\config.json")) { Copy-Item "$d\config.example.json" "$d\config.json" }
         if (-not (Get-NetFirewallRule -DisplayName "Stoeckie Bridge" -ErrorAction SilentlyContinue)) {
             New-NetFirewallRule -DisplayName "Stoeckie Bridge" -Direction Inbound -Protocol TCP -LocalPort 8787 `
@@ -286,7 +294,7 @@ try {
         }
         # setup page over https (8443): only from the pc that may open it, otherwise closed
         Get-NetFirewallRule -DisplayName "Stoeckie Bridge setup (https)" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-        if ($prefs.lanSetup) {
+        if ($lanSetup) {
             # any device on the own network, after entering the setup key once (STBRIDGE_SETUP_LAN_KEY)
             New-NetFirewallRule -DisplayName "Stoeckie Bridge setup (https)" -Direction Inbound -Protocol TCP `
                 -LocalPort 8443 -RemoteAddress LocalSubnet -Action Allow -Profile Private,Domain | Out-Null
@@ -301,8 +309,9 @@ try {
         New-NetFirewallRule -DisplayName "Stoeckie Bridge Tuya discovery (udp)" -Direction Inbound -Protocol UDP `
             -LocalPort 6666,6667,7000 -RemoteAddress LocalSubnet -Action Allow -Profile Private,Domain | Out-Null
 
-        # PowerShell remoting on this pc: only from the pc that manages it (else the own network, never anywhere)
-        $winrmFrom = if ($myIp) { $myIp } else { "LocalSubnet" }
+        # PowerShell remoting on this pc: only from the pc that manages it and the addresses in "remoteFrom"
+        # (else the own network, never anywhere)
+        if (-not @($winrmFrom).Count) { $winrmFrom = "LocalSubnet" }
         Get-NetFirewallRule -Name "WINRM-HTTP-In-TCP*" -ErrorAction SilentlyContinue |
             Set-NetFirewallRule -RemoteAddress $winrmFrom -ErrorAction SilentlyContinue
         Get-NetConnectionProfile | Where-Object { $_.NetworkCategory -eq "Public" } |
@@ -310,7 +319,7 @@ try {
         if ($noSleep) { & powercfg /change standby-timeout-ac 0; & powercfg /change hibernate-timeout-ac 0 }
         $run = @("@echo off", "cd /d `"%~dp0`"")
         if ($allow) { $run += "set STBRIDGE_SETUP_ALLOW=$allow" }
-        if ($prefs.lanSetup) { $run += "set STBRIDGE_SETUP_LAN_KEY=1" }
+        if ($lanSetup) { $run += "set STBRIDGE_SETUP_LAN_KEY=1" }
         $run += "`"%~dp0venv\Scripts\python.exe`" `"%~dp0stoeckie_bridge.py`""
         Set-Content -Path "$d\run.cmd" -Value $run -Encoding ASCII
         $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"$d\run.cmd`"" -WorkingDirectory $d
