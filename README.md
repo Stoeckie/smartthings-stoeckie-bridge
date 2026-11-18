@@ -14,6 +14,7 @@ One small bridge brings cloud-only appliances into SmartThings:
 | **Samsung** washer, local (optional, experimental) | on/off, running, phase, remaining time, progress; start, pause, stop. No cloud | [below](#samsung-washer-local-experimental) |
 | **Samsung TV** | not through the bridge: use the Edge driver [Samsung TV (local)](https://github.com/Stoeckie/smartthings-samsung-tv-local), which runs on the hub itself (power, volume, mute, input, channel). The older TV support in the bridge still works but is no longer developed | [smartthings-samsung-tv-local](https://github.com/Stoeckie/smartthings-samsung-tv-local) |
 | **Amazon Echo** (optional, unofficial) | speak, announce, volume, music, sounds, do not disturb, phone notification, bluetooth, Alexa routines; last voice command, alarm, timer and now playing as routine triggers | [below](#amazon-echo-unofficial) |
+| **UniFi** firewall switches, local (optional) | a switch per chosen firewall policy: on = a block policy paused (an allow policy enabled), back to normal by itself after the minutes you set. For example internet open for a while for devices you normally keep off it | [below](#unifi-firewall-switches-local) |
 | **iRobot** favorites (optional) | favorite names and rooms for the [iRobot Roomba (local)](https://github.com/Stoeckie/smartthings-irobot-roomba-local) driver | |
 
 **This repository is the only place with the code.** The brand pages above explain one brand each and point here. Use only what you need: a source you do not set up is skipped.
@@ -21,7 +22,7 @@ One small bridge brings cloud-only appliances into SmartThings:
 SmartThings Edge drivers can not reach the internet, so there are two parts:
 
 ```
-Electrolux / FGLair / Škoda / iRobot / Amazon Echo / VELUX / Buienradar / Open-Meteo / Home Connect, Tuya (LAN) <-- bridge (Windows pc or Docker, port 8787) <--LAN-- Edge driver on the hub
+Electrolux / FGLair / Škoda / iRobot / Amazon Echo / VELUX / Buienradar / Open-Meteo / Home Connect, Tuya, UniFi (LAN) <-- bridge (Windows pc or Docker, port 8787) <--LAN-- Edge driver on the hub
 ```
 
 * `bridge/`: small Python service for a pc that is always on: Windows (installer) or any Docker host (Linux, NAS, Raspberry Pi)
@@ -201,6 +202,20 @@ The windows and blinds run locally on the hub with the [VELUX ACTIVE (HomeKit lo
 2. Unlocking must be signed with a key from the gateway. Once: fill in the gateway IP, click **Pair gateway**, wait until the gateway light flashes and press the gateway button within 3 minutes. The key stays in `config.json`.
 
 The gateway's rain sensor becomes its own device, **VELUX regensensor** (rain sensor: detected = raining).
+
+## UniFi firewall switches, local
+
+Devices kept off the internet with a UniFi firewall policy sometimes need it for a moment, for example to use their own app or to update. The bridge gives such a policy a **switch** in SmartThings, also usable in routines and from outside the house through the SmartThings app:
+
+* **On** = the policy in its other state: a block (or reject) policy is paused, an allow policy is enabled. **Off** = normal.
+* After the minutes you set (0 = never) the bridge puts the policy back by itself, also after a restart of the bridge. Put back in UniFi itself before that: the bridge leaves it.
+* Only local: the bridge talks to the console on your network with the official UniFi Network API (`/proxy/network/integration/v1`, firewall policies of the zone-based firewall). The console has a self-signed certificate; the bridge pins it when you save the key (button "Trust the console certificate again" after you renew it).
+
+Setup:
+
+1. In UniFi make a **local user** (no access from the cloud) with only the Network application. Logged in as that user: UniFi Network, **Settings, Control Plane, Integrations, Create API Key**. Keep the description short (a long one gives "Failed to create API key"). The key has the rights of that user.
+2. Setup page of the bridge, section UniFi: the console IP and the key. The key is stored in `config.json` and never shown again.
+3. Choose a policy, the minutes and (optional) a name, **Add switch**. The switch appears in SmartThings at the next poll of the Edge driver.
 
 ## Offline notification
 

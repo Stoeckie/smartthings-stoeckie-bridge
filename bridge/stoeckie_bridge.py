@@ -22,6 +22,9 @@ Sources
   * Tuya / Smart Life (optional, local): thermostats and heaters over the LAN (library tinytuya). The Tuya IoT
     Platform is only asked once for the device list, local keys and data point mapping; then everything is local.
 
+  * UniFi (optional, local): a switch per chosen firewall policy of a UniFi console (official Network API, API
+    key), e.g. internet open for a while for devices that are normally blocked; back by itself after X minutes.
+
 Credentials live only in config.json next to this script (never in the code).
 
 LAN API (default port 8787, LAN only; after pairing only requests signed with the hub token are accepted)
@@ -33,6 +36,7 @@ LAN API (default port 8787, LAN only; after pairing only requests signed with th
                | swing (off vertical horizontal both) | vdir n | hdir n | refresh | settings {poll_seconds}
       car:     on | off (charging) | climate_on | climate_off | limit (percent) | refresh
       velux_lock: lock | unlock | refresh | settings {poll_seconds}
+      net_switch (UniFi firewall policy): on | off | refresh (on = policy in its other state, back after X min)
       rain:    refresh (VELUX gateway rain sensor)
       dishwasher / oven (Home Connect): on | off | stop | pause | resume (oven) | refresh
       tuya_thermostat / tuya_heater (Tuya, local): on | off | setpoint (C) | mode (off heat auto eco away ...)
@@ -79,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-17c"
+VERSION = "2026-11-18a"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -882,6 +886,229 @@ class Skoda:
                 self.wake.clear()
                 try:
                     await asyncio.wait_for(self.wake.wait(), timeout=self.POLL)
+                except asyncio.TimeoutError:
+                    pass
+
+
+# ---------------------------------------------------------------- UniFi firewall switches (local Network API)
+# A SmartThings switch per chosen firewall policy of a UniFi console (official Network Integration API, an API key
+# made in UniFi Network, Settings, Control Plane, Integrations). "On" puts the policy in its other state: a block
+# policy is paused (e.g. internet open for devices that are normally kept off it), an allow policy is enabled.
+# After the set minutes the bridge puts it back by itself, also after a restart of the bridge. Only local: the
+# console is reached on the LAN, its self-signed certificate is pinned when the key is saved.
+
+UNIFI: dict[str, Any] = {"policies": [], "error": None, "updated": 0, "site": None}
+UNIFI_POLL = 60  # seconds between two reads of the chosen policies (also how soon "back after X min" happens)
+UNIFI_READONLY = ("id", "index", "metadata")  # fields the API sends but does not take back in a PUT
+
+
+def unifi_configured(u: dict[str, Any]) -> bool:
+    return bool(u.get("host") and u.get("api_key") and u.get("pin"))
+
+
+def unifi_blocking(policy: dict[str, Any]) -> bool:
+    """A policy that stops traffic (block or reject): its switch pauses it."""
+    act = policy.get("action")
+    kind = act.get("type") if isinstance(act, dict) else act
+    return str(kind or "").upper() in ("BLOCK", "REJECT", "DROP")
+
+
+def unifi_switch_on(policy: dict[str, Any]) -> bool:
+    """Switch on = the policy is not in its normal state: a block policy paused, an allow policy enabled."""
+    return (not policy.get("enabled")) if unifi_blocking(policy) else bool(policy.get("enabled"))
+
+
+def unifi_put_body(policy: dict[str, Any], enabled: bool) -> dict[str, Any]:
+    """The whole policy back (a PUT replaces it), only "enabled" changed."""
+    body = {k: v for k, v in policy.items() if k not in UNIFI_READONLY}
+    body["enabled"] = bool(enabled)
+    return body
+
+
+def unifi_minutes(value: Any, default: int = 60) -> int:
+    try:
+        return max(0, min(1440, int(float(value))))
+    except (TypeError, ValueError):
+        return default
+
+
+def unifi_fetch_pin(host: str, port: int = 443) -> str:
+    """SHA-256 of the console certificate (hex), to pin it (the console has a self-signed certificate)."""
+    import ssl
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    with socket.create_connection((host, port), timeout=10) as raw, ctx.wrap_socket(raw, server_hostname=host) as tls:
+        der = tls.getpeercert(binary_form=True)
+    return hashlib.sha256(der).hexdigest()
+
+
+class UnifiFirewall:
+    def __init__(self, cfg: dict[str, Any]) -> None:
+        self.u = cfg.get("unifi") or {}
+        self.session = None
+        self.wake = asyncio.Event()
+        self.site: str | None = None
+        self.policies: dict[str, dict[str, Any]] = {}  # id -> last policy read
+
+    def _base(self) -> str:
+        return f"https://{self.u['host']}/proxy/network/integration/v1"
+
+    async def _call(self, method: str, path: str, body: Any = None) -> Any:
+        import aiohttp
+        headers = {"X-API-KEY": str(self.u["api_key"]), "Accept": "application/json"}
+        try:
+            async with self.session.request(method, self._base() + path, headers=headers, json=body,
+                                            ssl=aiohttp.Fingerprint(bytes.fromhex(self.u["pin"]))) as r:
+                text = await r.text()
+                if r.status in (401, 403):
+                    raise PermissionError(f"API key refused (HTTP {r.status}): make a new key in UniFi Network, "
+                                          "Settings, Control Plane, Integrations")
+                if r.status >= 400:
+                    raise RuntimeError(f"HTTP {r.status}: {text[:300]}")
+                return json.loads(text) if text else {}
+        except aiohttp.ServerFingerprintMismatch:
+            raise PermissionError("the certificate of the console changed: press \"Trust the console certificate "
+                                  "again\" on the setup page if you renewed it yourself") from None
+
+    async def _site(self) -> str:
+        if self.site:
+            return self.site
+        data = await self._call("GET", "/sites?limit=50")
+        sites = data.get("data") or []
+        want = str(self.u.get("site") or "default")
+        for st in sites:
+            if want in (st.get("internalReference"), st.get("name"), st.get("id")):
+                self.site = st["id"]
+                break
+        else:
+            if not sites:
+                raise RuntimeError("no site on the console")
+            self.site = sites[0]["id"]
+        UNIFI["site"] = self.site
+        return self.site
+
+    async def _all_policies(self) -> list[dict[str, Any]]:
+        site = await self._site()
+        out: list[dict[str, Any]] = []
+        offset = 0
+        while True:
+            data = await self._call("GET", f"/sites/{site}/firewall/policies?offset={offset}&limit=200")
+            items = data.get("data") or []
+            out += items
+            offset += len(items)
+            if not items or offset >= int(data.get("totalCount") or 0):
+                return out
+
+    def _switches(self) -> list[dict[str, Any]]:
+        return [x for x in self.u.get("switches") or [] if isinstance(x, dict) and x.get("id")]
+
+    def _until(self) -> dict[str, float]:
+        return (load_config().get("unifi") or {}).get("until") or {}
+
+    def _set_until(self, pid: str, until: float | None) -> None:
+        cfg = load_config()
+        u = cfg.setdefault("unifi", {})
+        lst = u.setdefault("until", {})
+        if until:
+            lst[pid] = until
+        else:
+            lst.pop(pid, None)
+        save_config(cfg)
+
+    def _publish(self, sw: dict[str, Any], p: dict[str, Any] | None) -> None:
+        pid = sw["id"]
+        until = self._until().get(pid)
+        name = sw.get("name") or ("UniFi " + str((p or {}).get("name") or pid))
+        state = {"policy": (p or {}).get("name"), "policyEnabled": (p or {}).get("enabled"),
+                 "minutes": unifi_minutes(sw.get("minutes")),
+                 "until": dt.datetime.fromtimestamp(until).astimezone().isoformat(timespec="minutes") if until else None}
+        if p is not None:
+            state["switch"] = "on" if unifi_switch_on(p) else "off"
+        REG.upsert("unifi-" + pid, "net_switch", name, state, p is not None, self._command(sw))
+
+    async def _set(self, pid: str, on: bool) -> dict[str, Any]:
+        site = await self._site()
+        p = await self._call("GET", f"/sites/{site}/firewall/policies/{pid}")
+        enabled = (not on) if unifi_blocking(p) else on
+        if bool(p.get("enabled")) != enabled:
+            await self._call("PUT", f"/sites/{site}/firewall/policies/{pid}", unifi_put_body(p, enabled))
+            p = await self._call("GET", f"/sites/{site}/firewall/policies/{pid}")
+            if bool(p.get("enabled")) != enabled:
+                raise RuntimeError("the console did not take the change")
+        self.policies[pid] = p
+        return p
+
+    def _command(self, sw: dict[str, Any]):
+        async def handler(cmd: str, value: Any) -> None:
+            pid = sw["id"]
+            if cmd == "refresh":
+                self.wake.set()
+                return
+            if cmd not in ("on", "off"):
+                raise ValueError(f"unsupported command {cmd}")
+            p = await self._set(pid, cmd == "on")
+            minutes = unifi_minutes(sw.get("minutes"))
+            self._set_until(pid, time.time() + minutes * 60 if cmd == "on" and minutes else None)
+            log.info("[unifi] %s switched %s (policy %s %s)%s", sw.get("name") or pid, cmd, p.get("name"),
+                     "enabled" if p.get("enabled") else "paused", f", back after {minutes} min" if cmd == "on"
+                     and minutes else "")
+            self._publish(sw, p)
+        return handler
+
+    async def _round(self) -> None:
+        site = await self._site()
+        until = self._until()
+        for sw in self._switches():
+            pid = sw["id"]
+            try:
+                p = await self._call("GET", f"/sites/{site}/firewall/policies/{pid}")
+            except RuntimeError as ex:
+                log.warning("[unifi] policy %s: %s", pid, ex)
+                self._publish(sw, None)
+                continue
+            if until.get(pid) and time.time() >= until[pid]:
+                if unifi_switch_on(p):
+                    p = await self._set(pid, False)
+                    log.info("[unifi] %s back to normal after %s min", sw.get("name") or p.get("name"),
+                             unifi_minutes(sw.get("minutes")))
+                self._set_until(pid, None)
+            elif until.get(pid) and not unifi_switch_on(p):
+                self._set_until(pid, None)  # put back in UniFi itself: nothing left to do
+            self.policies[pid] = p
+            self._publish(sw, p)
+
+    async def run(self) -> None:
+        if not unifi_configured(self.u):
+            log.info("[unifi] not configured")
+            return
+        import aiohttp
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
+            self.session = session
+            last_list = 0.0
+            while True:
+                try:
+                    if time.time() - last_list > 3600 or not UNIFI["policies"]:
+                        UNIFI["policies"] = [
+                            {"id": p.get("id"), "name": p.get("name"), "enabled": p.get("enabled"),
+                             "blocking": unifi_blocking(p)}
+                            for p in await self._all_policies()
+                            if (p.get("metadata") or {}).get("origin", "USER_DEFINED") == "USER_DEFINED"]
+                        last_list = time.time()
+                    await self._round()
+                    UNIFI["error"], UNIFI["updated"] = None, int(time.time())
+                except PermissionError as ex:
+                    UNIFI["error"] = str(ex)
+                    log.error("[unifi] %s", ex)
+                    REG.set_online("unifi-", False)
+                    return
+                except Exception as ex:  # noqa: BLE001
+                    UNIFI["error"] = safe_err(ex)
+                    log.warning("[unifi] update failed: %s", safe_err(ex))
+                    REG.set_online("unifi-", False)
+                self.wake.clear()
+                try:
+                    await asyncio.wait_for(self.wake.wait(), timeout=UNIFI_POLL)
                 except asyncio.TimeoutError:
                     pass
 
@@ -4508,6 +4735,31 @@ The VIN (17 characters) is shown in the app with the car and on the registration
 <button type="submit">Save settings</button></form>
 <p>These settings are also available with the car in the SmartThings app (Settings).</p>
 <p class="top"><a href="#top">Back to the overview</a></p></div>
+<h2 class="g">Network</h2>
+<div class="card"><h3 id="unifi">UniFi firewall switches (local, optional)</h3>
+{st_unifi}
+<p>A switch in SmartThings for a firewall policy of your UniFi console, for example to let devices that are normally
+kept off the internet reach it for a while (to use their own app). On = a block policy paused (an allow policy:
+enabled). After the set minutes the bridge puts the policy back by itself. Only on your own network: the bridge talks
+to the console directly.</p>
+<p>Make the API key in UniFi Network: <b>Settings, Control Plane, Integrations, Create API Key</b> (keep the
+description short). The key has the rights of the user who makes it: use a local user with only the Network
+application, no access from the cloud. {unifi_saved}</p>
+<form method="post"><input type="hidden" name="section" value="unifi">
+<label>Console address (IP)</label><input name="host" value="{unifi_host}" placeholder="192.168.1.1" required>
+<label>API key</label><input name="api_key" type="password" autocomplete="off" required>
+<label>Site (empty = default)</label><input name="site" value="{unifi_site}">
+<button type="submit">Save UniFi and connect</button></form>
+{unifi_switches}
+<form method="post"><input type="hidden" name="section" value="unifi_add">
+<label>Add a switch for the policy</label><select name="id">{unifi_options}</select>
+<label>Back to normal after (minutes, 0 = never)</label><input name="minutes" type="number" min="0" max="1440" value="60" required>
+<label>Name in SmartThings (empty = UniFi + the policy name)</label><input name="name" maxlength="50">
+<button type="submit">Add switch</button></form>
+<form method="post"><input type="hidden" name="section" value="unifi_trust">
+<p class="hint">The console certificate is pinned when the key is saved. Renewed it yourself? Trust it again.</p>
+<button type="submit">Trust the console certificate again</button></form>
+<p class="top"><a href="#top">Back to the overview</a></p></div>
 <h2 class="g">Home</h2>
 <div class="card"><h3 id="velux">VELUX ACTIVE departure mode (optional)</h3>
 {st_velux}
@@ -4807,6 +5059,21 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
                       "failed": ["Pairing failed: " + str(VELUX_PAIR.get("error"))]}.get(pstate, [])
         out.append(("velux", "VELUX ACTIVE departure mode", summary, lines))
 
+        # UniFi firewall switches
+        uf = cfg.get("unifi") or {}
+        sws = [d for d in REG.devices.values() if d["type"] == "net_switch"]
+        if not unifi_configured(uf):
+            summary, lines = "not set up", []
+        elif UNIFI.get("error"):
+            summary, lines = "error", [str(UNIFI["error"])]
+        elif UNIFI.get("updated"):
+            summary = f"connected, {len(sws)} switch(es)"
+            lines = [f"{d['name']}: {d['state'].get('switch', '?')}"
+                     + (f" until {d['state']['until'][11:16]}" if d["state"].get("until") else "") for d in sws]
+        else:
+            summary, lines = "set up, connecting", []
+        out.append(("unifi", "UniFi firewall switches", summary, lines))
+
         # Rain radar
         b = cfg.get("buienradar") or {}
         if buienradar_enabled(b):
@@ -4966,6 +5233,25 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
                          else " open")
                 .replace("{echo_s2}", " active" if ECHO_LOGIN.get("proxy") is not None and not ECHO_LOGIN.get("done")
                          else " off"))
+        uf = load_config().get("unifi") or {}
+        chosen = {x.get("id"): x for x in uf.get("switches") or [] if isinstance(x, dict)}
+        names = {p_["id"]: p_ for p_ in UNIFI["policies"]}
+        rows = "".join(
+            '<form method="post" class="row"><input type="hidden" name="section" value="unifi_remove">'
+            f'<input type="hidden" name="id" value="{html.escape(str(pid))}"><span>'
+            f'{html.escape(str(x.get("name") or "UniFi " + str((names.get(pid) or {}).get("name") or pid)))}: '
+            f'{"pause" if (names.get(pid) or {}).get("blocking", True) else "enable"}, back after '
+            f'{unifi_minutes(x.get("minutes"))} min</span> <button type="submit">Remove</button></form>'
+            for pid, x in chosen.items())
+        opts = "".join(f'<option value="{html.escape(str(p_["id"]))}">{html.escape(str(p_["name"]))}'
+                       f'{" (block)" if p_["blocking"] else ""}</option>'
+                       for p_ in UNIFI["policies"] if p_["id"] not in chosen)
+        page = (page.replace("{unifi_host}", html.escape(str(uf.get("host") or "")))
+                .replace("{unifi_site}", html.escape(str(uf.get("site") or "")))
+                .replace("{unifi_saved}", html.escape(f"Saved: key {mask(uf.get('api_key'))}. Enter it again to change it."
+                                                      if uf.get("api_key") else "Not set up yet."))
+                .replace("{unifi_switches}", rows)
+                .replace("{unifi_options}", opts or '<option value="">(connect first: the policies show here)</option>'))
         for r in TUYA_REGIONS:
             page = page.replace("{tuya_r_" + r + "}", " selected" if tuya_region == r else "")
         return web.Response(text=page, content_type="text/html")
@@ -5112,6 +5398,47 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             TUYA["error"] = None
             log.info("[setup] Tuya %s", "login saved" if section == "tuya" else "fetch devices")
             section = "tuya"
+        elif section in ("unifi", "unifi_trust"):
+            u = cfg.setdefault("unifi", {})
+            if section == "unifi":
+                host = str(form.get("host", "")).strip()
+                key = "".join(str(form.get("api_key", "")).split())
+                try:
+                    ipaddress.ip_address(host)
+                except ValueError:
+                    if not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", host):
+                        return web.Response(status=400, text="console address: an IP address or host name")
+                if not re.fullmatch(r"[A-Za-z0-9_\-]{16,128}", key):
+                    return web.Response(status=400, text="API key: copy it from UniFi Network (Integrations)")
+                u.update(host=host, api_key=key, site=str(form.get("site", "")).strip()[:64])
+            if not u.get("host"):
+                return web.Response(status=409, text="Save the console address and API key first.")
+            try:
+                u["pin"] = await asyncio.get_running_loop().run_in_executor(None, unifi_fetch_pin, u["host"])
+            except OSError as ex:
+                return web.Response(status=502, text=f"console not reachable: {safe_err(ex)}")
+            save_config(cfg)
+            UNIFI.update(error=None, policies=[])
+            log.info("[setup] UniFi %s (certificate %s...)", "key saved" if section == "unifi" else
+                     "certificate trusted again", u["pin"][:12])
+            section = "unifi"
+        elif section in ("unifi_add", "unifi_remove"):
+            u = cfg.setdefault("unifi", {})
+            pid = str(form.get("id", "")).strip()
+            if not re.fullmatch(r"[A-Za-z0-9_\-]{1,64}", pid):
+                return web.Response(status=400, text="choose a policy")
+            lst = [x for x in u.get("switches") or [] if isinstance(x, dict) and x.get("id") != pid]
+            if section == "unifi_add":
+                if pid not in {p_["id"] for p_ in UNIFI["policies"]}:
+                    return web.Response(status=400, text="unknown policy (connect first)")
+                lst.append({"id": pid, "minutes": unifi_minutes(form.get("minutes")),
+                            "name": str(form.get("name", "")).strip()[:50]})
+            else:
+                (u.get("until") or {}).pop(pid, None)
+            u["switches"] = lst
+            save_config(cfg)
+            log.info("[setup] UniFi switch %s", "added" if section == "unifi_add" else "removed")
+            section = "unifi"
         elif section == "fglair":
             f = cfg.setdefault("fglair", {})
             f["username"] = str(form.get("username", "")).strip()
@@ -5429,6 +5756,14 @@ async def demo_devices() -> None:
         REG.upsert("demo-velux", "velux_lock", "Demo VELUX departure mode", velux, True, demo_velux)
 
     await demo_velux("refresh", None)
+    netsw = {"switch": "off", "minutes": 60, "until": None}
+
+    async def demo_netswitch(cmd, value):
+        if cmd in ("on", "off"):
+            netsw["switch"] = cmd
+        REG.upsert("demo-netswitch", "net_switch", "Demo UniFi switch", netsw, True, demo_netswitch)
+
+    await demo_netswitch("refresh", None)
     rain = rain_summary([0.0] * 4 + [0.5, 1.2, 0.8] + [0.0] * 17)
     rain.update(dewPointNow=7.4, dewPointMax=11.2, humidHours=48)
     REG.upsert("demo-rainradar", "rainradar", "Demo rain radar", rain, True, dry)
@@ -6393,7 +6728,8 @@ async def serve(args) -> None:
     port = int(cfg.get("port", 8787))
     sources = {"aeg": Electrolux, "fglair": FGLair, "skoda": Skoda, "irobot": IRobotCloud, "velux": VeluxCloud,
                "buienradar": Buienradar, "homeconnect": HomeConnect,
-               "samsung": Samsung, "samsungtv": SamsungTV, "tuya": TuyaLocal, "echo": EchoCloud}
+               "samsung": Samsung, "samsungtv": SamsungTV, "tuya": TuyaLocal, "echo": EchoCloud,
+               "unifi": UnifiFirewall}
     tasks: dict[str, asyncio.Task] = {}
 
     def start(section: str) -> None:

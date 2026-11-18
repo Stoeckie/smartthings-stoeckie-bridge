@@ -636,6 +636,36 @@ def test_velux_lock_flow(bridge):
     assert state()["locked"] is True
 
 
+def test_net_switch_flow(bridge):
+    lua = lua53.LuaRuntime(unpack_returned_tuples=True)
+    lua.execute(f'package.path = "{SRC}/?.lua;{HERE}/?.lua;" .. package.path')
+    lua.globals().py_http = py_http
+    lua.execute(HARNESS)
+    lua.execute(f'dofile("{SRC}/init.lua")')
+    lua.execute("math.randomseed(%d)" % random.randrange(1 << 30))
+    lua.execute(f'''
+      PARENT = NEW_DEVICE({{ id = "p1", label = "Bridge", device_network_id = "stbridge-test1",
+                            preferences = {{ ipAddress = "127.0.0.1", port = "{bridge}" }} }})
+      DRIVER.lifecycle_handlers.init(DRIVER_OBJ, PARENT)
+      DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
+      DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
+      for _, d in ipairs(DEVICES) do if d.parent_assigned_child_key == "demo-netswitch" then SW = d end end
+    ''')
+    sw = lua.eval("SW")
+    assert sw is not None
+    paths = [sw.events[i].path for i in range(1, len(sw.events) + 1)]
+    assert "cap.switch.switch.off" in paths
+
+    def state():
+        with urllib.request.urlopen(signed_get(f"http://127.0.0.1:{bridge}/stbridge/devices")) as r:
+            devs = json.loads(r.read())["devices"]
+        return next(d for d in devs if d["id"] == "demo-netswitch")["state"]
+    lua.execute('DRIVER.capability_handlers.switch.on(DRIVER_OBJ, SW, {component = "main"})')
+    assert state()["switch"] == "on"
+    lua.execute('DRIVER.capability_handlers.switch.off(DRIVER_OBJ, SW, {component = "main"})')
+    assert state()["switch"] == "off"
+
+
 def test_car_battery_graph(bridge):
     lua = lua53.LuaRuntime(unpack_returned_tuples=True)
     lua.execute(f'package.path = "{SRC}/?.lua;{HERE}/?.lua;" .. package.path')

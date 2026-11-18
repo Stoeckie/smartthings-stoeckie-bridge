@@ -20,6 +20,8 @@
 --   tuya_thermostat (Tuya, local)     -> switch, heating setpoint, room temperature, thermostatMode, heating/idle;
 --                                        components floor (floor temperature) and childLock (switch)
 --   tuya_heater (Tuya, local)         -> switch, room temperature, heating setpoint (profile -t, when it has one)
+--   net_switch (UniFi firewall policy) -> switch (on = policy in its other state, e.g. a block paused; the bridge
+--                                        puts it back after the minutes set on its setup page)
 local Driver = require "st.driver"
 local capabilities = require "st.capabilities"
 
@@ -89,7 +91,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-15a"
+local BUILD = "2026-11-18a"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -134,9 +136,10 @@ local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor =
                   rainradar = "stoeckie-rainradar-v3", dishwasher = "stoeckie-dishwasher-v2", oven = "stoeckie-oven-v2",
                   washer = "stoeckie-washer-v3", tv = "stoeckie-tv",
                   tuya_thermostat = "stoeckie-tuya-thermostat", tuya_heater = "stoeckie-tuya-heater",
-                  echo = "stoeckie-echo" }
+                  echo = "stoeckie-echo", net_switch = "stoeckie-net-switch" }
 local MANUFACTURER = { dryer = "AEG", aircon = "Fujitsu", car = "Skoda", dishwasher = "Home Connect", oven = "Home Connect",
-                       washer = "Samsung", tv = "Samsung", tuya_thermostat = "Tuya", tuya_heater = "Tuya", echo = "Amazon" }
+                       washer = "Samsung", tv = "Samsung", tuya_thermostat = "Tuya", tuya_heater = "Tuya", echo = "Amazon",
+                       net_switch = "Ubiquiti" }
 
 -- bridge value <-> SmartThings value
 local AC_MODE_TO_ST = { auto = "auto", cool = "cool", dry = "dry", fan = "fanOnly", heat = "heat", minheat = "minHeat" }
@@ -690,6 +693,12 @@ local function emit_velux_lock(dev, s)
   end
 end
 
+local function emit_net_switch(dev, s)
+  if s.switch == "on" or s.switch == "off" then
+    try_emit(dev, function() return capabilities.switch.switch[s.switch]() end)
+  end
+end
+
 local function emit_rain(dev, s)
   if s.raining ~= nil then
     try_emit(dev, function() return s.raining and capabilities.rainSensor.rain.detected() or capabilities.rainSensor.rain.undetected() end)
@@ -941,7 +950,8 @@ end
 local EMIT = { dryer = emit_dryer, window = emit_window, sensor = emit_sensor, aircon = emit_aircon, car = emit_car,
                velux_lock = emit_velux_lock, rain = emit_rain,
                rainradar = emit_rainradar, dishwasher = emit_dishwasher, oven = emit_oven, washer = emit_washer,
-  tv = emit_tv, tuya_thermostat = emit_tuya_thermostat, tuya_heater = emit_tuya_heater, echo = emit_echo }
+  tv = emit_tv, tuya_thermostat = emit_tuya_thermostat, tuya_heater = emit_tuya_heater, echo = emit_echo,
+  net_switch = emit_net_switch }
 
 -- polling -------------------------------------------------------------------------
 
@@ -975,6 +985,7 @@ local function child_profile(key, device)
   end
   -- -v3: course list + Start (own capability washerProgram; -v2 used applianceProgram)
   if key:match("^echo%-") or key == "demo-echo" then return PROFILE.echo end
+  if key:match("^unifi%-") or key == "demo-netswitch" then return PROFILE.net_switch end
   if key:match("^samsung%-") or key == "demo-washer" then return PROFILE.washer end
   -- -v2: program list, start button, oven temperature and cooking time
   if key:match("^homeconnect%-") or key == "demo-dishwasher" or key == "demo-oven" then
