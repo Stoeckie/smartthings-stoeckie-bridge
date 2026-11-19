@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-19j"
+VERSION = "2026-11-19k"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -6944,7 +6944,7 @@ async def _cap_exists(cid: str) -> bool:
         await admin_st_raw("GET", f"https://api.smartthings.com/capabilities/{cid}/1")
         return True
     except RuntimeError as ex:
-        if "HTTP 404" in str(ex):
+        if "HTTP 404" in str(ex) or "HTTP 403" in str(ex):  # 403: a namespace this token can not read
             return False
         raise
 
