@@ -250,11 +250,11 @@ With **Admin tools** switched on (setup page, Claude part) Claude can also maint
 
 * `admin_hubs`: the hubs of the home (name, local IP, firmware) and the Edge drivers installed on each.
 * `hub_log`: the live log of a hub for 5 to 600 seconds, filtered by driver, level or text (like `smartthings edge:drivers:logcat`). The hub certificate is pinned on first use.
-* `driver_deploy`: builds an Edge driver from a GitHub commit (the same package the SmartThings CLI makes) and installs it on every hub that already has that driver.
+* `driver_deploy`: builds an Edge driver from a GitHub commit (the same package the SmartThings CLI makes) and installs it on every hub that already has that driver; with `hubs` (and for a new driver `channel`, a channel the home already uses) also on other hubs.
 * `bridge_log`: the last lines of `bridge.log`.
 * `bridge_update`: updates this bridge to `bridge/stoeckie_bridge.py` of a commit. The new file must load first; the bridge then stops with code 75 and `run.cmd` swaps the files and starts it again. If the new version stops within its first minute, the previous one is put back. A new `requirements.txt` is refused (use `install-remote.bat`). Needs the `run.cmd` of `install-remote.bat` from 19-11-2026 or later.
 
-Limits: no shell and no free commands; only repositories named `smartthings-...` of the owner in `ADMIN_OWNERS` in the code (change it to your own GitHub name); only a commit id, not a branch, so exactly the reviewed code runs; drivers are only updated, never newly installed; secrets in log lines are masked; every admin action is written to `bridge.log`.
+Limits: no shell and no free commands; only repositories named `smartthings-...` of the owner in `ADMIN_OWNERS` in the code (change it to your own GitHub name); only a commit id, not a branch, so exactly the reviewed code runs; a new driver only from a channel the home already uses and only on hubs named explicitly; secrets in log lines are masked; every admin action is written to `bridge.log`.
 
 ## Security and privacy
 

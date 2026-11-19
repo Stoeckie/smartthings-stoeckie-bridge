@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-19a"
+VERSION = "2026-11-19b"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -6372,8 +6372,8 @@ CLAUDE_TOOLS = [
 # Lets Claude maintain this home without a pc with a screen: read the hub log, list and update Edge drivers from
 # a GitHub commit, read the bridge log and update the bridge itself from a GitHub commit. No shell, no free
 # commands: every tool does one fixed thing. Only the GitHub owner(s) in ADMIN_OWNERS, repositories named
-# smartthings-..., a commit id (not a branch) so what runs is exactly what was reviewed, and only drivers that are
-# already installed on one of the hubs of this home. Every admin action is written to bridge.log.
+# smartthings-..., a commit id (not a branch) so what runs is exactly what was reviewed; a new driver only from a
+# channel this home already uses and only on hubs named explicitly. Every admin action is written to bridge.log.
 
 ADMIN_OWNERS = ("Stoeckie",)
 ADMIN_BRIDGE_REPO = "smartthings-stoeckie-bridge"
@@ -6619,14 +6619,30 @@ async def admin_deploy(a: dict[str, Any]) -> dict[str, Any]:
             path = "driver"
         package, info = admin_driver_zip(files, path)
         hubs = await admin_hubs(True)
+        want_hubs = [x.strip() for x in str(a.get("hubs") or "").split(",") if x.strip()]
+        new_on = [await admin_find_hub(x) for x in want_hubs]
+        channel = str(a.get("channel") or "").strip()
         where: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        channels_seen: set[str] = set()
         for h in hubs:
             for d in await admin_installed(h):
+                if d.get("channelId"):
+                    channels_seen.add(d["channelId"])
                 if d.get("packageKey") == info["packageKey"] or (not d.get("packageKey") and d.get("name") == info["name"]):
                     where.append((h, d))
+        # a new install (or one more hub): on the hubs named in "hubs", from a channel this home already uses
+        for h in new_on:
+            if any(h["id"] == x["id"] for x, _ in where):
+                continue
+            ch = channel or next((d.get("channelId") for _, d in where if d.get("channelId")), "")
+            if not ch:
+                raise ValueError("channel: the id of your driver channel (a new driver; see admin_hubs)")
+            if ch not in channels_seen:
+                raise ValueError("channel: only a channel that already has a driver installed on a hub of this home")
+            where.append((h, {"channelId": ch, "new": True}))
         if not where:
-            raise RuntimeError(f"driver {info['packageKey']} is not installed on a hub of this home (only updates "
-                               "are allowed)")
+            raise RuntimeError(f"driver {info['packageKey']} is not installed on a hub of this home: name the hub(s) "
+                               "in 'hubs' (and 'channel') to install it")
         log.info("[admin] deploy %s/%s@%s %s (%d files) to %s", owner, repo, ref, info["packageKey"], info["files"],
                  ", ".join(h["name"] for h, _ in where))
         up = await admin_st_raw("POST", "https://api.smartthings.com/drivers/package", data=package,
@@ -6640,7 +6656,7 @@ async def admin_deploy(a: dict[str, Any]) -> dict[str, Any]:
         for h, d in where:
             await admin_st_raw("PUT", f"https://api.smartthings.com/hubdevices/{h['id']}/drivers/{driver_id}",
                                body={"channelId": d.get("channelId")})
-            done.append(h["name"])
+            done.append(h["name"] + (" (new)" if d.get("new") else ""))
         log.info("[admin] deployed %s version %s to %s", info["packageKey"], version, ", ".join(done))
         return {"packageKey": info["packageKey"], "driverId": driver_id, "version": version, "hubs": done,
                 "files": info["files"], "note": "the hub restarts the driver within about a minute; check with hub_log"}
@@ -6722,9 +6738,11 @@ ADMIN_TOOLS = [
                      "limit": {"type": "number"}}, "required": ["hub"]}},
     {"name": "driver_deploy", "description": "Admin: build an Edge driver from a GitHub commit (repo "
      "smartthings-..., ref = commit id, optional path of the driver folder) and install it on every hub of this "
-     "home that has that driver (update only). Returns the new version.",
+     "home that has that driver. To install it on (more) hubs: hubs = hub names, comma separated; for a driver that "
+     "is not installed yet also channel = id of a driver channel this home already uses. Returns the new version.",
      "inputSchema": {"type": "object", "properties": {"repo": {"type": "string"}, "ref": {"type": "string"},
-                     "path": {"type": "string"}}, "required": ["repo", "ref"]}},
+                     "path": {"type": "string"}, "hubs": {"type": "string"}, "channel": {"type": "string"}},
+                     "required": ["repo", "ref"]}},
     {"name": "bridge_log", "description": "Admin: the last lines of the bridge log (lines, default 200; match = "
      "regex filter). Secrets are masked.", "inputSchema": {"type": "object", "properties": {
          "lines": {"type": "number"}, "match": {"type": "string"}}}},
