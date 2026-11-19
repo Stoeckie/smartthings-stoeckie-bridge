@@ -239,13 +239,14 @@ def test_capability_put_creates_and_updates(monkeypatch):
         u = url.replace("https://api.smartthings.com", "")
         calls.append((method, u))
         if u == "/capabilities/namespaces":
-            return [{"name": "silvervalley08660", "ownerType": "user"}]
+            return [{"name": "silvervalley08660", "ownerType": "user"}, {"name": "other12345", "ownerType": "user"}]
         if method == "GET":
             if u in store:
                 return store[u]
             raise RuntimeError(f"SmartThings GET {u}: HTTP 404 x")
         if method == "POST" and u.startswith("/capabilities?namespace="):
-            store["/capabilities/silvervalley08660.robotMission/1"] = {**body, "id": "silvervalley08660.robotMission"}
+            store["/capabilities/silvervalley08660.robotMission/1"] = {**body, "id": "silvervalley08660.robotMission",
+                                                                       "status": "proposed"}
             return {"id": "silvervalley08660.robotMission"}
         if method == "POST" and u.endswith("/presentation"):
             store[u] = body
@@ -254,7 +255,10 @@ def test_capability_put_creates_and_updates(monkeypatch):
         return {}
     monkeypatch.setattr(sb, "admin_fetch_tree", fake_tree)
     monkeypatch.setattr(sb, "admin_st_raw", fake_st)
-    r = asyncio.run(sb.admin_capability({"repo": "smartthings-irobot-roomba-local", "ref": "abcdef1", "name": "robotMission"}))
+    with pytest.raises(RuntimeError, match="pass namespace"):  # two namespaces, neither has it yet
+        asyncio.run(sb.admin_capability({"repo": "smartthings-irobot-roomba-local", "ref": "abcdef1", "name": "robotMission"}))
+    r = asyncio.run(sb.admin_capability({"repo": "smartthings-irobot-roomba-local", "ref": "abcdef1", "name": "robotMission",
+                                         "namespace": "silvervalley08660"}))
     assert r["capability"] == "silvervalley08660.robotMission"
     assert r["done"] == ["definition created", "presentation created", "en created", "nl created"]
     calls.clear()

@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-19i"
+VERSION = "2026-11-19j"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -6939,6 +6939,27 @@ CAP_NAME = re.compile(r"^[a-z][A-Za-z0-9]{1,60}$")
 CAP_TAG = re.compile(r"^[a-z]{2}(-[A-Z]{2})?$")
 
 
+async def _cap_exists(cid: str) -> bool:
+    try:
+        await admin_st_raw("GET", f"https://api.smartthings.com/capabilities/{cid}/1")
+        return True
+    except RuntimeError as ex:
+        if "HTTP 404" in str(ex):
+            return False
+        raise
+
+
+def _cap_norm(d: dict[str, Any]) -> Any:
+    """What a capability definition says, without the fields SmartThings adds (empty enumCommands and the like)."""
+    def clean(v: Any) -> Any:
+        if isinstance(v, dict):
+            return {k: clean(x) for k, x in v.items() if x not in ([], {}, None)}
+        if isinstance(v, list):
+            return [clean(x) for x in v]
+        return v
+    return clean({k: d.get(k) for k in ("name", "attributes", "commands")})
+
+
 async def admin_capability(a: dict[str, Any]) -> dict[str, Any]:
     """Create or update a custom capability of this home's own namespace from a GitHub commit: <path>/<name>.json
     (definition), <name>-pres.json (presentation) and <name>-<tag>.json (translations), as in the driver repos."""
@@ -6983,6 +7004,8 @@ async def admin_capability(a: dict[str, Any]) -> dict[str, Any]:
         ns = want
     elif len(own) == 1:
         ns = own[0]
+    elif len(have := [n for n in own if await _cap_exists(f"{n}.{name}")]) == 1:
+        ns = have[0]  # the namespace that already has this capability
     else:
         raise RuntimeError(f"capability namespaces of this account: {', '.join(own) or 'none'} "
                            f"(answer shape {type(nss).__name__}, {len(items)} items); pass namespace")
@@ -7005,7 +7028,7 @@ async def admin_capability(a: dict[str, Any]) -> dict[str, Any]:
             raise RuntimeError(f"SmartThings made {made.get('id') if made else '?'} instead of {cid}: check the name "
                                f"in {name}.json")
         done.append("definition created")
-    elif any(cur.get(k) != v for k, v in body.items()):
+    elif _cap_norm(cur) != _cap_norm(body):
         await admin_st_raw("PUT", base, body=body)
         done.append("definition updated")
     else:
