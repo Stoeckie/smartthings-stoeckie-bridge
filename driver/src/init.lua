@@ -91,7 +91,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-19a"
+local BUILD = "2026-11-19b"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -130,7 +130,7 @@ local tMode = capabilities.thermostatMode
 local tOpState = capabilities.thermostatOperatingState
 local tOpSupported = (function() local ok, a = pcall(function() return tOpState.supportedThermostatOperatingStates end); return ok and a or nil end)()
 
-local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor = "stoeckie-climate",
+local PROFILE = { dryer = "stoeckie-dryer-v2", window = "stoeckie-window", sensor = "stoeckie-climate",
                   aircon = "stoeckie-aircon-v3", car = "stoeckie-car-v2",
                   velux_lock = "stoeckie-velux-lock", rain = "stoeckie-rain-v4",
                   rainradar = "stoeckie-rainradar-v3", dishwasher = "stoeckie-dishwasher-v2", oven = "stoeckie-oven-v2",
