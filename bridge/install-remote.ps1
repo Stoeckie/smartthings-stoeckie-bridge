@@ -320,7 +320,16 @@ try {
         $run = @("@echo off", "cd /d `"%~dp0`"")
         if ($allow) { $run += "set STBRIDGE_SETUP_ALLOW=$allow" }
         if ($lanSetup) { $run += "set STBRIDGE_SETUP_LAN_KEY=1" }
+        # The bridge can update itself (Claude admin tool bridge_update): it leaves stoeckie_bridge.next.py and stops
+        # with code 75. run.cmd then swaps the files and starts it again; if the new version stops within its first
+        # minute (before it writes update-ok.flag), the previous version is put back.
+        $run += ":loop"
+        $run += "if exist stoeckie_bridge.next.py (copy /y stoeckie_bridge.py stoeckie_bridge.prev.py >nul & move /y stoeckie_bridge.next.py stoeckie_bridge.py >nul & del /q update-ok.flag 2>nul & echo pending> update-pending.flag)"
         $run += "`"%~dp0venv\Scripts\python.exe`" `"%~dp0stoeckie_bridge.py`""
+        $run += "set rc=%errorlevel%"
+        $run += "if %rc%==75 goto loop"
+        $run += "if exist update-pending.flag if exist stoeckie_bridge.prev.py (copy /y stoeckie_bridge.prev.py stoeckie_bridge.py >nul & del /q update-pending.flag & goto loop)"
+        $run += "exit /b %rc%"
         Set-Content -Path "$d\run.cmd" -Value $run -Encoding ASCII
         $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"$d\run.cmd`"" -WorkingDirectory $d
         $trigger = New-ScheduledTaskTrigger -AtStartup

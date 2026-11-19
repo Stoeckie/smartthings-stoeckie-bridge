@@ -244,6 +244,18 @@ Setup:
 
 Security: only Anthropic's published outbound addresses (160.79.104.0/21, 153.61.208.0/20) may use the MCP, token and registration endpoints (the address comes from the tunnel's X-Forwarded-For); OAuth 2.1 with PKCE and dynamic client registration, only redirect addresses on claude.ai or claude.com; the sign-in page locks for 15 minutes after 5 wrong passwords; access tokens last 1 hour, refresh tokens 90 days and rotate; tokens are stored only as SHA-256 hashes (claude-tokens.json). The setup page can end all Claude sessions, switch locks to lock only or read only, or switch Claude access off. Only the tool name and commands are logged, never what you ask Claude.
 
+### Admin tools for Claude (optional, off by default)
+
+With **Admin tools** switched on (setup page, Claude part) Claude can also maintain the home without a pc with a screen:
+
+* `admin_hubs`: the hubs of the home (name, local IP, firmware) and the Edge drivers installed on each.
+* `hub_log`: the live log of a hub for 5 to 600 seconds, filtered by driver, level or text (like `smartthings edge:drivers:logcat`). The hub certificate is pinned on first use.
+* `driver_deploy`: builds an Edge driver from a GitHub commit (the same package the SmartThings CLI makes) and installs it on every hub that already has that driver.
+* `bridge_log`: the last lines of `bridge.log`.
+* `bridge_update`: updates this bridge to `bridge/stoeckie_bridge.py` of a commit. The new file must load first; the bridge then stops with code 75 and `run.cmd` swaps the files and starts it again. If the new version stops within its first minute, the previous one is put back. A new `requirements.txt` is refused (use `install-remote.bat`). Needs the `run.cmd` of `install-remote.bat` from 19-11-2026 or later.
+
+Limits: no shell and no free commands; only repositories named `smartthings-...` of the owner in `ADMIN_OWNERS` in the code (change it to your own GitHub name); only a commit id, not a branch, so exactly the reviewed code runs; drivers are only updated, never newly installed; secrets in log lines are masked; every admin action is written to `bridge.log`.
+
 ## Security and privacy
 
 * Credentials only live in `config.json` on the bridge pc (in `.gitignore`), never in the code or the driver.

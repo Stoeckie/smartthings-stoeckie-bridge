@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-18c"
+VERSION = "2026-11-19a"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -6368,6 +6368,397 @@ CLAUDE_TOOLS = [
 ]
 
 
+# ---------- Admin tools for Claude (off by default; setup page, Claude part)
+# Lets Claude maintain this home without a pc with a screen: read the hub log, list and update Edge drivers from
+# a GitHub commit, read the bridge log and update the bridge itself from a GitHub commit. No shell, no free
+# commands: every tool does one fixed thing. Only the GitHub owner(s) in ADMIN_OWNERS, repositories named
+# smartthings-..., a commit id (not a branch) so what runs is exactly what was reviewed, and only drivers that are
+# already installed on one of the hubs of this home. Every admin action is written to bridge.log.
+
+ADMIN_OWNERS = ("Stoeckie",)
+ADMIN_BRIDGE_REPO = "smartthings-stoeckie-bridge"
+ADMIN_MAX_TAR = 8 * 1024 * 1024
+ADMIN_SECRET_RES = (
+    re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}"),
+    re.compile(r"(?i)((?:access|refresh)_?token|api_?key|password|secret|setup_?code|pin)([\"'\s:=]+)[^\s,\"'}]{4,}"),
+    re.compile(r"\b\d{3}-\d{2}-\d{3}\b"),  # HomeKit setup code
+    re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b(?=[^\n]{0,20}(?:token|key))", re.I),
+)
+ADMIN_STATE: dict[str, Any] = {"hubs": None, "hubs_t": 0.0, "busy": False}
+RESTART_CODE = 75  # run.cmd starts the bridge again for this exit code (and applies stoeckie_bridge.next.py)
+
+
+def admin_enabled(cfg: dict[str, Any] | None = None) -> bool:
+    return bool((claude_cfg(cfg).get("admin") or {}).get("enabled"))
+
+
+def admin_mask(text: str) -> str:
+    text = ADMIN_SECRET_RES[0].sub(lambda m: m.group(1) + "***", text)
+    text = ADMIN_SECRET_RES[1].sub(lambda m: m.group(1) + m.group(2) + "***", text)
+    text = ADMIN_SECRET_RES[2].sub("***-**-***", text)
+    return ADMIN_SECRET_RES[3].sub("***", text)
+
+
+def admin_ref(ref: Any) -> str:
+    ref = str(ref or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{7,40}", ref):
+        raise ValueError("ref: a commit id (7 to 40 hex characters), not a branch name")
+    return ref
+
+
+def admin_repo(owner: Any, repo: Any) -> tuple[str, str]:
+    owner, repo = str(owner or ADMIN_OWNERS[0]), str(repo or "")
+    if owner not in ADMIN_OWNERS:
+        raise ValueError(f"owner must be one of {', '.join(ADMIN_OWNERS)}")
+    if not re.fullmatch(r"smartthings-[a-z0-9-]{1,60}", repo):
+        raise ValueError("repo: a repository named smartthings-...")
+    return owner, repo
+
+
+async def admin_fetch_tree(owner: str, repo: str, ref: str) -> dict[str, bytes]:
+    """Files of a repository at a commit, from GitHub (codeload), as {path inside the repo: bytes}."""
+    import io
+    import tarfile
+    url = f"https://codeload.github.com/{owner}/{repo}/tar.gz/{ref}"
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+        async with session.get(url) as r:
+            if r.status != 200:
+                raise RuntimeError(f"GitHub {owner}/{repo}@{ref}: HTTP {r.status}")
+            data = await r.content.read(ADMIN_MAX_TAR + 1)
+    if len(data) > ADMIN_MAX_TAR:
+        raise RuntimeError("repository archive too large")
+    out: dict[str, bytes] = {}
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
+        for m in tf.getmembers():
+            if not m.isfile():
+                continue
+            parts = m.name.split("/", 1)
+            if len(parts) < 2 or parts[1].startswith("/") or ".." in parts[1].split("/"):
+                continue
+            f = tf.extractfile(m)
+            if f is not None:
+                out[parts[1]] = f.read()
+    return out
+
+
+def admin_driver_zip(files: dict[str, bytes], path: str) -> tuple[bytes, dict[str, Any]]:
+    """The Edge driver package as the SmartThings CLI makes it: config.yml, fingerprints/search-parameters,
+    profiles/*.yml and src/ without tests."""
+    import io
+    import zipfile
+    base = (path.strip("/") + "/") if path.strip("/") else ""
+    if ".." in base.split("/"):
+        raise ValueError("path")
+
+    def get(name: str) -> bytes | None:
+        for ext in (".yaml", ".yml"):
+            if base + name + ext in files:
+                return files[base + name + ext]
+        return None
+
+    cfg_raw = get("config")
+    if cfg_raw is None:
+        raise RuntimeError(f"no config.yaml in {base or 'the repository root'}")
+    m = re.search(rb"(?m)^packageKey:\s*[\"']?([A-Za-z0-9._-]+)", cfg_raw)
+    n = re.search(rb"(?m)^name:\s*[\"']?([^\"'\r\n]+)", cfg_raw)
+    if not m:
+        raise RuntimeError("config.yaml has no packageKey")
+    if base + "src/init.lua" not in files:
+        raise RuntimeError("no src/init.lua")
+    buf = io.BytesIO()
+    count = 0
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("config.yml", cfg_raw)
+        for opt in ("fingerprints", "search-parameters"):
+            raw = get(opt)
+            if raw is not None:
+                z.writestr(opt + ".yml", raw)
+        for name, raw in sorted(files.items()):
+            if not name.startswith(base):
+                continue
+            rel = name[len(base):]
+            if rel.startswith("profiles/") and rel.count("/") == 1 and rel.endswith((".yaml", ".yml")):
+                z.writestr("profiles/" + rel[9:].rsplit(".", 1)[0] + ".yml", raw)
+                count += 1
+            elif rel.startswith("src/"):
+                inner = rel[4:]
+                if inner.startswith(("test/", "tests/")) or inner.count("/") > 8:
+                    continue
+                z.writestr(rel, raw)
+                count += 1
+    return buf.getvalue(), {"packageKey": m.group(1).decode(), "name": (n.group(1).decode().strip() if n else ""),
+                            "files": count}
+
+
+async def admin_st_raw(method: str, url: str, data: bytes | None = None, ctype: str | None = None,
+                       body: Any = None) -> Any:
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:
+        tok = await ST_CLOUD._token(session)
+        hdr = {"Authorization": "Bearer " + tok, "Accept": "application/json"}
+        if ctype:
+            hdr["Content-Type"] = ctype
+        kw: dict[str, Any] = {"data": data} if data is not None else {"json": body}
+        async with session.request(method, url, headers=hdr, **kw) as r:
+            txt = await r.text()
+            try:
+                j = json.loads(txt) if txt else None
+            except ValueError:
+                j = txt
+            if r.status >= 400:
+                raise RuntimeError(f"SmartThings {method} {url.split('?')[0].replace('https://api.smartthings.com', '')}"
+                                   f": HTTP {r.status} {admin_mask(str(j))[:400]}")
+            return j
+
+
+async def admin_hubs(force: bool = False) -> list[dict[str, Any]]:
+    if not force and ADMIN_STATE["hubs"] and time.time() - ADMIN_STATE["hubs_t"] < 600:
+        return ADMIN_STATE["hubs"]
+    items = await ST_CLOUD.all("/devices?type=HUB")
+    hubs = []
+    for d in items:
+        full = await ST_CLOUD.call("GET", f"/devices/{d['deviceId']}")
+        hd = ((full or {}).get("hub") or {}).get("hubData") or {}
+        hubs.append({"name": d.get("label") or d.get("name"), "id": d["deviceId"], "ip": hd.get("localIP"),
+                     "firmware": hd.get("hubFirmwareVersion") or hd.get("firmwareVersion")})
+    ADMIN_STATE.update(hubs=hubs, hubs_t=time.time())
+    return hubs
+
+
+async def admin_find_hub(name: Any) -> dict[str, Any]:
+    hubs = await admin_hubs()
+    q = _norm(str(name or ""))
+    hit = [h for h in hubs if q and (q == _norm(h["id"]) or q in _norm(h["name"] or "") or q == h.get("ip"))]
+    if len(hit) != 1:
+        raise ValueError("hub: one of " + ", ".join(f"{h['name']} ({h['ip']})" for h in hubs))
+    return hit[0]
+
+
+async def admin_installed(hub: dict[str, Any]) -> list[dict[str, Any]]:
+    j = await admin_st_raw("GET", f"https://api.smartthings.com/hubdevices/{hub['id']}/drivers")
+    items = j if isinstance(j, list) else (j or {}).get("items") or []
+    return [{"driverId": x.get("driverId"), "name": x.get("name"), "version": x.get("version"),
+             "channelId": x.get("channelId"), "packageKey": x.get("packageKey")} for x in items]
+
+
+async def admin_hub_log(a: dict[str, Any]) -> dict[str, Any]:
+    hub = await admin_find_hub(a.get("hub"))
+    if not hub.get("ip"):
+        raise RuntimeError("the hub reports no local address")
+    seconds = max(5, min(600, int(float(a.get("seconds") or 60))))
+    want = str(a.get("driver") or "").strip().lower()
+    rx = re.compile(str(a["match"])) if a.get("match") else None
+    levels = {"trace": 0, "debug": 1, "info": 2, "warn": 3, "error": 4, "fatal": 5}
+    min_level = levels.get(str(a.get("level") or "trace").lower(), 0)
+    limit = max(10, min(2000, int(a.get("limit") or 500)))
+    cfg = load_config()
+    pins = (claude_cfg(cfg).get("admin") or {}).get("hub_pins") or {}
+    lines: list[str] = []
+    dropped = 0
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=seconds + 20, sock_read=None)) as session:
+        tok = await ST_CLOUD._token(session)
+        hdr = {"Authorization": "Bearer " + tok, "Accept": "text/event-stream"}
+        pin = pins.get(hub["ip"])
+        ssl_arg: Any = aiohttp.Fingerprint(bytes.fromhex(pin)) if pin else False
+        url = f"https://{hub['ip']}:9495/drivers/logs"
+        end = time.monotonic() + seconds
+        async with session.get(url, headers=hdr, ssl=ssl_arg) as r:
+            if r.status in (401, 403):
+                raise RuntimeError(f"hub refused the log (HTTP {r.status})")
+            if r.status != 200:
+                raise RuntimeError(f"hub log: HTTP {r.status}")
+            if not pin:
+                try:
+                    der = r.connection.transport.get_extra_info("ssl_object").getpeercert(binary_form=True)
+                    cfg = load_config()
+                    ad = cfg.setdefault("claude", {}).setdefault("admin", {})
+                    ad.setdefault("hub_pins", {})[hub["ip"]] = hashlib.sha256(der).hexdigest()
+                    save_config(cfg)
+                except Exception:  # noqa: BLE001
+                    pass
+            while time.monotonic() < end:
+                try:
+                    raw = await asyncio.wait_for(r.content.readline(), timeout=max(0.5, end - time.monotonic()))
+                except asyncio.TimeoutError:
+                    break
+                if not raw:
+                    break
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                try:
+                    ev = json.loads(line[5:].strip())
+                except ValueError:
+                    continue
+                lvl = ev.get("log_level")
+                lvl_n = lvl if isinstance(lvl, int) else levels.get(str(lvl).lower(), 2)
+                name = str(ev.get("driver_name") or "")
+                msg = str(ev.get("message") or "")
+                if lvl_n < min_level or (want and want not in name.lower() and want != str(ev.get("driver_id"))):
+                    continue
+                text = admin_mask(f"{ev.get('timestamp', '')} {name}  {msg}")
+                if rx and not rx.search(text):
+                    continue
+                if len(lines) >= limit:
+                    dropped += 1
+                    continue
+                lines.append(text[:600])
+    log.info("[admin] hub log %s, %d s, driver %r: %d lines", hub["name"], seconds, want, len(lines))
+    return {"hub": hub["name"], "seconds": seconds, "lines": lines, "more_lines_dropped": dropped}
+
+
+async def admin_deploy(a: dict[str, Any]) -> dict[str, Any]:
+    owner, repo = admin_repo(a.get("owner"), a.get("repo"))
+    ref = admin_ref(a.get("ref"))
+    path = str(a.get("path") or "")
+    if ADMIN_STATE["busy"]:
+        raise RuntimeError("another admin action is running")
+    ADMIN_STATE["busy"] = True
+    try:
+        files = await admin_fetch_tree(owner, repo, ref)
+        if not path and "config.yaml" not in files and "config.yml" not in files and "driver/config.yaml" in files:
+            path = "driver"
+        package, info = admin_driver_zip(files, path)
+        hubs = await admin_hubs(True)
+        where: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for h in hubs:
+            for d in await admin_installed(h):
+                if d.get("packageKey") == info["packageKey"] or (not d.get("packageKey") and d.get("name") == info["name"]):
+                    where.append((h, d))
+        if not where:
+            raise RuntimeError(f"driver {info['packageKey']} is not installed on a hub of this home (only updates "
+                               "are allowed)")
+        log.info("[admin] deploy %s/%s@%s %s (%d files) to %s", owner, repo, ref, info["packageKey"], info["files"],
+                 ", ".join(h["name"] for h, _ in where))
+        up = await admin_st_raw("POST", "https://api.smartthings.com/drivers/package", data=package,
+                                ctype="application/zip")
+        driver_id, version = up.get("driverId"), up.get("version")
+        done = []
+        channels = {d["channelId"] for _, d in where if d.get("channelId")}
+        for ch in channels:
+            await admin_st_raw("POST", f"https://api.smartthings.com/distchannels/{ch}/drivers",
+                               body={"driverId": driver_id, "version": version})
+        for h, d in where:
+            await admin_st_raw("PUT", f"https://api.smartthings.com/hubdevices/{h['id']}/drivers/{driver_id}",
+                               body={"channelId": d.get("channelId")})
+            done.append(h["name"])
+        log.info("[admin] deployed %s version %s to %s", info["packageKey"], version, ", ".join(done))
+        return {"packageKey": info["packageKey"], "driverId": driver_id, "version": version, "hubs": done,
+                "files": info["files"], "note": "the hub restarts the driver within about a minute; check with hub_log"}
+    finally:
+        ADMIN_STATE["busy"] = False
+
+
+def admin_bridge_log(a: dict[str, Any]) -> dict[str, Any]:
+    n = max(10, min(2000, int(a.get("lines") or 200)))
+    rx = re.compile(str(a["match"])) if a.get("match") else None
+    try:
+        with open(LOG_FILE, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 4 * 1024 * 1024))
+            raw = f.read().decode("utf-8", "replace").splitlines()
+    except OSError as ex:
+        raise RuntimeError(f"bridge.log: {ex}") from None
+    if rx:
+        raw = [x for x in raw if rx.search(x)]
+    return {"version": VERSION, "lines": [admin_mask(x)[:600] for x in raw[-n:]]}
+
+
+async def admin_bridge_update(a: dict[str, Any]) -> dict[str, Any]:
+    import subprocess
+    ref = admin_ref(a.get("ref"))
+    if not (HERE / "run.cmd").exists() or b"stoeckie_bridge.next.py" not in (HERE / "run.cmd").read_bytes():
+        raise RuntimeError("this installation can not update itself yet (run install-remote once from a pc)")
+    files = await admin_fetch_tree(ADMIN_OWNERS[0], ADMIN_BRIDGE_REPO, ref)
+    new = files.get("bridge/stoeckie_bridge.py")
+    if not new:
+        raise RuntimeError("no bridge/stoeckie_bridge.py at that commit")
+    m = re.search(rb'(?m)^VERSION = "([^"]+)"', new)
+    if not m:
+        raise RuntimeError("no VERSION in the new bridge")
+    req_new = files.get("bridge/requirements.txt")
+    if req_new is not None and (HERE / "requirements.txt").exists() and req_new.replace(b"\r", b"") != \
+            (HERE / "requirements.txt").read_bytes().replace(b"\r", b""):
+        raise RuntimeError("the new bridge needs other packages: update it with install-remote from a pc")
+    nxt = HERE / "stoeckie_bridge.next.py"
+    nxt.write_bytes(new)
+    # the new file must import (syntax, imports, module level code) with the Python of this bridge
+    chk = await asyncio.get_running_loop().run_in_executor(None, lambda: subprocess.run(
+        [sys.executable, "-c", "import importlib.util,sys;s=importlib.util.spec_from_file_location('nb',sys.argv[1]);"
+         "m=importlib.util.module_from_spec(s);s.loader.exec_module(m);print(m.VERSION)", str(nxt)],
+        capture_output=True, text=True, timeout=120, cwd=str(HERE),
+        env={**os.environ, "STBRIDGE_DATA": str(DATA)}))
+    if chk.returncode != 0 or chk.stdout.strip() != m.group(1).decode():
+        nxt.unlink(missing_ok=True)
+        raise RuntimeError("the new bridge does not load: " + admin_mask((chk.stderr or chk.stdout)[-600:]))
+    log.info("[admin] bridge update %s -> %s (%s), restarting", VERSION, m.group(1).decode(), ref)
+    asyncio.get_running_loop().call_later(2, lambda: os._exit(RESTART_CODE))
+    return {"from": VERSION, "to": m.group(1).decode(), "ref": ref,
+            "note": "the bridge restarts in a few seconds; if the new version does not start, run.cmd puts the old "
+                    "one back. Check with bridge_log after a minute."}
+
+
+def admin_mark_update_ok() -> None:
+    """Called once the bridge has run for a minute: an update that got this far is kept."""
+    for f in ("update-pending.flag",):
+        try:
+            (HERE / f).unlink(missing_ok=True)
+        except OSError:
+            pass
+    try:
+        (HERE / "update-ok.flag").write_text(VERSION)
+    except OSError:
+        pass
+
+
+ADMIN_TOOLS = [
+    {"name": "admin_hubs", "description": "Admin: the SmartThings hubs of this home (name, id, local IP, firmware) and "
+     "the Edge drivers installed on each (name, packageKey, version, driverId).", "inputSchema": _OBJ},
+    {"name": "hub_log", "description": "Admin: read the live log of a hub for some seconds (like 'smartthings "
+     "edge:drivers:logcat'). hub = name or IP. Optional: driver (part of the driver name), match (regex on the "
+     "line), level (trace..error), seconds (5..600, default 60), limit (lines, default 500). Secrets are masked.",
+     "inputSchema": {"type": "object", "properties": {"hub": {"type": "string"}, "driver": {"type": "string"},
+                     "match": {"type": "string"}, "level": {"type": "string"}, "seconds": {"type": "number"},
+                     "limit": {"type": "number"}}, "required": ["hub"]}},
+    {"name": "driver_deploy", "description": "Admin: build an Edge driver from a GitHub commit (repo "
+     "smartthings-..., ref = commit id, optional path of the driver folder) and install it on every hub of this "
+     "home that has that driver (update only). Returns the new version.",
+     "inputSchema": {"type": "object", "properties": {"repo": {"type": "string"}, "ref": {"type": "string"},
+                     "path": {"type": "string"}}, "required": ["repo", "ref"]}},
+    {"name": "bridge_log", "description": "Admin: the last lines of the bridge log (lines, default 200; match = "
+     "regex filter). Secrets are masked.", "inputSchema": {"type": "object", "properties": {
+         "lines": {"type": "number"}, "match": {"type": "string"}}}},
+    {"name": "bridge_update", "description": "Admin: update this bridge to bridge/stoeckie_bridge.py of a commit of "
+     "smartthings-stoeckie-bridge (ref = commit id). Checked first; restarts the bridge; the old version comes back "
+     "if the new one does not start.", "inputSchema": {"type": "object", "properties": {"ref": {"type": "string"}},
+                                                       "required": ["ref"]}},
+]
+ADMIN_NAMES = {t["name"] for t in ADMIN_TOOLS}
+
+
+async def admin_tool(name: str, a: dict) -> Any:
+    if not admin_enabled():
+        raise RuntimeError("admin tools are off (bridge setup page, Claude part)")
+    log.info("[admin] %s %s", name, admin_mask(json.dumps({k: v for k, v in a.items()}, ensure_ascii=False))[:300])
+    if name == "admin_hubs":
+        hubs = await admin_hubs(True)
+        for h in hubs:
+            try:
+                h["drivers"] = await admin_installed(h)
+            except Exception as ex:  # noqa: BLE001
+                h["drivers_error"] = str(ex)[:200]
+        return {"hubs": hubs}
+    if name == "hub_log":
+        return await admin_hub_log(a)
+    if name == "driver_deploy":
+        return await admin_deploy(a)
+    if name == "bridge_log":
+        return admin_bridge_log(a)
+    if name == "bridge_update":
+        return await admin_bridge_update(a)
+    raise ValueError(name)
+
+
 async def claude_rpc(m: dict) -> dict | None:
     mid, method, params = m.get("id"), m.get("method"), m.get("params") or {}
     if method == "initialize":
@@ -6382,13 +6773,14 @@ async def claude_rpc(m: dict) -> dict | None:
     if method == "ping":
         return {"jsonrpc": "2.0", "id": mid, "result": {}}
     if method == "tools/list":
-        return {"jsonrpc": "2.0", "id": mid, "result": {"tools": CLAUDE_TOOLS}}
+        return {"jsonrpc": "2.0", "id": mid, "result": {"tools": CLAUDE_TOOLS + (ADMIN_TOOLS if admin_enabled() else [])}}
     if method == "tools/call":
         name = params.get("name")
-        if name not in {t["name"] for t in CLAUDE_TOOLS}:
+        admin = name in ADMIN_NAMES and admin_enabled()
+        if name not in {t["name"] for t in CLAUDE_TOOLS} and not admin:
             return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": f"unknown tool {name}"}}
         try:
-            r = await st_tool(name, params.get("arguments") or {})
+            r = await (admin_tool if admin else st_tool)(name, params.get("arguments") or {})
             return {"jsonrpc": "2.0", "id": mid, "result": {"content": [{"type": "text", "text": json.dumps(r, ensure_ascii=False)}]}}
         except Exception as ex:  # noqa: BLE001
             log.info("[claude] tool %s failed: %s", name, str(ex)[:160])
@@ -6654,6 +7046,7 @@ def claude_setup_html(cfg: dict[str, Any]) -> str:
         ("SmartThings", st_state),
         ("Claude sessions", f"{len(t.get('refresh', {}))} active"),
         ("Locks", html.escape(str(c.get("locks") or "full"))),
+        ("Admin tools", "on" if admin_enabled(cfg) else "off"),
     ]
     tbl = "".join(f"<tr><td>{k}</td><td><b>{v}</b></td></tr>" for k, v in rows)
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Claude access</title>
@@ -6670,6 +7063,10 @@ form{{margin:14px 0;padding-top:10px;border-top:1px solid #ccc}}</style></head><
 <form method="post"><input type="hidden" name="act" value="locks"><b>Locks</b><br><select name="locks">
 {''.join(f'<option value="{v}"{" selected" if (c.get("locks") or "full") == v else ""}>{l}</option>' for v, l in (("full", "lock and unlock"), ("lock", "lock only"), ("read", "read only")))}
 </select> <button type="submit">Save</button></form>
+<form method="post"><input type="hidden" name="act" value="admin"><b>Admin tools</b> (hub log, update Edge drivers
+and this bridge from a GitHub commit of {html.escape(", ".join(ADMIN_OWNERS))}, bridge log; no free commands)<br>
+<select name="admin"><option value="off"{" selected" if not admin_enabled(cfg) else ""}>off</option>
+<option value="on"{" selected" if admin_enabled(cfg) else ""}>on</option></select> <button type="submit">Save</button></form>
 <form method="post"><input type="hidden" name="act" value="revoke"><b>Sign Claude out</b><br>
 <button type="submit">End all Claude sessions</button></form>
 <form method="post"><input type="hidden" name="act" value="off"><button type="submit">Switch Claude access off</button></form>
@@ -6692,6 +7089,10 @@ async def claude_setup_post(form, cfg: dict[str, Any]) -> str | None:
         c["locks"] = v if v in ("full", "lock", "read") else "full"
         save_config(cfg)
         log.info("[setup] Claude locks: %s", c["locks"])
+    elif act == "admin":
+        c.setdefault("admin", {})["enabled"] = str(form.get("admin")) == "on"
+        save_config(cfg)
+        log.info("[setup] Claude admin tools %s", "on" if c["admin"]["enabled"] else "off")
     elif act == "revoke":
         t = claude_tokens()
         t["access"], t["refresh"] = {}, {}
@@ -6802,6 +7203,7 @@ async def serve(args) -> None:
 
     asyncio.create_task(memory_log())
     if not args.demo:
+        asyncio.get_running_loop().call_later(60, admin_mark_update_ok)
         try:
             await claude_start()
         except OSError as ex:
