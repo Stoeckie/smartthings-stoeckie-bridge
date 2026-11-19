@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-19c"
+VERSION = "2026-11-19d"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -6424,9 +6424,14 @@ async def admin_fetch_tree(owner: str, repo: str, ref: str) -> dict[str, bytes]:
         async with session.get(url) as r:
             if r.status != 200:
                 raise RuntimeError(f"GitHub {owner}/{repo}@{ref}: HTTP {r.status}")
-            data = await r.content.read(ADMIN_MAX_TAR + 1)
-    if len(data) > ADMIN_MAX_TAR:
-        raise RuntimeError("repository archive too large")
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in r.content.iter_chunked(65536):  # read() gives only what has arrived so far
+                total += len(chunk)
+                if total > ADMIN_MAX_TAR:
+                    raise RuntimeError("repository archive too large")
+                chunks.append(chunk)
+            data = b"".join(chunks)
     out: dict[str, bytes] = {}
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
         for m in tf.getmembers():

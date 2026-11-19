@@ -69,3 +69,44 @@ def test_bridge_update_needs_the_new_run_cmd(tmp_path, monkeypatch):
     (tmp_path / "run.cmd").write_text("python stoeckie_bridge.py")
     with pytest.raises(RuntimeError, match="install-remote"):
         asyncio.run(sb.admin_bridge_update({"ref": "e1a6b0a"}))
+
+
+def test_fetch_reads_the_whole_archive(monkeypatch):
+    """GitHub sends the archive in pieces: all of them must be read (19c read only the first ones)."""
+    import gzip
+    import tarfile
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for i in range(30):
+            data = os.urandom(20000)
+            ti = tarfile.TarInfo(f"repo-abc/src/f{i}.bin")
+            ti.size = len(data)
+            tf.addfile(ti, io.BytesIO(data))
+    blob = buf.getvalue()
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    async def handler(req):
+        resp = web.StreamResponse()
+        await resp.prepare(req)
+        for i in range(0, len(blob), 7000):
+            await resp.write(blob[i:i + 7000])
+            await asyncio.sleep(0.001)
+        return resp
+
+    async def main():
+        app = web.Application()
+        app.router.add_get("/{tail:.*}", handler)
+        srv = TestServer(app)
+        await srv.start_server()
+        real = sb.aiohttp.ClientSession
+
+        class S(real):
+            def get(self, url, **kw):
+                return super().get(str(srv.make_url("/x")), **kw)
+        monkeypatch.setattr(sb.aiohttp, "ClientSession", S)
+        files = await sb.admin_fetch_tree("Stoeckie", "smartthings-x", "abcdef1")
+        await srv.close()
+        return files
+    files = asyncio.run(main())
+    assert len(files) == 30 and all(len(v) == 20000 for v in files.values())
