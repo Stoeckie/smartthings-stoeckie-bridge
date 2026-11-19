@@ -91,7 +91,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-19b"
+local BUILD = "2026-11-19c"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -984,6 +984,8 @@ local function child_profile(key, device)
     return nil
   end
   -- -v3: course list + Start (own capability washerProgram; -v2 used applianceProgram)
+  -- -v2: category Others (SmartThings app 1.8.54 does not open tiles of Edge devices in category Dryer)
+  if key:match("^aeg%-") or key == "demo-dryer" then return PROFILE.dryer end
   if key:match("^echo%-") or key == "demo-echo" then return PROFILE.echo end
   if key:match("^unifi%-") or key == "demo-netswitch" then return PROFILE.net_switch end
   if key:match("^samsung%-") or key == "demo-washer" then return PROFILE.washer end
