@@ -110,3 +110,57 @@ def test_fetch_reads_the_whole_archive(monkeypatch):
         return files
     files = asyncio.run(main())
     assert len(files) == 30 and all(len(v) == 20000 for v in files.values())
+
+
+def test_update_with_other_packages_waits_for_approval(tmp_path, monkeypatch):
+    monkeypatch.setattr(sb, "HERE", tmp_path)
+    monkeypatch.setattr(sb, "STAGED", tmp_path / "staged")
+    (tmp_path / "run.cmd").write_text("if exist stoeckie_bridge.next.py ...")
+    (tmp_path / "requirements.txt").write_text("aiohttp==3.9.0 \\\n    --hash=sha256:aa\n")
+    new_req = b"aiohttp==3.9.5 \\\n    --hash=sha256:bb\nnewpkg==1.0 \\\n    --hash=sha256:cc\n"
+
+    async def fake_tree(owner, repo, ref):
+        return {"bridge/stoeckie_bridge.py": b'VERSION = "2099-01-01a"\n', "bridge/requirements.txt": new_req}
+
+    ages = {"aiohttp": 30.0, "newpkg": 10.0}
+
+    async def fake_age(session, name, version):
+        return ages[name]
+    monkeypatch.setattr(sb, "admin_fetch_tree", fake_tree)
+    monkeypatch.setattr(sb, "_pkg_age_days", fake_age)
+    r = asyncio.run(sb.admin_bridge_update({"ref": "abcdef1"}))
+    assert r["needs_approval"] and {c["package"] for c in r["package_changes"]} == {"aiohttp", "newpkg"}
+    st = sb.staged_update()
+    assert st["state"] == "waiting" and st["to"] == "2099-01-01a"
+    html = sb.claude_setup_html({"claude": {}})
+    assert "waiting for your approval" in html and "aiohttp: 3.9.0" in html and "newpkg: new" in html
+    assert not (tmp_path / "stoeckie_bridge.next.py").exists()
+    ages["newpkg"] = 2.0  # too young: refused
+    with pytest.raises(RuntimeError, match="younger than 7 days"):
+        asyncio.run(sb.admin_bridge_update({"ref": "abcdef1"}))
+
+
+def test_approved_update_installs_tests_and_restarts(tmp_path, monkeypatch):
+    monkeypatch.setattr(sb, "HERE", tmp_path)
+    monkeypatch.setattr(sb, "STAGED", tmp_path / "staged")
+    (tmp_path / "staged").mkdir()
+    (tmp_path / "staged" / "stoeckie_bridge.py").write_bytes(b'VERSION = "2099-01-01a"\n')
+    (tmp_path / "staged" / "requirements.txt").write_bytes(b"x==1 --hash=sha256:aa\n")
+    (tmp_path / "requirements.txt").write_bytes(b"x==0 --hash=sha256:bb\n")
+    import json as _j
+    (tmp_path / "staged" / "meta.json").write_text(_j.dumps({"t": sb.time.time(), "ref": "abcdef1", "from": "old",
+                                                             "to": "2099-01-01a", "changes": [], "state": "waiting"}))
+    calls = []
+
+    class R:
+        returncode, stdout, stderr = 0, "", ""
+    import subprocess
+    monkeypatch.setattr(subprocess, "run", lambda args, **kw: calls.append(args) or R())
+    monkeypatch.setattr(sb, "_load_test", lambda path, want: (True, ""))
+    restarted = []
+    monkeypatch.setattr(sb, "_restart_into", lambda new, v, ref: restarted.append(v))
+    asyncio.run(sb.apply_staged_update())
+    assert calls and "--require-hashes" in calls[0] and restarted == ["2099-01-01a"]
+    assert (tmp_path / "requirements.txt").read_bytes() == b"x==1 --hash=sha256:aa\n"
+    assert (tmp_path / "requirements.prev.txt").read_bytes() == b"x==0 --hash=sha256:bb\n"
+    assert sb.staged_update()["state"] == "done"

@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-19e"
+VERSION = "2026-11-19f"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -6685,8 +6685,63 @@ def admin_bridge_log(a: dict[str, Any]) -> dict[str, Any]:
     return {"version": VERSION, "lines": [admin_mask(x)[:600] for x in raw[-n:]]}
 
 
-async def admin_bridge_update(a: dict[str, Any]) -> dict[str, Any]:
+STAGED = DATA / "update-staged"
+STAGE_HOURS = 24
+PKG_MIN_AGE_DAYS = 7  # packages must be at least a week old (time for a bad release to be noticed and pulled)
+
+
+def _req_pins(raw: bytes) -> dict[str, str]:
+    """{package: version} of a requirements.txt made by uv/pip-compile (name==version lines)."""
+    out = {}
+    for line in raw.decode("utf-8", "replace").splitlines():
+        m = re.match(r"^([A-Za-z0-9_.-]+)==([^\s;\\]+)", line.strip())
+        if m:
+            out[m.group(1).lower().replace("_", "-")] = m.group(2)
+    return out
+
+
+async def _pkg_age_days(session, name: str, version: str) -> float | None:
+    try:
+        async with session.get(f"https://pypi.org/pypi/{name}/{version}/json") as r:
+            if r.status != 200:
+                return None
+            j = await r.json()
+        times = [u.get("upload_time_iso_8601") for u in j.get("urls") or [] if u.get("upload_time_iso_8601")]
+        if not times:
+            return None
+        first = min(dt.datetime.fromisoformat(t.replace("Z", "+00:00")) for t in times)
+        return (dt.datetime.now(dt.timezone.utc) - first).total_seconds() / 86400
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _load_test(path: Path, want: str) -> tuple[bool, str]:
     import subprocess
+    chk = subprocess.run(
+        [sys.executable, "-c", "import importlib.util,sys;s=importlib.util.spec_from_file_location('nb',sys.argv[1]);"
+         "m=importlib.util.module_from_spec(s);s.loader.exec_module(m);print(m.VERSION)", str(path)],
+        capture_output=True, text=True, timeout=120, cwd=str(HERE), env={**os.environ, "STBRIDGE_DATA": str(DATA)})
+    ok = chk.returncode == 0 and chk.stdout.strip() == want
+    return ok, admin_mask((chk.stderr or chk.stdout)[-600:])
+
+
+def _restart_into(new: bytes, version: str, ref: str) -> None:
+    (HERE / "stoeckie_bridge.next.py").write_bytes(new)
+    log.info("[admin] bridge update %s -> %s (%s), restarting", VERSION, version, ref)
+    asyncio.get_running_loop().call_later(2, lambda: os._exit(RESTART_CODE))
+
+
+def staged_update() -> dict[str, Any] | None:
+    try:
+        meta = json.loads((STAGED / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if time.time() - float(meta.get("t", 0)) > STAGE_HOURS * 3600:
+        return None
+    return meta
+
+
+async def admin_bridge_update(a: dict[str, Any]) -> dict[str, Any]:
     ref = admin_ref(a.get("ref"))
     if not (HERE / "run.cmd").exists() or b"stoeckie_bridge.next.py" not in (HERE / "run.cmd").read_bytes():
         raise RuntimeError("this installation can not update itself yet (run install-remote once from a pc)")
@@ -6697,26 +6752,86 @@ async def admin_bridge_update(a: dict[str, Any]) -> dict[str, Any]:
     m = re.search(rb'(?m)^VERSION = "([^"]+)"', new)
     if not m:
         raise RuntimeError("no VERSION in the new bridge")
+    version = m.group(1).decode()
     req_new = files.get("bridge/requirements.txt")
-    if req_new is not None and (HERE / "requirements.txt").exists() and req_new.replace(b"\r", b"") != \
-            (HERE / "requirements.txt").read_bytes().replace(b"\r", b""):
-        raise RuntimeError("the new bridge needs other packages: update it with install-remote from a pc")
+    req_old = (HERE / "requirements.txt").read_bytes() if (HERE / "requirements.txt").exists() else b""
+    if req_new is not None and req_new.replace(b"\r", b"") != req_old.replace(b"\r", b""):
+        # other packages: only after DS approves on the setup page (from a phone on the own network is enough)
+        old_p, new_p = _req_pins(req_old), _req_pins(req_new)
+        changes = []
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            for name in sorted(set(old_p) | set(new_p)):
+                if old_p.get(name) == new_p.get(name):
+                    continue
+                age = await _pkg_age_days(session, name, new_p[name]) if name in new_p else None
+                changes.append({"package": name, "from": old_p.get(name), "to": new_p.get(name),
+                                "age_days": None if age is None else round(age, 1)})
+        young = [c for c in changes if c["to"] and (c["age_days"] is None or c["age_days"] < PKG_MIN_AGE_DAYS)]
+        if young:
+            raise RuntimeError("packages younger than 7 days (or not found on PyPI): " + ", ".join(
+                f"{c['package']} {c['to']}" for c in young))
+        if b"--hash=sha256:" not in req_new:
+            raise RuntimeError("the new requirements.txt has no hashes")
+        STAGED.mkdir(parents=True, exist_ok=True)
+        (STAGED / "stoeckie_bridge.py").write_bytes(new)
+        (STAGED / "requirements.txt").write_bytes(req_new)
+        meta = {"t": time.time(), "ref": ref, "from": VERSION, "to": version, "changes": changes, "state": "waiting"}
+        (STAGED / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        log.info("[admin] bridge update %s -> %s (%s) needs other packages: waiting for approval on the setup page "
+                 "(%s)", VERSION, version, ref, ", ".join(f"{c['package']} {c['from']}->{c['to']}" for c in changes))
+        return {"needs_approval": True, "from": VERSION, "to": version, "ref": ref, "package_changes": changes,
+                "note": f"approve on the bridge setup page, Claude part (/setup/claude), within {STAGE_HOURS} hours"}
     nxt = HERE / "stoeckie_bridge.next.py"
     nxt.write_bytes(new)
-    # the new file must import (syntax, imports, module level code) with the Python of this bridge
-    chk = await asyncio.get_running_loop().run_in_executor(None, lambda: subprocess.run(
-        [sys.executable, "-c", "import importlib.util,sys;s=importlib.util.spec_from_file_location('nb',sys.argv[1]);"
-         "m=importlib.util.module_from_spec(s);s.loader.exec_module(m);print(m.VERSION)", str(nxt)],
-        capture_output=True, text=True, timeout=120, cwd=str(HERE),
-        env={**os.environ, "STBRIDGE_DATA": str(DATA)}))
-    if chk.returncode != 0 or chk.stdout.strip() != m.group(1).decode():
+    ok, err = await asyncio.get_running_loop().run_in_executor(None, _load_test, nxt, version)
+    if not ok:
         nxt.unlink(missing_ok=True)
-        raise RuntimeError("the new bridge does not load: " + admin_mask((chk.stderr or chk.stdout)[-600:]))
-    log.info("[admin] bridge update %s -> %s (%s), restarting", VERSION, m.group(1).decode(), ref)
-    asyncio.get_running_loop().call_later(2, lambda: os._exit(RESTART_CODE))
-    return {"from": VERSION, "to": m.group(1).decode(), "ref": ref,
+        raise RuntimeError("the new bridge does not load: " + err)
+    nxt.unlink(missing_ok=True)
+    _restart_into(new, version, ref)
+    return {"from": VERSION, "to": version, "ref": ref,
             "note": "the bridge restarts in a few seconds; if the new version does not start, run.cmd puts the old "
                     "one back. Check with bridge_log after a minute."}
+
+
+async def apply_staged_update() -> None:
+    """After approval on the setup page: install the packages (exact versions with hashes), test that the new bridge
+    loads, then restart into it. If it does not load, the previous packages are installed again."""
+    import subprocess
+    meta = staged_update()
+    if not meta:
+        return
+
+    def state(st: str, detail: str = "") -> None:
+        meta.update(state=st, detail=detail[-600:])
+        (STAGED / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    def pip(req: Path) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "--no-input",
+                               "--require-hashes", "--no-deps", "-r", str(req)],
+                              capture_output=True, text=True, timeout=900, cwd=str(HERE))
+    loop = asyncio.get_running_loop()
+    state("installing packages")
+    log.info("[admin] approved bridge update to %s: installing packages", meta["to"])
+    r = await loop.run_in_executor(None, pip, STAGED / "requirements.txt")
+    if r.returncode != 0:
+        state("failed", "pip: " + admin_mask(r.stderr or r.stdout))
+        log.warning("[admin] package install failed: %s", admin_mask((r.stderr or r.stdout)[-300:]))
+        return
+    test = STAGED / "stoeckie_bridge.py"
+    ok, err = await loop.run_in_executor(None, _load_test, test, meta["to"])
+    if not ok:
+        state("failed", "the new bridge does not load: " + err)
+        log.warning("[admin] new bridge does not load, previous packages back")
+        if (HERE / "requirements.txt").exists():
+            await loop.run_in_executor(None, pip, HERE / "requirements.txt")
+        return
+    import shutil
+    if (HERE / "requirements.txt").exists():
+        shutil.copyfile(HERE / "requirements.txt", HERE / "requirements.prev.txt")
+    shutil.copyfile(STAGED / "requirements.txt", HERE / "requirements.txt")
+    state("done")
+    _restart_into(test.read_bytes(), meta["to"], meta["ref"])
 
 
 def admin_mark_update_ok() -> None:
@@ -6753,7 +6868,8 @@ ADMIN_TOOLS = [
          "lines": {"type": "number"}, "match": {"type": "string"}}}},
     {"name": "bridge_update", "description": "Admin: update this bridge to bridge/stoeckie_bridge.py of a commit of "
      "smartthings-stoeckie-bridge (ref = commit id). Checked first; restarts the bridge; the old version comes back "
-     "if the new one does not start.", "inputSchema": {"type": "object", "properties": {"ref": {"type": "string"}},
+     "if the new one does not start. When the commit needs other Python packages (all at least 7 days old) the "
+     "update waits for the owner's approval on the setup page (needs_approval).", "inputSchema": {"type": "object", "properties": {"ref": {"type": "string"}},
                                                        "required": ["ref"]}},
 ]
 ADMIN_NAMES = {t["name"] for t in ADMIN_TOOLS}
@@ -7074,11 +7190,25 @@ def claude_setup_html(cfg: dict[str, Any]) -> str:
         ("Admin tools", "on" if admin_enabled(cfg) else "off"),
     ]
     tbl = "".join(f"<tr><td>{k}</td><td><b>{v}</b></td></tr>" for k, v in rows)
+    st_up = staged_update()
+    upd = ""
+    if st_up:
+        ch = "".join(f"<li>{html.escape(str(c['package']))}: {html.escape(str(c['from'] or 'new'))} &rarr; "
+                     f"{html.escape(str(c['to'] or 'removed'))}"
+                     f"{'' if c.get('age_days') is None else ' (released ' + str(c['age_days']) + ' days ago)'}</li>"
+                     for c in st_up.get("changes") or [])
+        busy = st_up.get("state") not in ("waiting", "failed")
+        upd = (f"<form method=\"post\" style=\"border:2px solid #c80;padding:10px\"><b>Bridge update waiting for your "
+               f"approval</b><br>{html.escape(st_up['from'])} &rarr; {html.escape(st_up['to'])} (commit "
+               f"{html.escape(st_up['ref'][:12])}), other Python packages:<ul>{ch}</ul>State: "
+               f"<b>{html.escape(st_up.get('state', ''))}</b> {html.escape(st_up.get('detail', ''))}<br>"
+               f"<button name=\"act\" value=\"update_ok\" {'disabled' if busy else ''}>Approve and install</button> "
+               f"<button name=\"act\" value=\"update_no\">Reject</button></form>")
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Claude access</title>
 <meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font:15px system-ui,sans-serif;max-width:640px;
 margin:32px auto;padding:0 16px}}td{{padding:4px 12px 4px 0}}input,select{{font:inherit;padding:8px;margin:4px 0}}
 form{{margin:14px 0;padding-top:10px;border-top:1px solid #ccc}}</style></head><body>
-<p><a href="/setup">Back to setup</a></p><h2>Claude on web and phone</h2><table>{tbl}</table>
+<p><a href="/setup">Back to setup</a></p><h2>Claude on web and phone</h2>{upd}<table>{tbl}</table>
 <form method="post"><input type="hidden" name="act" value="password"><b>Password for Claude</b><br>
 <input type="password" name="pw" minlength="12" autocomplete="new-password" required placeholder="at least 12 characters">
 <input type="password" name="pw2" minlength="12" autocomplete="new-password" required placeholder="again">
@@ -7114,6 +7244,15 @@ async def claude_setup_post(form, cfg: dict[str, Any]) -> str | None:
         c["locks"] = v if v in ("full", "lock", "read") else "full"
         save_config(cfg)
         log.info("[setup] Claude locks: %s", c["locks"])
+    elif act == "update_ok":
+        st_up = staged_update()
+        if st_up and st_up.get("state") in ("waiting", "failed"):
+            log.info("[setup] bridge update to %s approved", st_up.get("to"))
+            asyncio.get_running_loop().create_task(apply_staged_update())
+    elif act == "update_no":
+        import shutil
+        shutil.rmtree(STAGED, ignore_errors=True)
+        log.info("[setup] staged bridge update rejected")
     elif act == "admin":
         c.setdefault("admin", {})["enabled"] = str(form.get("admin")) == "on"
         save_config(cfg)
