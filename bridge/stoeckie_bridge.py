@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-19n"
+VERSION = "2026-11-19o"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -7087,6 +7087,25 @@ async def admin_capability(a: dict[str, Any]) -> dict[str, Any]:
             "note": "the app may need a few minutes (or a restart) before a changed presentation shows"}
 
 
+ST_GET_OK = re.compile(
+    r"^/(devices/[0-9a-f-]{36}(/status|/health|/presentation)?"
+    r"|presentation(/deviceconfig)?\?[A-Za-z0-9=&._%-]{1,200}"
+    r"|capabilities/[A-Za-z0-9]+\.[A-Za-z0-9]+/\d+(/presentation|/i18n/[a-z]{2})?"
+    r"|deviceprofiles/[0-9a-f-]{36})$")
+
+
+async def admin_st_get(a: dict[str, Any]) -> Any:
+    """Read only: a few SmartThings API paths that explain how the app shows a device."""
+    path = str(a.get("path") or "")
+    if not ST_GET_OK.match(path):
+        raise RuntimeError("path not allowed; allowed: /devices/<id>[/status|/health|/presentation], "
+                           "/presentation[/deviceconfig]?..., /capabilities/<ns.name>/<v>[/presentation|/i18n/<tag>], "
+                           "/deviceprofiles/<id>")
+    j = await admin_st_raw("GET", "https://api.smartthings.com" + path)
+    txt = admin_mask(json.dumps(j, ensure_ascii=False))
+    return json.loads(txt) if len(txt) < 60000 else {"truncated": txt[:60000]}
+
+
 ADMIN_TOOLS = [
     {"name": "admin_hubs", "description": "Admin: the SmartThings hubs of this home (name, id, local IP, firmware) and "
      "the Edge drivers installed on each (name, packageKey, version, driverId).", "inputSchema": _OBJ},
@@ -7118,6 +7137,11 @@ ADMIN_TOOLS = [
      "inputSchema": {"type": "object", "properties": {"repo": {"type": "string"}, "ref": {"type": "string"},
                      "name": {"type": "string"}, "path": {"type": "string"}, "namespace": {"type": "string"}},
                      "required": ["repo", "ref", "name"]}},
+    {"name": "st_get", "description": "Admin, read only: GET a SmartThings API path that explains how the app shows "
+     "a device: /devices/<id>, /devices/<id>/status, /devices/<id>/health, /devices/<id>/presentation, "
+     "/presentation?presentationId=..&manufacturerName=.., /presentation/deviceconfig?.., "
+     "/capabilities/<namespace.name>/<version>[/presentation|/i18n/<tag>], /deviceprofiles/<id>.",
+     "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
 ]
 ADMIN_NAMES = {t["name"] for t in ADMIN_TOOLS}
 
@@ -7144,6 +7168,8 @@ async def admin_tool(name: str, a: dict) -> Any:
         return await admin_bridge_update(a)
     if name == "capability_put":
         return await admin_capability(a)
+    if name == "st_get":
+        return await admin_st_get(a)
     raise ValueError(name)
 
 

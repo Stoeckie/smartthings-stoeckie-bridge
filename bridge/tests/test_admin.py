@@ -269,3 +269,21 @@ def test_capability_put_creates_and_updates(monkeypatch):
         asyncio.run(sb.admin_capability({"repo": "smartthings-irobot-roomba-local", "ref": "abcdef1", "name": "x.y"}))
     with pytest.raises(ValueError):
         asyncio.run(sb.admin_capability({"repo": "other-repo", "ref": "abcdef1", "name": "robotMission"}))
+
+
+def test_st_get_only_allowed_paths(monkeypatch):
+    seen = []
+
+    async def fake(method, url, data=None, ctype=None, body=None):
+        seen.append((method, url))
+        return {"ok": True}
+    monkeypatch.setattr(sb, "admin_st_raw", fake)
+    ok = ["/devices/231b8968-c689-42f2-86f0-bf3c080857b3", "/devices/231b8968-c689-42f2-86f0-bf3c080857b3/presentation",
+          "/presentation?presentationId=728c6ce2-7f98-33fd-9730-565f217d7eb3&manufacturerName=SmartThingsCommunity",
+          "/capabilities/silvervalley08660.applianceProgram/1/presentation"]
+    for p in ok:
+        assert asyncio.run(sb.admin_st_get({"path": p})) == {"ok": True}
+    assert all(m == "GET" for m, _ in seen)
+    for p in ["/devices", "/devices/x/commands", "/installedapps", "/capabilities/a.b/1/../../x", "//evil"]:
+        with pytest.raises(RuntimeError):
+            asyncio.run(sb.admin_st_get({"path": p}))
