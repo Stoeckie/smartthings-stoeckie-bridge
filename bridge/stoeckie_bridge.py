@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-19k"
+VERSION = "2026-11-19l"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -4670,8 +4670,8 @@ color:#fff}form+form{margin-top:6px;padding-top:6px;border-top:1px solid var(--l
 </style></head><body>
 <h1 id="top">Stoeckie Bridge <small>{version}</small></h1>
 <p class="intro">Everything you enter here is stored only locally, in config.json on this computer. Tap a part below to open its status and settings.</p>
-<p class="intro"><a href="/setup/claude">Claude on web and phone (SmartThings control)</a></p>
 {status}
+{claude_item}
 <h2 class="g">SmartThings</h2>
 <div class="card"><h3 id="hub">SmartThings hub</h3>
 {st_hub}
@@ -4847,6 +4847,12 @@ twice a day, for the Roomba driver on the hub. The robot itself is controlled lo
 <button type="submit">Save iRobot and connect</button></form>
 <p class="top"><a href="#top">Back to the overview</a></p></div>
 </body></html>"""
+SETUP_CSS = SETUP_HTML.split("<style>", 1)[1].split("</style>", 1)[0] + (
+    ".kv{display:flex;justify-content:space-between;gap:12px;padding:11px 0;border-bottom:1px solid var(--line);font-size:15px}"
+    ".kv:last-child{border-bottom:0}.kv span{color:var(--sub)}.card.warn{border:2px solid var(--warn)}"
+    "pre{white-space:pre-wrap;font-size:12px;background:var(--field);padding:10px;border-radius:12px}"
+    "button.sec{background:var(--field);color:var(--text)}button:disabled{opacity:.5}")
+
 
 
 def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> web.Application:
@@ -5227,6 +5233,7 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
         for anchor, block in blocks.items():
             page = page.replace("{st_" + anchor + "}", block)
         page = (page.replace("{version}", "version " + VERSION).replace("{status}", overview)
+                .replace("{claude_item}", claude_setup_item(load_config()))
                 .replace("{refresh}", '<meta http-equiv="refresh" content="10">' if pairing_open else "")
                 .replace("{pair_requests}", reqs)
                 .replace("{skoda_poll}", html.escape(str(k.get("poll_minutes", 10))))
@@ -7390,6 +7397,21 @@ def make_claude_app() -> web.Application:
     return app
 
 
+def claude_setup_item(cfg: dict[str, Any]) -> str:
+    """The Claude entry on the main setup page (same list style as the other parts)."""
+    c = claude_cfg(cfg)
+    st_up = staged_update()
+    if st_up and st_up.get("state") in ("waiting", "failed"):
+        summary, bad = "Bridge update waiting for your approval", True
+    else:
+        summary = ("Access on" if c.get("enabled") else "Access off") + (
+            ", admin tools on" if admin_enabled(cfg) else "")
+        bad = False
+    return ('<h2 class="g">Claude</h2><div class="list"><a class="item' + (" bad" if bad else "") +
+            '" href="/setup/claude"><span class="t"><b>Claude on web and phone</b><span>' + html.escape(summary) +
+            '</span></span><span class="go" aria-hidden="true">&#x203A;</span></a></div>')
+
+
 def claude_setup_html(cfg: dict[str, Any]) -> str:
     c = claude_cfg(cfg)
     s = c.get("st") or {}
@@ -7405,7 +7427,7 @@ def claude_setup_html(cfg: dict[str, Any]) -> str:
         ("Locks", html.escape(str(c.get("locks") or "full"))),
         ("Admin tools", "on" if admin_enabled(cfg) else "off"),
     ]
-    tbl = "".join(f"<tr><td>{k}</td><td><b>{v}</b></td></tr>" for k, v in rows)
+    kv = "".join(f'<div class="kv"><span>{k}</span><b>{v}</b></div>' for k, v in rows)
     st_up = staged_update()
     upd = ""
     if st_up:
@@ -7414,37 +7436,55 @@ def claude_setup_html(cfg: dict[str, Any]) -> str:
                      f"{'' if c.get('age_days') is None else ' (released ' + str(c['age_days']) + ' days ago)'}</li>"
                      for c in st_up.get("changes") or [])
         if st_up.get("run_tail_new"):
-            ch += ("<li>run.cmd, what runs after the bridge stops. Now:<pre style=\"white-space:pre-wrap;font-size:12px\">"
-                   f"{html.escape(st_up.get('run_tail_old') or '')}</pre>New:<pre style=\"white-space:pre-wrap;"
-                   f"font-size:12px\">{html.escape(st_up['run_tail_new'])}</pre></li>")
+            ch += ("<li>run.cmd, what runs after the bridge stops. Now:"
+                   f"<pre>{html.escape(st_up.get('run_tail_old') or '')}</pre>New:"
+                   f"<pre>{html.escape(st_up['run_tail_new'])}</pre></li>")
         busy = st_up.get("state") not in ("waiting", "failed")
-        upd = (f"<form method=\"post\" style=\"border:2px solid #c80;padding:10px\"><b>Bridge update waiting for your "
-               f"approval</b><br>{html.escape(st_up['from'])} &rarr; {html.escape(st_up['to'])} (commit "
-               f"{html.escape(st_up['ref'][:12])}), changes:<ul>{ch}</ul>State: "
-               f"<b>{html.escape(st_up.get('state', ''))}</b> {html.escape(st_up.get('detail', ''))}<br>"
-               f"<button name=\"act\" value=\"update_ok\" {'disabled' if busy else ''}>Approve and install</button> "
-               f"<button name=\"act\" value=\"update_no\">Reject</button></form>")
-    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Claude access</title>
-<meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font:15px system-ui,sans-serif;max-width:640px;
-margin:32px auto;padding:0 16px}}td{{padding:4px 12px 4px 0}}input,select{{font:inherit;padding:8px;margin:4px 0}}
-form{{margin:14px 0;padding-top:10px;border-top:1px solid #ccc}}</style></head><body>
-<p><a href="/setup">Back to setup</a></p><h2>Claude on web and phone</h2>{upd}<table>{tbl}</table>
-<form method="post"><input type="hidden" name="act" value="password"><b>Password for Claude</b><br>
-<input type="password" name="pw" minlength="12" autocomplete="new-password" required placeholder="at least 12 characters">
-<input type="password" name="pw2" minlength="12" autocomplete="new-password" required placeholder="again">
-<br><button type="submit">Save password and switch Claude access on</button></form>
-<form method="post"><input type="hidden" name="act" value="st"><b>SmartThings</b><br>
-<button type="submit" {'disabled' if not s.get('client_id') else ''}>Sign in at SmartThings</button></form>
-<form method="post"><input type="hidden" name="act" value="locks"><b>Locks</b><br><select name="locks">
-{''.join(f'<option value="{v}"{" selected" if (c.get("locks") or "full") == v else ""}>{l}</option>' for v, l in (("full", "lock and unlock"), ("lock", "lock only"), ("read", "read only")))}
-</select> <button type="submit">Save</button></form>
-<form method="post"><input type="hidden" name="act" value="admin"><b>Admin tools</b> (hub log, update Edge drivers
-and this bridge from a GitHub commit of {html.escape(", ".join(ADMIN_OWNERS))}, bridge log; no free commands)<br>
-<select name="admin"><option value="off"{" selected" if not admin_enabled(cfg) else ""}>off</option>
-<option value="on"{" selected" if admin_enabled(cfg) else ""}>on</option></select> <button type="submit">Save</button></form>
-<form method="post"><input type="hidden" name="act" value="revoke"><b>Sign Claude out</b><br>
+        upd = (f'<div class="card warn"><h3>Bridge update waiting for your approval</h3>'
+               f"<p>{html.escape(st_up['from'])} &rarr; {html.escape(st_up['to'])} (commit "
+               f"{html.escape(st_up['ref'][:12])}), changes:</p><ul>{ch}</ul>"
+               f"<p>State: <b>{html.escape(st_up.get('state', ''))}</b> {html.escape(st_up.get('detail', ''))}</p>"
+               f'<form method="post"><button name="act" value="update_ok" {"disabled" if busy else ""}>'
+               f'Approve and install</button> <button class="sec" name="act" value="update_no">Reject</button>'
+               f"</form></div>")
+    lock_opts = "".join(f'<option value="{v}"{" selected" if (c.get("locks") or "full") == v else ""}>{l}</option>'
+                        for v, l in (("full", "lock and unlock"), ("lock", "lock only"), ("read", "read only")))
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Claude access</title>
+<style>{SETUP_CSS}</style></head><body>
+<p class="intro"><a href="/setup">&#x2039; Stoeckie Bridge setup</a></p>
+<h1 id="top">Claude <small>version {VERSION}</small></h1>
+<p class="intro">Claude on web and phone controls SmartThings through this bridge. Everything here is stored only
+locally, in config.json on this computer.</p>
+{upd}
+<h2 class="g">Status</h2>
+<div class="list">{kv}</div>
+<h2 class="g">Access</h2>
+<div class="card"><h3>Password for Claude</h3>
+<form method="post"><input type="hidden" name="act" value="password">
+<label>Password</label><input type="password" name="pw" minlength="12" autocomplete="new-password" required
+placeholder="at least 12 characters">
+<label>Again</label><input type="password" name="pw2" minlength="12" autocomplete="new-password" required>
+<button type="submit">Save password and switch Claude access on</button></form></div>
+<div class="card"><h3>SmartThings</h3><p>{html.escape(st_state[:1].upper() + st_state[1:])}.</p>
+<form method="post"><input type="hidden" name="act" value="st">
+<button type="submit" {'disabled' if not s.get('client_id') else ''}>Sign in at SmartThings</button></form></div>
+<h2 class="g">What Claude may do</h2>
+<div class="card"><h3>Locks</h3>
+<form method="post"><input type="hidden" name="act" value="locks"><select name="locks">{lock_opts}</select>
+<button type="submit">Save</button></form></div>
+<div class="card"><h3>Admin tools</h3><p>Hub log, update Edge drivers, capabilities and this bridge from a GitHub
+commit of {html.escape(", ".join(ADMIN_OWNERS))}, bridge log. No free commands.</p>
+<form method="post"><input type="hidden" name="act" value="admin"><select name="admin">
+<option value="off"{" selected" if not admin_enabled(cfg) else ""}>off</option>
+<option value="on"{" selected" if admin_enabled(cfg) else ""}>on</option></select>
+<button type="submit">Save</button></form></div>
+<h2 class="g">Sign out</h2>
+<div class="card"><form method="post"><input type="hidden" name="act" value="revoke">
 <button type="submit">End all Claude sessions</button></form>
-<form method="post"><input type="hidden" name="act" value="off"><button type="submit">Switch Claude access off</button></form>
+<form method="post"><input type="hidden" name="act" value="off">
+<button class="sec" type="submit">Switch Claude access off</button></form>
+<p class="top"><a href="/setup">Back to the bridge setup</a></p></div>
 </body></html>"""
 
 
