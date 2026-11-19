@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-19f"
+VERSION = "2026-11-19g"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -6741,6 +6741,74 @@ def staged_update() -> dict[str, Any] | None:
     return meta
 
 
+RUN_TAIL = "bridge/run-tail.cmd"
+_RUN_PY = re.compile(rb'(?m)^"[^"\r\n]*python\.exe" "[^"\r\n]*stoeckie_bridge\.py"[^\r\n]*\r?\n')
+
+
+def run_split(raw: bytes) -> tuple[bytes, bytes] | None:
+    """run.cmd = head (own to this pc, up to and including the line that starts the bridge) + tail (what runs after
+    the bridge stops). While the bridge runs, cmd.exe waits at a byte offset just after that line and reads the rest
+    of the file again when the bridge stops, so only the tail may change: the head stays byte for byte the same."""
+    m = _RUN_PY.search(raw)
+    return (raw[:m.end()], raw[m.end():]) if m else None
+
+
+def run_tail_check(tail: bytes) -> bytes:
+    """The new tail from the repo, as CRLF lines; refuses what would break the head/tail rule."""
+    try:
+        text = tail.decode("ascii")
+    except UnicodeDecodeError:
+        raise RuntimeError("run-tail.cmd is not plain ASCII") from None
+    lines = [ln.rstrip() for ln in text.replace("\r", "").split("\n")]
+    while lines and not lines[-1]:
+        lines.pop()
+    out = ("\r\n".join(lines) + "\r\n").encode("ascii")
+    if len(out) > 4096 or not lines:
+        raise RuntimeError("run-tail.cmd is empty or too long")
+    if _RUN_PY.search(out) or "goto loop" not in text:
+        raise RuntimeError("run-tail.cmd may not start the bridge itself and must go back to :loop")
+    return out
+
+
+def run_tail_now() -> bytes | None:
+    try:
+        sp = run_split((HERE / "run.cmd").read_bytes())
+    except OSError:
+        return None
+    return sp[1] if sp else None
+
+
+def run_tail_write(tail: bytes) -> None:
+    """Swap the tail of run.cmd (the head stays the same bytes). Previous run.cmd kept as run.prev.cmd."""
+    raw = (HERE / "run.cmd").read_bytes()
+    sp = run_split(raw)
+    if not sp:
+        raise RuntimeError("run.cmd has no line that starts the bridge")
+    (HERE / "run.prev.cmd").write_bytes(raw)
+    tmp = HERE / "run.cmd.tmp"
+    tmp.write_bytes(sp[0] + tail)
+    os.replace(tmp, HERE / "run.cmd")
+
+
+async def _pkg_changes(req_old: bytes, req_new: bytes) -> list[dict[str, Any]]:
+    old_p, new_p = _req_pins(req_old), _req_pins(req_new)
+    changes = []
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+        for name in sorted(set(old_p) | set(new_p)):
+            if old_p.get(name) == new_p.get(name):
+                continue
+            age = await _pkg_age_days(session, name, new_p[name]) if name in new_p else None
+            changes.append({"package": name, "from": old_p.get(name), "to": new_p.get(name),
+                            "age_days": None if age is None else round(age, 1)})
+    young = [c for c in changes if c["to"] and (c["age_days"] is None or c["age_days"] < PKG_MIN_AGE_DAYS)]
+    if young:
+        raise RuntimeError("packages younger than 7 days (or not found on PyPI): " + ", ".join(
+            f"{c['package']} {c['to']}" for c in young))
+    if b"--hash=sha256:" not in req_new:
+        raise RuntimeError("the new requirements.txt has no hashes")
+    return changes
+
+
 async def admin_bridge_update(a: dict[str, Any]) -> dict[str, Any]:
     ref = admin_ref(a.get("ref"))
     if not (HERE / "run.cmd").exists() or b"stoeckie_bridge.next.py" not in (HERE / "run.cmd").read_bytes():
@@ -6755,31 +6823,38 @@ async def admin_bridge_update(a: dict[str, Any]) -> dict[str, Any]:
     version = m.group(1).decode()
     req_new = files.get("bridge/requirements.txt")
     req_old = (HERE / "requirements.txt").read_bytes() if (HERE / "requirements.txt").exists() else b""
-    if req_new is not None and req_new.replace(b"\r", b"") != req_old.replace(b"\r", b""):
-        # other packages: only after DS approves on the setup page (from a phone on the own network is enough)
-        old_p, new_p = _req_pins(req_old), _req_pins(req_new)
+    req_changed = req_new is not None and req_new.replace(b"\r", b"") != req_old.replace(b"\r", b"")
+    tail_new = files.get(RUN_TAIL)
+    tail_old = run_tail_now()
+    tail_changed = False
+    if tail_new is not None:
+        tail_new = run_tail_check(tail_new)
+        if tail_old is None:
+            raise RuntimeError("run.cmd here has no line that starts the bridge; run install-remote once from a pc")
+        tail_changed = tail_new.replace(b"\r", b"").strip() != tail_old.replace(b"\r", b"").strip()
+    if req_changed or tail_changed:
+        # other packages or a new run.cmd: only after DS approves on the setup page (a phone on the own network will do)
         changes = []
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-            for name in sorted(set(old_p) | set(new_p)):
-                if old_p.get(name) == new_p.get(name):
-                    continue
-                age = await _pkg_age_days(session, name, new_p[name]) if name in new_p else None
-                changes.append({"package": name, "from": old_p.get(name), "to": new_p.get(name),
-                                "age_days": None if age is None else round(age, 1)})
-        young = [c for c in changes if c["to"] and (c["age_days"] is None or c["age_days"] < PKG_MIN_AGE_DAYS)]
-        if young:
-            raise RuntimeError("packages younger than 7 days (or not found on PyPI): " + ", ".join(
-                f"{c['package']} {c['to']}" for c in young))
-        if b"--hash=sha256:" not in req_new:
-            raise RuntimeError("the new requirements.txt has no hashes")
+        if req_changed:
+            changes = await _pkg_changes(req_old, req_new)
         STAGED.mkdir(parents=True, exist_ok=True)
         (STAGED / "stoeckie_bridge.py").write_bytes(new)
-        (STAGED / "requirements.txt").write_bytes(req_new)
-        meta = {"t": time.time(), "ref": ref, "from": VERSION, "to": version, "changes": changes, "state": "waiting"}
+        (STAGED / "requirements.txt").unlink(missing_ok=True)
+        (STAGED / "run-tail.cmd").unlink(missing_ok=True)
+        if req_changed:
+            (STAGED / "requirements.txt").write_bytes(req_new)
+        if tail_changed:
+            (STAGED / "run-tail.cmd").write_bytes(tail_new)
+        meta = {"t": time.time(), "ref": ref, "from": VERSION, "to": version, "changes": changes, "state": "waiting",
+                "run_tail_old": tail_old.decode("ascii", "replace") if tail_changed else None,
+                "run_tail_new": tail_new.decode("ascii") if tail_changed else None}
         (STAGED / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
-        log.info("[admin] bridge update %s -> %s (%s) needs other packages: waiting for approval on the setup page "
-                 "(%s)", VERSION, version, ref, ", ".join(f"{c['package']} {c['from']}->{c['to']}" for c in changes))
+        what = ([", ".join(f"{c['package']} {c['from']}->{c['to']}" for c in changes)] if changes else []) + (
+            ["new run.cmd tail"] if tail_changed else [])
+        log.info("[admin] bridge update %s -> %s (%s) waiting for approval on the setup page (%s)",
+                 VERSION, version, ref, "; ".join(what))
         return {"needs_approval": True, "from": VERSION, "to": version, "ref": ref, "package_changes": changes,
+                "run_cmd_change": tail_changed,
                 "note": f"approve on the bridge setup page, Claude part (/setup/claude), within {STAGE_HOURS} hours"}
     nxt = HERE / "stoeckie_bridge.next.py"
     nxt.write_bytes(new)
@@ -6811,27 +6886,40 @@ async def apply_staged_update() -> None:
                                "--require-hashes", "--no-deps", "-r", str(req)],
                               capture_output=True, text=True, timeout=900, cwd=str(HERE))
     loop = asyncio.get_running_loop()
-    state("installing packages")
-    log.info("[admin] approved bridge update to %s: installing packages", meta["to"])
-    r = await loop.run_in_executor(None, pip, STAGED / "requirements.txt")
-    if r.returncode != 0:
-        state("failed", "pip: " + admin_mask(r.stderr or r.stdout))
-        log.warning("[admin] package install failed: %s", admin_mask((r.stderr or r.stdout)[-300:]))
-        return
+    req = STAGED / "requirements.txt"
+    if req.exists():
+        state("installing packages")
+        log.info("[admin] approved bridge update to %s: installing packages", meta["to"])
+        r = await loop.run_in_executor(None, pip, req)
+        if r.returncode != 0:
+            state("failed", "pip: " + admin_mask(r.stderr or r.stdout))
+            log.warning("[admin] package install failed: %s", admin_mask((r.stderr or r.stdout)[-300:]))
+            return
     test = STAGED / "stoeckie_bridge.py"
     ok, err = await loop.run_in_executor(None, _load_test, test, meta["to"])
     if not ok:
         state("failed", "the new bridge does not load: " + err)
-        log.warning("[admin] new bridge does not load, previous packages back")
-        if (HERE / "requirements.txt").exists():
+        log.warning("[admin] new bridge does not load%s", ", previous packages back" if req.exists() else "")
+        if req.exists() and (HERE / "requirements.txt").exists():
             await loop.run_in_executor(None, pip, HERE / "requirements.txt")
         return
     import shutil
-    if (HERE / "requirements.txt").exists():
-        shutil.copyfile(HERE / "requirements.txt", HERE / "requirements.prev.txt")
-    shutil.copyfile(STAGED / "requirements.txt", HERE / "requirements.txt")
+    if req.exists():
+        if (HERE / "requirements.txt").exists():
+            shutil.copyfile(HERE / "requirements.txt", HERE / "requirements.prev.txt")
+        shutil.copyfile(req, HERE / "requirements.txt")
+    tail = STAGED / "run-tail.cmd"
+    if tail.exists():
+        try:
+            run_tail_write(tail.read_bytes())
+        except (OSError, RuntimeError) as e:
+            state("failed", f"run.cmd: {e}")
+            log.warning("[admin] run.cmd not changed: %s", e)
+            return
+        log.info("[admin] run.cmd tail replaced (previous in run.prev.cmd)")
     state("done")
-    _restart_into(test.read_bytes(), meta["to"], meta["ref"])
+    if meta["to"] != VERSION or req.exists():
+        _restart_into(test.read_bytes(), meta["to"], meta["ref"])
 
 
 def admin_mark_update_ok() -> None:
@@ -7197,10 +7285,14 @@ def claude_setup_html(cfg: dict[str, Any]) -> str:
                      f"{html.escape(str(c['to'] or 'removed'))}"
                      f"{'' if c.get('age_days') is None else ' (released ' + str(c['age_days']) + ' days ago)'}</li>"
                      for c in st_up.get("changes") or [])
+        if st_up.get("run_tail_new"):
+            ch += ("<li>run.cmd, what runs after the bridge stops. Now:<pre style=\"white-space:pre-wrap;font-size:12px\">"
+                   f"{html.escape(st_up.get('run_tail_old') or '')}</pre>New:<pre style=\"white-space:pre-wrap;"
+                   f"font-size:12px\">{html.escape(st_up['run_tail_new'])}</pre></li>")
         busy = st_up.get("state") not in ("waiting", "failed")
         upd = (f"<form method=\"post\" style=\"border:2px solid #c80;padding:10px\"><b>Bridge update waiting for your "
                f"approval</b><br>{html.escape(st_up['from'])} &rarr; {html.escape(st_up['to'])} (commit "
-               f"{html.escape(st_up['ref'][:12])}), other Python packages:<ul>{ch}</ul>State: "
+               f"{html.escape(st_up['ref'][:12])}), changes:<ul>{ch}</ul>State: "
                f"<b>{html.escape(st_up.get('state', ''))}</b> {html.escape(st_up.get('detail', ''))}<br>"
                f"<button name=\"act\" value=\"update_ok\" {'disabled' if busy else ''}>Approve and install</button> "
                f"<button name=\"act\" value=\"update_no\">Reject</button></form>")

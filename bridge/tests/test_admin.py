@@ -164,3 +164,58 @@ def test_approved_update_installs_tests_and_restarts(tmp_path, monkeypatch):
     assert (tmp_path / "requirements.txt").read_bytes() == b"x==1 --hash=sha256:aa\n"
     assert (tmp_path / "requirements.prev.txt").read_bytes() == b"x==0 --hash=sha256:bb\n"
     assert sb.staged_update()["state"] == "done"
+
+
+RUN_HEAD = (b'@echo off\r\ncd /d "%~dp0"\r\nset STBRIDGE_SETUP_ALLOW=1.2.3.4\r\n:loop\r\n'
+            b'if exist stoeckie_bridge.next.py (copy /y a b >nul)\r\n'
+            b'"%~dp0venv\\Scripts\\python.exe" "%~dp0stoeckie_bridge.py"\r\n')
+RUN_TAIL_OLD = b"set rc=%errorlevel%\r\nif %rc%==75 goto loop\r\nexit /b %rc%\r\n"
+
+
+def test_run_cmd_tail_waits_for_approval_and_keeps_head(tmp_path, monkeypatch):
+    monkeypatch.setattr(sb, "HERE", tmp_path)
+    monkeypatch.setattr(sb, "STAGED", tmp_path / "staged")
+    (tmp_path / "run.cmd").write_bytes(RUN_HEAD + RUN_TAIL_OLD)
+    tail_repo = (Path(__file__).parent.parent / "run-tail.cmd").read_bytes()
+
+    async def fake_tree(owner, repo, ref):
+        return {"bridge/stoeckie_bridge.py": b'VERSION = "2099-01-01a"\n', "bridge/run-tail.cmd": tail_repo}
+    monkeypatch.setattr(sb, "admin_fetch_tree", fake_tree)
+    r = asyncio.run(sb.admin_bridge_update({"ref": "abcdef1"}))
+    assert r["needs_approval"] and r["run_cmd_change"] and r["package_changes"] == []
+    html = sb.claude_setup_html({"claude": {}})
+    assert "run.cmd" in html and "start again in 30 s" in html
+    monkeypatch.setattr(sb, "_load_test", lambda path, want: (True, ""))
+    restarted = []
+    monkeypatch.setattr(sb, "_restart_into", lambda new, v, ref: restarted.append(v))
+    asyncio.run(sb.apply_staged_update())
+    now = (tmp_path / "run.cmd").read_bytes()
+    assert now.startswith(RUN_HEAD) and now[len(RUN_HEAD):] == tail_repo.replace(b"\r", b"").replace(b"\n", b"\r\n")
+    assert (tmp_path / "run.prev.cmd").read_bytes() == RUN_HEAD + RUN_TAIL_OLD
+    assert restarted == ["2099-01-01a"] and sb.staged_update()["state"] == "done"
+    # same tail again: no approval needed
+    (tmp_path / "stoeckie_bridge.next.py").unlink(missing_ok=True)
+    r = asyncio.run(sb.admin_bridge_update({"ref": "abcdef1"}))
+    assert "needs_approval" not in r
+
+
+def test_run_tail_rules():
+    with pytest.raises(RuntimeError):
+        sb.run_tail_check(b'"%~dp0venv\\Scripts\\python.exe" "%~dp0stoeckie_bridge.py"\r\ngoto loop\r\n')
+    with pytest.raises(RuntimeError):
+        sb.run_tail_check(b"exit /b 0\r\n")
+    assert sb.run_tail_check(b"goto loop\n\n") == b"goto loop\r\n"
+    assert sb.run_split(b"no python line") is None
+
+
+def test_installer_tail_matches_repo_tail():
+    here = Path(__file__).parent.parent
+    ps1 = (here / "install-remote.ps1").read_text(encoding="utf-8")
+    i = ps1.index('$run += "`"%~dp0venv\\Scripts\\python.exe`"')
+    lines = []
+    for ln in ps1[i:].splitlines()[1:]:
+        ln = ln.strip()
+        if not ln.startswith('$run += "'):
+            break
+        lines.append(ln[len('$run += "'):-1].replace("`\"", '"'))
+    assert lines == (here / "run-tail.cmd").read_text().replace("\r", "").strip().split("\n")
