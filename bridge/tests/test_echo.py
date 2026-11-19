@@ -234,3 +234,33 @@ def test_history_wait_and_rate_limit():
     assert sb.echo_too_many(AlexapyTooManyRequestsError("x"))
     assert sb.echo_too_many(RuntimeError("Too Many Requests"))
     assert not sb.echo_too_many(RuntimeError("timeout"))
+
+
+def test_history_waits_without_csrf_token(monkeypatch):
+    import alexapy
+    calls = []
+
+    async def fake_hist(login, **kw):
+        calls.append(login.csrf_token)
+        return []
+    monkeypatch.setattr(alexapy.AlexaAPI, "get_customer_history_records", staticmethod(fake_hist))
+
+    class Login:
+        csrf_token = None
+        csrf_token_created_at = 0
+        give = None
+
+        async def get_csrf_token(self):
+            if self.give:
+                self.csrf_token, self.csrf_token_created_at = self.give, int(sb.time.time())
+            return self.give
+    src = sb.EchoCloud({"echo": {}})
+    src.login = Login()
+    asyncio.run(src._fetch_history())
+    assert calls == [] and src.csrf_retry > sb.time.time()      # no token: no request with a None header
+    asyncio.run(src._fetch_history())
+    assert calls == []                                          # waits a minute
+    src.csrf_retry = 0
+    src.login.give = "tok"
+    asyncio.run(src._fetch_history())
+    assert calls == ["tok"]

@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-19l"
+VERSION = "2026-11-19m"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -1508,6 +1508,18 @@ class EchoCloud:
     async def _fetch_history(self) -> None:
         """Newest spoken command per Echo from the Alexa voice history (the text is never logged)."""
         from alexapy import AlexaAPI
+        # The voice history needs an anti-CSRF token from an Amazon page; alexapy sends None as a header when that
+        # page gives none (TypeError 'Cannot serialize non-str key None'). Get it here, and wait a minute when
+        # Amazon gives none; the next try still covers the last 10 minutes, so no command is lost.
+        now = time.time()
+        if now < getattr(self, "csrf_retry", 0):
+            return
+        made = getattr(self.login, "csrf_token_created_at", 0) or 0
+        if not getattr(self.login, "csrf_token", None) or now - made > 23 * 3600:
+            if not await self.login.get_csrf_token():
+                self.csrf_retry = now + 60
+                log.warning("[echo] voice history: Amazon gave no CSRF token, next try in 1 min")
+                return
         start = int((time.time() - (600 if self.last_ts else 86400)) * 1000)
         recs = await AlexaAPI.get_customer_history_records(self.login, start_time=start, max_record_size=20)
         if not recs:
