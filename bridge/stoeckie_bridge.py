@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-19m"
+VERSION = "2026-11-19n"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -4678,13 +4678,13 @@ color:#fff}.step{border:1px solid var(--line);border-radius:16px;padding:14px 16
 .step.off{opacity:.55}.step.done summary b::after{content:"  \\2713 done (tap to change)";color:var(--accent);font-weight:400}
 summary{cursor:pointer}.hint{color:var(--sub);font-size:13px}
 a.btn{display:inline-block;margin-top:8px;padding:12px 22px;font-weight:600;border-radius:999px;background:var(--accent);
-color:#fff}form+form{margin-top:6px;padding-top:6px;border-top:1px solid var(--line)}.top{font-size:13px;margin:14px 0 0}
+color:#fff}.sect{font-size:22px;margin:44px 4px -10px}form+form{margin-top:6px;padding-top:6px;border-top:1px solid var(--line)}.top{font-size:13px;margin:14px 0 0}
 </style></head><body>
 <h1 id="top">Stoeckie Bridge <small>{version}</small></h1>
 <p class="intro">Everything you enter here is stored only locally, in config.json on this computer. Tap a part below to open its status and settings.</p>
 {status}
-{claude_item}
-<h2 class="g">SmartThings</h2>
+<h2 class="sect">Settings per part</h2>
+<h2 class="g">Connections</h2>
 <div class="card"><h3 id="hub">SmartThings hub</h3>
 {st_hub}
 <p>Until a hub is paired the bridge does not serve your devices on the LAN. After pairing it only accepts signed
@@ -4731,66 +4731,6 @@ local. Keys stay in config.json and are never shown here.</p>
 <form method="post"><input type="hidden" name="section" value="tuya_fetch">
 <button type="submit">Fetch devices again (new device, new key after a reset)</button></form>
 <p class="top"><a href="#top">Back to the overview</a></p></div>
-<h2 class="g">Appliances</h2>
-<div class="card"><h3 id="aeg">AEG / Electrolux dryer</h3>
-{st_aeg}
-<p>On <b>developer.electrolux.one</b> (sign in with your AEG / Electrolux account) create an API key and generate
-an access token and a refresh token.</p>
-<form method="post"><input type="hidden" name="section" value="aeg">
-<label>API key</label><input name="api_key" autocomplete="off" required>
-<label>Access token</label><textarea name="access_token" required></textarea>
-<label>Refresh token</label><textarea name="refresh_token" required></textarea>
-<button type="submit">Save AEG and connect</button></form>
-<p class="top"><a href="#top">Back to the overview</a></p></div>
-<div class="card"><h3 id="homeconnect">Home Connect dishwasher and oven (local, optional)</h3>
-{st_homeconnect}
-<p>Set up with the profile files of the Home Connect Profile Downloader in the folder homeconnect next to the bridge (see the README); nothing to enter here.</p>
-<p class="top"><a href="#top">Back to the overview</a></p></div>
-<div class="card"><h3 id="samsung">Samsung washer (local, experimental)</h3>
-{st_samsung}
-<p>Set up in config.json (see the README); nothing to enter here.</p>
-<p class="top"><a href="#top">Back to the overview</a></p></div>
-<h2 class="g">Car</h2>
-<div class="card"><h3 id="skoda">Škoda</h3>
-{st_skoda}
-<p>In the MyŠkoda app (8.16 or newer) create an API key: <b>Settings, Smart Home, API keys</b>, and choose your car.
-The VIN (17 characters) is shown in the app with the car and on the registration document.</p>
-<form method="post"><input type="hidden" name="section" value="skoda">
-<label>API key</label><input name="api_key" autocomplete="off" required>
-<label>VIN</label><input name="vin" maxlength="17" minlength="17" required>
-<button type="submit">Save Škoda and connect</button></form>
-<form method="post"><input type="hidden" name="section" value="skoda_settings">
-<label>Update the car every (minutes, at least 5; Škoda allows 20 requests per hour)</label>
-<input name="poll_minutes" type="number" min="5" max="60" value="{skoda_poll}" required>
-<label>Temperature for climate on (°C)</label><input name="climate_temp" value="{skoda_temp}" required>
-<button type="submit">Save settings</button></form>
-<p>These settings are also available with the car in the SmartThings app (Settings).</p>
-<p class="top"><a href="#top">Back to the overview</a></p></div>
-<h2 class="g">Network</h2>
-<div class="card"><h3 id="unifi">UniFi firewall switches (local, optional)</h3>
-{st_unifi}
-<p>A switch in SmartThings for a firewall policy of your UniFi console, for example to let devices that are normally
-kept off the internet reach it for a while (to use their own app). On = a block policy paused (an allow policy:
-enabled). After the set minutes the bridge puts the policy back by itself. Only on your own network: the bridge talks
-to the console directly.</p>
-<p>Make the API key in UniFi Network: <b>Settings, Control Plane, Integrations, Create API Key</b> (keep the
-description short). The key has the rights of the user who makes it: use a local user with only the Network
-application, no access from the cloud. {unifi_saved}</p>
-<form method="post"><input type="hidden" name="section" value="unifi">
-<label>Console address (IP)</label><input name="host" value="{unifi_host}" placeholder="192.168.1.1" required>
-<label>API key</label><input name="api_key" type="password" autocomplete="off" required>
-<label>Site (empty = default)</label><input name="site" value="{unifi_site}">
-<button type="submit">Save UniFi and connect</button></form>
-{unifi_switches}
-<form method="post"><input type="hidden" name="section" value="unifi_add">
-<label>Add a switch for the policy</label><select name="id">{unifi_options}</select>
-<label>Back to normal after (minutes, 0 = never)</label><input name="minutes" type="number" min="0" max="1440" value="60" required>
-<label>Name in SmartThings (empty = UniFi + the policy name)</label><input name="name" maxlength="50">
-<button type="submit">Add switch</button></form>
-<form method="post"><input type="hidden" name="section" value="unifi_trust">
-<p class="hint">The console certificate is pinned when the key is saved. Renewed it yourself? Trust it again.</p>
-<button type="submit">Trust the console certificate again</button></form>
-<p class="top"><a href="#top">Back to the overview</a></p></div>
 <h2 class="g">Home</h2>
 <div class="card"><h3 id="velux">VELUX ACTIVE departure mode (optional)</h3>
 {st_velux}
@@ -4827,7 +4767,36 @@ Open-Meteo everywhere else. Also available on the Buienradar device in SmartThin
 <label>Rain from (mm/h)</label><input name="threshold" value="{rain_thr}">
 <button type="submit">Save rain radar</button></form>
 <p class="top"><a href="#top">Back to the overview</a></p></div>
-<h2 class="g">Voice and helpers</h2>
+<h2 class="g">Appliances</h2>
+<div class="card"><h3 id="aeg">AEG / Electrolux dryer</h3>
+{st_aeg}
+<p>On <b>developer.electrolux.one</b> (sign in with your AEG / Electrolux account) create an API key and generate
+an access token and a refresh token.</p>
+<form method="post"><input type="hidden" name="section" value="aeg">
+<label>API key</label><input name="api_key" autocomplete="off" required>
+<label>Access token</label><textarea name="access_token" required></textarea>
+<label>Refresh token</label><textarea name="refresh_token" required></textarea>
+<button type="submit">Save AEG and connect</button></form>
+<p class="top"><a href="#top">Back to the overview</a></p></div>
+<div class="card"><h3 id="homeconnect">Home Connect dishwasher and oven (local, optional)</h3>
+{st_homeconnect}
+<p>Set up with the profile files of the Home Connect Profile Downloader in the folder homeconnect next to the bridge (see the README); nothing to enter here.</p>
+<p class="top"><a href="#top">Back to the overview</a></p></div>
+<div class="card"><h3 id="samsung">Samsung washer (local, experimental)</h3>
+{st_samsung}
+<p>Set up in config.json (see the README); nothing to enter here.</p>
+<p class="top"><a href="#top">Back to the overview</a></p></div>
+<div class="card"><h3 id="irobot">iRobot favorites (optional)</h3>
+{st_irobot}
+<p>Email and password of the iRobot app. The bridge only reads the names and rooms of your favorites,
+twice a day, for the Roomba driver on the hub. The robot itself is controlled locally.</p>
+<form method="post"><input type="hidden" name="section" value="irobot">
+<label>Email</label><input name="username" type="email" autocomplete="off" required>
+<label>Password</label><input name="password" type="password" autocomplete="off" required>
+<label>Country (2 letters)</label><input name="country" value="NL" maxlength="2" required>
+<button type="submit">Save iRobot and connect</button></form>
+<p class="top"><a href="#top">Back to the overview</a></p></div>
+<h2 class="g">Voice</h2>
 <div class="card"><h3 id="echo">Amazon Echo (optional, unofficial)</h3>
 {st_echo}
 <p>Let SmartThings routines make an Echo speak, announce, set its volume or run anything you can say to Alexa
@@ -4848,17 +4817,51 @@ A code by SMS may work too, but did not always arrive in tests.</p>
 <div class="step{echo_s2}" id="echo2"><b>Step 2 of 2: log in at Amazon</b>
 {echo_link}</div>
 <p class="top"><a href="#top">Back to the overview</a></p></div>
-<div class="card"><h3 id="irobot">iRobot favorites (optional)</h3>
-{st_irobot}
-<p>Email and password of the iRobot app. The bridge only reads the names and rooms of your favorites,
-twice a day, for the Roomba driver on the hub. The robot itself is controlled locally.</p>
-<form method="post"><input type="hidden" name="section" value="irobot">
-<label>Email</label><input name="username" type="email" autocomplete="off" required>
-<label>Password</label><input name="password" type="password" autocomplete="off" required>
-<label>Country (2 letters)</label><input name="country" value="NL" maxlength="2" required>
-<button type="submit">Save iRobot and connect</button></form>
+<h2 class="g">Network</h2>
+<div class="card"><h3 id="unifi">UniFi firewall switches (local, optional)</h3>
+{st_unifi}
+<p>A switch in SmartThings for a firewall policy of your UniFi console, for example to let devices that are normally
+kept off the internet reach it for a while (to use their own app). On = a block policy paused (an allow policy:
+enabled). After the set minutes the bridge puts the policy back by itself. Only on your own network: the bridge talks
+to the console directly.</p>
+<p>Make the API key in UniFi Network: <b>Settings, Control Plane, Integrations, Create API Key</b> (keep the
+description short). The key has the rights of the user who makes it: use a local user with only the Network
+application, no access from the cloud. {unifi_saved}</p>
+<form method="post"><input type="hidden" name="section" value="unifi">
+<label>Console address (IP)</label><input name="host" value="{unifi_host}" placeholder="192.168.1.1" required>
+<label>API key</label><input name="api_key" type="password" autocomplete="off" required>
+<label>Site (empty = default)</label><input name="site" value="{unifi_site}">
+<button type="submit">Save UniFi and connect</button></form>
+{unifi_switches}
+<form method="post"><input type="hidden" name="section" value="unifi_add">
+<label>Add a switch for the policy</label><select name="id">{unifi_options}</select>
+<label>Back to normal after (minutes, 0 = never)</label><input name="minutes" type="number" min="0" max="1440" value="60" required>
+<label>Name in SmartThings (empty = UniFi + the policy name)</label><input name="name" maxlength="50">
+<button type="submit">Add switch</button></form>
+<form method="post"><input type="hidden" name="section" value="unifi_trust">
+<p class="hint">The console certificate is pinned when the key is saved. Renewed it yourself? Trust it again.</p>
+<button type="submit">Trust the console certificate again</button></form>
+<p class="top"><a href="#top">Back to the overview</a></p></div>
+<h2 class="g">Car</h2>
+<div class="card"><h3 id="skoda">Škoda</h3>
+{st_skoda}
+<p>In the MyŠkoda app (8.16 or newer) create an API key: <b>Settings, Smart Home, API keys</b>, and choose your car.
+The VIN (17 characters) is shown in the app with the car and on the registration document.</p>
+<form method="post"><input type="hidden" name="section" value="skoda">
+<label>API key</label><input name="api_key" autocomplete="off" required>
+<label>VIN</label><input name="vin" maxlength="17" minlength="17" required>
+<button type="submit">Save Škoda and connect</button></form>
+<form method="post"><input type="hidden" name="section" value="skoda_settings">
+<label>Update the car every (minutes, at least 5; Škoda allows 20 requests per hour)</label>
+<input name="poll_minutes" type="number" min="5" max="60" value="{skoda_poll}" required>
+<label>Temperature for climate on (°C)</label><input name="climate_temp" value="{skoda_temp}" required>
+<button type="submit">Save settings</button></form>
+<p>These settings are also available with the car in the SmartThings app (Settings).</p>
 <p class="top"><a href="#top">Back to the overview</a></p></div>
 </body></html>"""
+SETUP_GROUPS = [("Connections", ["hub", "claude"]), ("Climate", ["fglair", "tuya"]), ("Home", ["velux", "rain"]),
+                ("Appliances", ["aeg", "homeconnect", "samsung", "irobot"]), ("Voice", ["echo"]),
+                ("Network", ["unifi"]), ("Car", ["skoda"])]
 SETUP_CSS = SETUP_HTML.split("<style>", 1)[1].split("</style>", 1)[0] + (
     ".kv{display:flex;justify-content:space-between;gap:12px;padding:11px 0;border-bottom:1px solid var(--line);font-size:15px}"
     ".kv:last-child{border-bottom:0}.kv span{color:var(--sub)}.card.warn{border:2px solid var(--warn)}"
@@ -5155,20 +5158,32 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
         else:
             summary = "set up, fetching"
         out.append(("irobot", "iRobot favorites", summary, lines))
+        out.append(("claude", "Claude on web and phone", claude_setup_summary(cfg)[0], []))
         return out
 
     def status_html(sections) -> tuple[str, dict[str, str]]:
         """Overview (a list like the SmartThings app, each part with its status below it), and the status block per part."""
-        items = []
+        items: dict[str, str] = {}
         blocks = {}
         for anchor, title, summary, lines in sections:
-            bad = summary.startswith(("NOT", "error")) or summary == "error"
-            items.append(f'<a class="item{" bad" if bad else ""}" href="#{anchor}"><span class="t"><b>{html.escape(title)}</b>'
-                         f'<span>{html.escape(summary[:1].upper() + summary[1:])}</span></span>'
-                         '<span class="go" aria-hidden="true">&#x203A;</span></a>')
+            bad = summary.startswith(("NOT", "error", "Bridge update waiting")) or summary == "error"
+            href = "/setup/claude" if anchor == "claude" else "#" + anchor
+            items[anchor] = (f'<a class="item{" bad" if bad else ""}" href="{href}"><span class="t"><b>{html.escape(title)}</b>'
+                             f'<span>{html.escape(summary[:1].upper() + summary[1:])}</span></span>'
+                             '<span class="go" aria-hidden="true">&#x203A;</span></a>')
             body = "<br>".join(html.escape(x) for x in [summary[:1].upper() + summary[1:]] + lines)
             blocks[anchor] = f'<div class="st{" bad" if bad else ""}">{body}</div>'
-        return '<div class="list">' + "".join(items) + "</div>", blocks
+        out = []
+        placed = set()
+        for group, ids in SETUP_GROUPS:
+            got = [items[a] for a in ids if a in items]
+            placed.update(ids)
+            if got:
+                out.append(f'<h2 class="g">{group}</h2><div class="list">' + "".join(got) + "</div>")
+        rest = [v for a, v in items.items() if a not in placed]
+        if rest:
+            out.append('<h2 class="g">Other</h2><div class="list">' + "".join(rest) + "</div>")
+        return "".join(out), blocks
 
     def plain_from_lan(req) -> bool:
         """Setup page over plain http from another address than this computer: credentials would cross the LAN
@@ -5245,7 +5260,6 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
         for anchor, block in blocks.items():
             page = page.replace("{st_" + anchor + "}", block)
         page = (page.replace("{version}", "version " + VERSION).replace("{status}", overview)
-                .replace("{claude_item}", claude_setup_item(load_config()))
                 .replace("{refresh}", '<meta http-equiv="refresh" content="10">' if pairing_open else "")
                 .replace("{pair_requests}", reqs)
                 .replace("{skoda_poll}", html.escape(str(k.get("poll_minutes", 10))))
@@ -7409,19 +7423,13 @@ def make_claude_app() -> web.Application:
     return app
 
 
-def claude_setup_item(cfg: dict[str, Any]) -> str:
-    """The Claude entry on the main setup page (same list style as the other parts)."""
+def claude_setup_summary(cfg: dict[str, Any]) -> tuple[str, bool]:
+    """The Claude line in the setup overview: (summary, needs attention)."""
     c = claude_cfg(cfg)
     st_up = staged_update()
     if st_up and st_up.get("state") in ("waiting", "failed"):
-        summary, bad = "Bridge update waiting for your approval", True
-    else:
-        summary = ("Access on" if c.get("enabled") else "Access off") + (
-            ", admin tools on" if admin_enabled(cfg) else "")
-        bad = False
-    return ('<h2 class="g">Claude</h2><div class="list"><a class="item' + (" bad" if bad else "") +
-            '" href="/setup/claude"><span class="t"><b>Claude on web and phone</b><span>' + html.escape(summary) +
-            '</span></span><span class="go" aria-hidden="true">&#x203A;</span></a></div>')
+        return "Bridge update waiting for your approval", True
+    return ("access on" if c.get("enabled") else "access off") + (", admin tools on" if admin_enabled(cfg) else ""), False
 
 
 def claude_setup_html(cfg: dict[str, Any]) -> str:
