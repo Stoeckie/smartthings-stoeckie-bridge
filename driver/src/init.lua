@@ -91,7 +91,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-19e"
+local BUILD = "2026-11-19f"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -130,7 +130,7 @@ local tMode = capabilities.thermostatMode
 local tOpState = capabilities.thermostatOperatingState
 local tOpSupported = (function() local ok, a = pcall(function() return tOpState.supportedThermostatOperatingStates end); return ok and a or nil end)()
 
-local PROFILE = { dryer = "stoeckie-dryer-v4", window = "stoeckie-window", sensor = "stoeckie-climate",
+local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor = "stoeckie-climate",
                   aircon = "stoeckie-aircon-v3", car = "stoeckie-car-v2",
                   velux_lock = "stoeckie-velux-lock", rain = "stoeckie-rain-v4",
                   rainradar = "stoeckie-rainradar-v3", dishwasher = "stoeckie-dishwasher-v2", oven = "stoeckie-oven-v2",
@@ -984,7 +984,7 @@ local function child_profile(key, device)
     return nil
   end
   -- -v3: course list + Start (own capability washerProgram; -v2 used applianceProgram)
-  -- -v4: test without dryerOperatingState too; -v3: test without remoteControlStatus (SmartThings app 1.8.54 does not open the Dryer tile; -v2 category Others did not help)
+  -- the dryer keeps its first profile (tests 2026-11-19 with -v2 to -v4 did not make app 1.8.54 open the tile)
   if key:match("^aeg%-") or key == "demo-dryer" then return PROFILE.dryer end
   if key:match("^echo%-") or key == "demo-echo" then return PROFILE.echo end
   if key:match("^unifi%-") or key == "demo-netswitch" then return PROFILE.net_switch end
