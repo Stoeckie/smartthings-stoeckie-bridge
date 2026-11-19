@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-19h"
+VERSION = "2026-11-19i"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -6972,11 +6972,20 @@ async def admin_capability(a: dict[str, Any]) -> dict[str, Any]:
                 raise RuntimeError(f"bad language tag in {k}")
             tags[m.group(1)] = load(k.split("/")[-1])
     nss = await admin_st_raw("GET", "https://api.smartthings.com/capabilities/namespaces")
-    own = [n.get("name") for n in (nss if isinstance(nss, list) else (nss or {}).get("items") or [])
-           if (n.get("ownerType") or "user") == "user" and n.get("name")]
-    if len(own) != 1:
-        raise RuntimeError(f"expected one own capability namespace, found {len(own)}")
-    ns = own[0]
+    items = nss if isinstance(nss, list) else (nss or {}).get("items") or []
+    own = sorted({str(n.get("name") if isinstance(n, dict) else n) for n in items
+                  if (n.get("name") if isinstance(n, dict) else n)
+                  and str((n.get("ownerType") if isinstance(n, dict) else "") or "user").lower() != "smartthings"})
+    want = str(a.get("namespace") or "")
+    if want:
+        if want not in own:
+            raise RuntimeError(f"namespace {want} is not one of this account's: {', '.join(own) or 'none'}")
+        ns = want
+    elif len(own) == 1:
+        ns = own[0]
+    else:
+        raise RuntimeError(f"capability namespaces of this account: {', '.join(own) or 'none'} "
+                           f"(answer shape {type(nss).__name__}, {len(items)} items); pass namespace")
     cid = f"{ns}.{name}"
     base = f"https://api.smartthings.com/capabilities/{cid}/1"
     done = []
@@ -7051,7 +7060,8 @@ ADMIN_TOOLS = [
      "namespace, optional path, default 'capabilities'). Uses <name>.json (definition), <name>-pres.json "
      "(presentation) and <name>-<language>.json (translations).",
      "inputSchema": {"type": "object", "properties": {"repo": {"type": "string"}, "ref": {"type": "string"},
-                     "name": {"type": "string"}, "path": {"type": "string"}}, "required": ["repo", "ref", "name"]}},
+                     "name": {"type": "string"}, "path": {"type": "string"}, "namespace": {"type": "string"}},
+                     "required": ["repo", "ref", "name"]}},
 ]
 ADMIN_NAMES = {t["name"] for t in ADMIN_TOOLS}
 
