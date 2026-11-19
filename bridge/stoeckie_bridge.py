@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-19b"
+VERSION = "2026-11-19c"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -6791,10 +6791,12 @@ async def claude_rpc(m: dict) -> dict | None:
     if method == "ping":
         return {"jsonrpc": "2.0", "id": mid, "result": {}}
     if method == "tools/list":
-        return {"jsonrpc": "2.0", "id": mid, "result": {"tools": CLAUDE_TOOLS + (ADMIN_TOOLS if admin_enabled() else [])}}
+        # the admin tools are always listed (Claude keeps the list until the connector is connected again); when
+        # they are switched off on the setup page a call answers that they are off
+        return {"jsonrpc": "2.0", "id": mid, "result": {"tools": CLAUDE_TOOLS + ADMIN_TOOLS}}
     if method == "tools/call":
         name = params.get("name")
-        admin = name in ADMIN_NAMES and admin_enabled()
+        admin = name in ADMIN_NAMES
         if name not in {t["name"] for t in CLAUDE_TOOLS} and not admin:
             return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": f"unknown tool {name}"}}
         try:

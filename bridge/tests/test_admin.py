@@ -51,9 +51,9 @@ def test_driver_zip_like_the_cli():
 def test_tools_only_when_switched_on():
     sb.save_config({"claude": {"enabled": True}})
     r = asyncio.run(sb.claude_rpc({"id": 1, "method": "tools/list"}))
-    assert "hub_log" not in {t["name"] for t in r["result"]["tools"]}
+    assert "hub_log" in {t["name"] for t in r["result"]["tools"]}  # always listed, so the list never changes
     r = asyncio.run(sb.claude_rpc({"id": 2, "method": "tools/call", "params": {"name": "bridge_log", "arguments": {}}}))
-    assert "error" in r
+    assert r["result"]["isError"] and "off" in r["result"]["content"][0]["text"]
     sb.save_config({"claude": {"enabled": True, "admin": {"enabled": True}}})
     r = asyncio.run(sb.claude_rpc({"id": 3, "method": "tools/list"}))
     assert {"hub_log", "driver_deploy", "bridge_log", "bridge_update", "admin_hubs"} <= {t["name"] for t in r["result"]["tools"]}
