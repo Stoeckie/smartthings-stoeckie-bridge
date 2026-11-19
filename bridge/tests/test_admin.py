@@ -219,3 +219,49 @@ def test_installer_tail_matches_repo_tail():
             break
         lines.append(ln[len('$run += "'):-1].replace("`\"", '"'))
     assert lines == (here / "run-tail.cmd").read_text().replace("\r", "").strip().split("\n")
+
+
+def test_capability_put_creates_and_updates(monkeypatch):
+    calls = []
+    store = {}
+    files = {
+        "capabilities/robotMission.json": b'{"name": "Robot Mission", "attributes": {"lastRun": {"schema": {}}}, "commands": {}}',
+        "capabilities/robotMission-pres.json": b'{"dashboard": {"states": []}, "detailView": []}',
+        "capabilities/robotMission-en.json": b'{"tag": "en", "label": "Last run"}',
+        "capabilities/robotMission-nl.json": b'{"tag": "nl", "label": "Laatste beurt"}',
+        "capabilities/other.json": b"{}",
+    }
+
+    async def fake_tree(owner, repo, ref):
+        return files
+
+    async def fake_st(method, url, data=None, ctype=None, body=None):
+        u = url.replace("https://api.smartthings.com", "")
+        calls.append((method, u))
+        if u == "/capabilities/namespaces":
+            return [{"name": "silvervalley08660", "ownerType": "user"}]
+        if method == "GET":
+            if u in store:
+                return store[u]
+            raise RuntimeError(f"SmartThings GET {u}: HTTP 404 x")
+        if method == "POST" and u.startswith("/capabilities?namespace="):
+            store["/capabilities/silvervalley08660.robotMission/1"] = {**body, "id": "silvervalley08660.robotMission"}
+            return {"id": "silvervalley08660.robotMission"}
+        if method == "POST" and u.endswith("/presentation"):
+            store[u] = body
+        if method == "POST" and u.endswith("/i18n"):
+            store[u + "/" + body["tag"]] = body
+        return {}
+    monkeypatch.setattr(sb, "admin_fetch_tree", fake_tree)
+    monkeypatch.setattr(sb, "admin_st_raw", fake_st)
+    r = asyncio.run(sb.admin_capability({"repo": "smartthings-irobot-roomba-local", "ref": "abcdef1", "name": "robotMission"}))
+    assert r["capability"] == "silvervalley08660.robotMission"
+    assert r["done"] == ["definition created", "presentation created", "en created", "nl created"]
+    calls.clear()
+    r = asyncio.run(sb.admin_capability({"repo": "smartthings-irobot-roomba-local", "ref": "abcdef1", "name": "robotMission"}))
+    assert r["done"] == ["definition unchanged", "presentation updated", "en updated", "nl updated"]
+    assert ("PUT", "/capabilities/silvervalley08660.robotMission/1/i18n/nl") in calls
+    with pytest.raises(RuntimeError):
+        asyncio.run(sb.admin_capability({"repo": "smartthings-irobot-roomba-local", "ref": "abcdef1", "name": "x.y"}))
+    with pytest.raises(ValueError):
+        asyncio.run(sb.admin_capability({"repo": "other-repo", "ref": "abcdef1", "name": "robotMission"}))

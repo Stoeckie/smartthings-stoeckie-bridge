@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-19g"
+VERSION = "2026-11-19h"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -6935,6 +6935,93 @@ def admin_mark_update_ok() -> None:
         pass
 
 
+CAP_NAME = re.compile(r"^[a-z][A-Za-z0-9]{1,60}$")
+CAP_TAG = re.compile(r"^[a-z]{2}(-[A-Z]{2})?$")
+
+
+async def admin_capability(a: dict[str, Any]) -> dict[str, Any]:
+    """Create or update a custom capability of this home's own namespace from a GitHub commit: <path>/<name>.json
+    (definition), <name>-pres.json (presentation) and <name>-<tag>.json (translations), as in the driver repos."""
+    ref = admin_ref(a.get("ref"))
+    owner, repo = admin_repo(a.get("owner"), a.get("repo"))
+    name = str(a.get("name") or "")
+    if not CAP_NAME.match(name):
+        raise RuntimeError("name = the capability name without namespace, like robotMission")
+    path = str(a.get("path") or "capabilities").strip("/")
+    if not re.match(r"^[A-Za-z0-9_./-]{1,80}$", path) or ".." in path:
+        raise RuntimeError("bad path")
+    files = await admin_fetch_tree(owner, repo, ref)
+
+    def load(fn: str) -> Any:
+        raw = files.get(f"{path}/{fn}")
+        if raw is None:
+            return None
+        try:
+            return json.loads(raw)
+        except ValueError as ex:
+            raise RuntimeError(f"{path}/{fn} is not valid JSON: {ex}") from None
+    definition = load(f"{name}.json")
+    if not isinstance(definition, dict):
+        raise RuntimeError(f"no {path}/{name}.json at that commit")
+    pres = load(f"{name}-pres.json")
+    tags = {}
+    for k in files:
+        m = re.match(rf"^{re.escape(path)}/{re.escape(name)}-([A-Za-z-]+)\.json$", k)
+        if m and m.group(1) != "pres":
+            if not CAP_TAG.match(m.group(1)):
+                raise RuntimeError(f"bad language tag in {k}")
+            tags[m.group(1)] = load(k.split("/")[-1])
+    nss = await admin_st_raw("GET", "https://api.smartthings.com/capabilities/namespaces")
+    own = [n.get("name") for n in (nss if isinstance(nss, list) else (nss or {}).get("items") or [])
+           if (n.get("ownerType") or "user") == "user" and n.get("name")]
+    if len(own) != 1:
+        raise RuntimeError(f"expected one own capability namespace, found {len(own)}")
+    ns = own[0]
+    cid = f"{ns}.{name}"
+    base = f"https://api.smartthings.com/capabilities/{cid}/1"
+    done = []
+
+    async def exists(url: str) -> Any:
+        try:
+            return await admin_st_raw("GET", url)
+        except RuntimeError as ex:
+            if "HTTP 404" in str(ex):
+                return None
+            raise
+    cur = await exists(base)
+    body = {k: v for k, v in definition.items() if k not in ("id", "version", "status")}
+    if cur is None:
+        made = await admin_st_raw("POST", f"https://api.smartthings.com/capabilities?namespace={ns}", body=body)
+        if (made or {}).get("id") != cid:
+            raise RuntimeError(f"SmartThings made {made.get('id') if made else '?'} instead of {cid}: check the name "
+                               f"in {name}.json")
+        done.append("definition created")
+    elif any(cur.get(k) != v for k, v in body.items()):
+        await admin_st_raw("PUT", base, body=body)
+        done.append("definition updated")
+    else:
+        done.append("definition unchanged")
+    if isinstance(pres, dict):
+        pres = {**pres, "id": cid, "version": 1}
+        if await exists(base + "/presentation") is None:
+            await admin_st_raw("POST", base + "/presentation", body=pres)
+            done.append("presentation created")
+        else:
+            await admin_st_raw("PUT", base + "/presentation", body=pres)
+            done.append("presentation updated")
+    for tag, loc in sorted(tags.items()):
+        loc = {**(loc or {}), "tag": tag}
+        if await exists(f"{base}/i18n/{tag}") is None:
+            await admin_st_raw("POST", base + "/i18n", body=loc)
+            done.append(f"{tag} created")
+        else:
+            await admin_st_raw("PUT", f"{base}/i18n/{tag}", body=loc)
+            done.append(f"{tag} updated")
+    log.info("[admin] capability %s from %s@%s: %s", cid, repo, ref[:12], ", ".join(done))
+    return {"capability": cid, "done": done,
+            "note": "the app may need a few minutes (or a restart) before a changed presentation shows"}
+
+
 ADMIN_TOOLS = [
     {"name": "admin_hubs", "description": "Admin: the SmartThings hubs of this home (name, id, local IP, firmware) and "
      "the Edge drivers installed on each (name, packageKey, version, driverId).", "inputSchema": _OBJ},
@@ -6959,6 +7046,12 @@ ADMIN_TOOLS = [
      "if the new one does not start. When the commit needs other Python packages (all at least 7 days old) the "
      "update waits for the owner's approval on the setup page (needs_approval).", "inputSchema": {"type": "object", "properties": {"ref": {"type": "string"}},
                                                        "required": ["ref"]}},
+    {"name": "capability_put", "description": "Admin: create or update a custom capability of this home's own "
+     "namespace from a GitHub commit (repo smartthings-..., ref = commit id, name = capability name without "
+     "namespace, optional path, default 'capabilities'). Uses <name>.json (definition), <name>-pres.json "
+     "(presentation) and <name>-<language>.json (translations).",
+     "inputSchema": {"type": "object", "properties": {"repo": {"type": "string"}, "ref": {"type": "string"},
+                     "name": {"type": "string"}, "path": {"type": "string"}}, "required": ["repo", "ref", "name"]}},
 ]
 ADMIN_NAMES = {t["name"] for t in ADMIN_TOOLS}
 
@@ -6983,6 +7076,8 @@ async def admin_tool(name: str, a: dict) -> Any:
         return admin_bridge_log(a)
     if name == "bridge_update":
         return await admin_bridge_update(a)
+    if name == "capability_put":
+        return await admin_capability(a)
     raise ValueError(name)
 
 
