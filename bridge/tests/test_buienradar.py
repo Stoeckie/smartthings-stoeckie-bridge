@@ -77,6 +77,8 @@ def test_source(monkeypatch):
         port = site._server.sockets[0].getsockname()[1]
         monkeypatch.setattr(sb, "BUIENRADAR_URL", f"http://127.0.0.1:{port}/data/raintext")
         monkeypatch.setattr(sb, "PDOK_URL", f"http://127.0.0.1:{port}/pdok")
+        # dew point and wind come from Open-Meteo: keep the test off the internet (404 here, which the radar ignores)
+        monkeypatch.setattr(sb, "OPENMETEO_URL", f"http://127.0.0.1:{port}/om-none")
 
         async def wait_for(pred):
             for _ in range(200):
