@@ -91,7 +91,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-20e"
+local BUILD = "2026-11-20f"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -651,10 +651,33 @@ local function graph_mode(dev)
   return CAR_GRAPH[m or ""] and m or "off"
 end
 
+-- Low car battery: SmartThings warns as soon as the battery capability is low, also for a wrong reading (Škoda
+-- sometimes reports 0 % for a moment). Below CAR_LOW % the battery value only follows after it stayed low for
+-- CAR_LOW_HOLD seconds; until then it keeps the last value at or above CAR_LOW (or CAR_LOW itself). The graph
+-- option keeps the real value.
+local CAR_LOW, CAR_LOW_HOLD = 10, 12 * 3600
+
+local function car_shown_soc(dev, soc, now)
+  if soc >= CAR_LOW then
+    dev:set_field("car_low_since", nil, { persist = true })
+    dev:set_field("car_last_ok", soc, { persist = true })
+    return soc
+  end
+  local since = dev:get_field("car_low_since")
+  if not since then
+    since = now
+    dev:set_field("car_low_since", now, { persist = true })
+  end
+  if now - since >= CAR_LOW_HOLD then return soc end
+  return dev:get_field("car_last_ok") or CAR_LOW
+end
+-- end car low
+
 local function emit_car(dev, s)
   if tonumber(s.battery) then
     local soc = math.max(0, math.min(100, math.floor(tonumber(s.battery) + 0.5)))
-    try_emit(dev, function() return capabilities.battery.battery(soc) end)
+    local shown = car_shown_soc(dev, soc, os.time())
+    try_emit(dev, function() return capabilities.battery.battery(shown) end)
     local mode = graph_mode(dev)
     if mode == "humidity" then
       try_emit(dev, function() return capabilities.relativeHumidityMeasurement.humidity(soc) end)
