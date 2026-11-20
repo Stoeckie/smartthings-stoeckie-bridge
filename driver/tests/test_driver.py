@@ -541,7 +541,9 @@ def test_car_flow(bridge):
     for i in range(1, len(car.events) + 1):
         e = car.events[i]
         ev[f"{e.comp}:{e.path}"] = e.arg
-    assert ev["main:cap.battery.battery"] == 64
+    b, r = ev["main:cap.silvervalley08660.carBattery.battery"], ev["main:cap.silvervalley08660.carBattery.range"]
+    assert (b["value"], b["unit"], r["value"], r["unit"]) == (64, "%", 38, "km")
+    assert "main:cap.battery.battery" not in ev  # no SmartThings low battery warning for the car
     assert "main:cap.switch.switch.off" in ev and "status:cap.presenceSensor.presence.present" in ev
     assert "plug:cap.contactSensor.contact.closed" in ev and "climate:cap.switch.switch.off" in ev
     assert "status:cap.contactSensor.contact.closed" in ev
@@ -685,7 +687,7 @@ def test_car_battery_graph(bridge):
       DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
     ''')
     car = lua.eval("CAR")
-    assert car.new_profile == "stoeckie-car-v2-hum"
+    assert car.new_profile == "stoeckie-car-v3-hum"
     ev = {f"{car.events[i].comp}:{car.events[i].path}": car.events[i].arg for i in range(1, len(car.events) + 1)}
     assert ev["main:cap.relativeHumidityMeasurement.humidity"] == 64
     lua.execute('''
@@ -695,7 +697,7 @@ def test_car_battery_graph(bridge):
       DRIVER.capability_handlers.refresh.refresh(DRIVER_OBJ, PARENT)
     ''')
     car = lua.eval("CAR")
-    assert car.new_profile == "stoeckie-car-v2-pow"
+    assert car.new_profile == "stoeckie-car-v3-pow"
     ev = {f"{car.events[i].comp}:{car.events[i].path}": car.events[i].arg for i in range(1, len(car.events) + 1)}
     assert ev["graph:cap.powerMeter.power"]["value"] == 64
 
