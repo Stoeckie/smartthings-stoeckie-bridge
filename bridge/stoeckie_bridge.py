@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-20a"
+VERSION = "2026-11-20b"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -7644,13 +7644,25 @@ def netprofile_parse(raw: str) -> list[dict[str, str]]:
     return out
 
 
+async def _run_cmd(args: list[str], timeout: int = 30) -> tuple[int, str, str]:
+    """A command in a thread (the Windows event loop of the bridge has no asyncio subprocesses)."""
+    import subprocess
+
+    def run() -> tuple[int, str, str]:
+        r = subprocess.run(args, capture_output=True, timeout=timeout,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace")
+    return await asyncio.get_running_loop().run_in_executor(None, run)
+
+
 async def netprofile_once() -> None:
-    proc = await asyncio.create_subprocess_exec(
+    rc, out, err = await _run_cmd([
         "powershell", "-NoProfile", "-NonInteractive", "-Command",
         "Get-NetConnectionProfile | Select-Object Name,InterfaceAlias,NetworkCategory,IPv4Connectivity | "
-        "ConvertTo-Json -Compress", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    out, err = await asyncio.wait_for(proc.communicate(), 30)
-    profiles = netprofile_parse(out.decode("utf-8", "replace"))
+        "ConvertTo-Json -Compress"])
+    if rc != 0:
+        raise RuntimeError("Get-NetConnectionProfile: " + (err or out).strip()[:160])
+    profiles = netprofile_parse(out)
     public = [p["name"] for p in profiles if p["category"] == "Public" and p["ipv4"] != "Disconnected"]
     was = NETPROFILE["public"]
     NETPROFILE.update(public=bool(public), names=public or [p["name"] for p in profiles if p["ipv4"] != "Disconnected"],
@@ -7664,15 +7676,13 @@ async def netprofile_once() -> None:
         # the SYSTEM task "Stoeckie Bridge network private" (install-remote) puts the known networks back on Private;
         # the bridge may only start it, the command in it is fixed
         NETPROFILE["fixed"] = time.time()
-        fix = await asyncio.create_subprocess_exec("schtasks", "/Run", "/TN", NET_FIX_TASK,
-                                                   stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        fo, fe = await asyncio.wait_for(fix.communicate(), 30)
-        if fix.returncode == 0:
+        frc, fo, fe = await _run_cmd(["schtasks", "/Run", "/TN", NET_FIX_TASK])
+        if frc == 0:
             log.info("[net] asked Windows to put the network back on Private (task %s)", NET_FIX_TASK)
             await asyncio.sleep(15)
             return await netprofile_once()
         log.warning("[net] task %s could not start (%s); run install-remote once to make it", NET_FIX_TASK,
-                    (fe or fo).decode("utf-8", "replace").strip()[:160])
+                    (fe or fo).strip()[:160])
     if public and time.time() - NETPROFILE["pushed"] > 6 * 3600 and ECHO_NOW is not None:
         try:
             if await ECHO_NOW.push_to_phone(
@@ -7696,7 +7706,7 @@ async def netprofile_loop() -> None:
         try:
             await netprofile_once()
         except Exception as ex:  # noqa: BLE001
-            NETPROFILE["error"] = str(ex)[:160]
+            NETPROFILE["error"] = (str(ex) or type(ex).__name__)[:160]
             log.warning("[net] network profile check failed: %s", NETPROFILE["error"])
         await asyncio.sleep(300)
 

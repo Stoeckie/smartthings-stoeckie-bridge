@@ -31,9 +31,11 @@ def test_once_warns_and_pushes_once(monkeypatch):
                 return b"", b"ERROR: The system cannot find the file specified."
             return out["raw"], b""
 
-    async def fake_exec(*a, **kw):
-        return P(a)
-    monkeypatch.setattr(sb.asyncio, "create_subprocess_exec", fake_exec)
+    async def fake_run(args, timeout=30):
+        p = P(tuple(args))
+        o, e = await p.communicate()
+        return p.returncode, o.decode(), e.decode()
+    monkeypatch.setattr(sb, "_run_cmd", fake_run)
     pushes = []
 
     class E:
