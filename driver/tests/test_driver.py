@@ -736,9 +736,10 @@ def test_rainradar(bridge):
     ''')
     rr = lua.eval("RR")
     assert rr.new_profile == "stoeckie-rainradar-v3-simple"
-    # unchanged values are not emitted again; what the app shows stays rain or dry plus the dew points
+    # after a profile switch the values are sent once more (a capability new in the profile would miss them),
+    # the same values: what the app shows stays rain or dry plus the dew points
     paths = [f"{rr.events[i].comp}:{rr.events[i].path}" for i in range(1, len(rr.events) + 1)]
-    assert paths == []
+    assert set(paths) <= {k for k in rr.latest.keys()}
     latest = sorted(k for k in rr.latest.keys())
     assert "main:cap.rainSensor.rain.undetected" in latest and "dewMax:cap.temperatureMeasurement.temperature" in latest
 
