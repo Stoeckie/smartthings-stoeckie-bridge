@@ -288,32 +288,37 @@ try {
     Invoke-Command -Session $session -ArgumentList $remoteDir, $taskName, $allow, $noSleep, $myIp, $winrmFrom, $lanSetup {
         param($d, $taskName, $allow, $noSleep, $myIp, $winrmFrom, $lanSetup)
         if (-not (Test-Path "$d\config.json")) { Copy-Item "$d\config.example.json" "$d\config.json" }
-        if (-not (Get-NetFirewallRule -DisplayName "Stoeckie Bridge" -ErrorAction SilentlyContinue)) {
-            New-NetFirewallRule -DisplayName "Stoeckie Bridge" -Direction Inbound -Protocol TCP -LocalPort 8787 `
-                -Action Allow -Profile Private,Domain | Out-Null
-        }
+        # all rules hold on every network profile (Private, Domain and Public): Windows may mark the network Public
+        # after an update (seen 2026-11-20). They stay limited to the own subnet or the allowed addresses.
+        Get-NetFirewallRule -DisplayName "Stoeckie Bridge" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+        New-NetFirewallRule -DisplayName "Stoeckie Bridge" -Direction Inbound -Protocol TCP -LocalPort 8787 `
+            -RemoteAddress LocalSubnet -Action Allow -Profile Any | Out-Null
         # setup page over https (8443): only from the pc that may open it, otherwise closed
         Get-NetFirewallRule -DisplayName "Stoeckie Bridge setup (https)" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
         if ($lanSetup) {
             # any device on the own network, after entering the setup key once (STBRIDGE_SETUP_LAN_KEY)
             New-NetFirewallRule -DisplayName "Stoeckie Bridge setup (https)" -Direction Inbound -Protocol TCP `
-                -LocalPort 8443 -RemoteAddress LocalSubnet -Action Allow -Profile Private,Domain | Out-Null
+                -LocalPort 8443 -RemoteAddress LocalSubnet -Action Allow -Profile Any | Out-Null
         } elseif ($allow) {
             New-NetFirewallRule -DisplayName "Stoeckie Bridge setup (https)" -Direction Inbound -Protocol TCP `
-                -LocalPort 8443 -RemoteAddress @($allow -split "," | ForEach-Object { $_ -replace "/32$", "" }) -Action Allow -Profile Private,Domain | Out-Null
+                -LocalPort 8443 -RemoteAddress @($allow -split "," | ForEach-Object { $_ -replace "/32$", "" }) -Action Allow -Profile Any | Out-Null
         }
 
         # Tuya devices announce themselves by UDP broadcast (ports 6666, 6667, 7000) on the own network: the bridge
         # listens to find their address and protocol version (local control, see README Tuya)
         Get-NetFirewallRule -DisplayName "Stoeckie Bridge Tuya discovery (udp)" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
         New-NetFirewallRule -DisplayName "Stoeckie Bridge Tuya discovery (udp)" -Direction Inbound -Protocol UDP `
-            -LocalPort 6666,6667,7000 -RemoteAddress LocalSubnet -Action Allow -Profile Private,Domain | Out-Null
+            -LocalPort 6666,6667,7000 -RemoteAddress LocalSubnet -Action Allow -Profile Any | Out-Null
 
         # PowerShell remoting on this pc: only from the pc that manages it and the addresses in "remoteFrom"
         # (else the own network, never anywhere)
         if (-not @($winrmFrom).Count) { $winrmFrom = "LocalSubnet" }
         Get-NetFirewallRule -Name "WINRM-HTTP-In-TCP*" -ErrorAction SilentlyContinue |
             Set-NetFirewallRule -RemoteAddress $winrmFrom -ErrorAction SilentlyContinue
+        # the Public variant of that rule is off by Windows default: on, with the same limit, so remote management
+        # keeps working when Windows marks the network Public
+        Get-NetFirewallRule -Name "WINRM-HTTP-In-TCP-PUBLIC" -ErrorAction SilentlyContinue |
+            Set-NetFirewallRule -Enabled True -RemoteAddress $winrmFrom -ErrorAction SilentlyContinue
         Get-NetConnectionProfile | Where-Object { $_.NetworkCategory -eq "Public" } |
             ForEach-Object { Set-NetConnectionProfile -InterfaceIndex $_.InterfaceIndex -NetworkCategory Private }
 

@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-20b"
+VERSION = "2026-11-20c"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -7702,6 +7702,16 @@ async def netprofile_loop() -> None:
     if os.name != "nt":
         return
     await asyncio.sleep(20)
+    try:
+        # when Windows itself started: a bridge start right after it means a pc restart (an update), not a crash
+        rc, out, _ = await _run_cmd(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                                     "(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToString('yyyy-MM-dd HH:mm:ss')"])
+        boot = out.strip()
+        if rc == 0 and boot:
+            NETPROFILE["boot"] = boot
+            log.info("[bridge] Windows started %s", boot)
+    except Exception as ex:  # noqa: BLE001
+        log.info("[bridge] Windows start time unknown: %s", (str(ex) or type(ex).__name__)[:120])
     while True:
         try:
             await netprofile_once()
@@ -7717,7 +7727,8 @@ def netprofile_summary() -> tuple[str, list[str]]:
     if NETPROFILE["public"]:
         return (f"NOT private: {', '.join(NETPROFILE['names'])} is Public, the hub can not reach the bridge",
                 ["Windows Settings > Network and internet > the network > Network profile type: Private"])
-    return f"Private ({', '.join(NETPROFILE['names'])})", []
+    return (f"Private ({', '.join(NETPROFILE['names'])})",
+            [f"Windows started {NETPROFILE['boot']}"] if NETPROFILE.get("boot") else [])
 
 
 async def serve(args) -> None:
