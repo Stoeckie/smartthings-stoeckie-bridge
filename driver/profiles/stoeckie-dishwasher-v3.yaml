@@ -1,0 +1,21 @@
+name: stoeckie-dishwasher-v3
+components:
+  - id: main
+    capabilities:
+      - id: switch
+        version: 1
+      - id: dishwasherOperatingState
+        version: 1
+      - id: contactSensor
+        version: 1
+      - id: remoteControlStatus
+        version: 1
+      - id: silvervalley08660.applianceProgram
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: Dishwasher
+metadata:
+  vid: 728c6ce2-7f98-33fd-9730-565f217d7eb3
+  mnmn: SmartThingsCommunity
