@@ -91,7 +91,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-20b"
+local BUILD = "2026-11-20c"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -133,7 +133,7 @@ local tOpSupported = (function() local ok, a = pcall(function() return tOpState.
 local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor = "stoeckie-climate",
                   aircon = "stoeckie-aircon-v3", car = "stoeckie-car-v2",
                   velux_lock = "stoeckie-velux-lock", rain = "stoeckie-rain-v4",
-                  rainradar = "stoeckie-rainradar-v3", dishwasher = "stoeckie-dishwasher-v4", oven = "stoeckie-oven-v4",
+                  rainradar = "stoeckie-rainradar-v3", dishwasher = "stoeckie-dishwasher-v5", oven = "stoeckie-oven-v5",
                   washer = "stoeckie-washer-v3", tv = "stoeckie-tv",
                   tuya_thermostat = "stoeckie-tuya-thermostat", tuya_heater = "stoeckie-tuya-heater",
                   echo = "stoeckie-echo", net_switch = "stoeckie-net-switch" }
@@ -991,7 +991,8 @@ local function child_profile(key, device)
   if key:match("^samsung%-") or key == "demo-washer" then return PROFILE.washer end
   -- -v2: program list, start button, oven temperature and cooking time; -v3: same, a profile switch makes app 1.8.54
   -- load the device again (its tile did not open; the dryer opened again after a profile switch, 2026-11-20);
-  -- -v4 test: dishwasher without own presentation (vid), oven also without switch
+  -- -v4 test: dishwasher without own presentation (vid), oven also without switch; -v5 test: dishwasher without
+  -- applianceProgram, oven without cookSettings
   if key:match("^homeconnect%-") or key == "demo-dishwasher" or key == "demo-oven" then
     if device:supports_capability(dishOp) then return PROFILE.dishwasher end
     if device:supports_capability(ovenOp) then return PROFILE.oven end
@@ -1009,8 +1010,8 @@ local function profile_markers(want)
   if want == PROFILE.washer then return { washerProg } end
   -- -v2: dew point components, -v3: wind component
   if want:sub(1, #PROFILE.rainradar) == PROFILE.rainradar then return { windKmh or capabilities.temperatureMeasurement } end
-  if want == PROFILE.dishwasher then return { hcProg } end
-  if want == PROFILE.oven then return { cookSet } end
+  if want == PROFILE.dishwasher then return {} end
+  if want == PROFILE.oven then return {} end
   return {}
 end
 
