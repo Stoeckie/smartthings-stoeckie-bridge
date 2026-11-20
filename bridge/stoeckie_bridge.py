@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-20e"
+VERSION = "2026-11-20f"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -7059,48 +7059,115 @@ async def admin_capability(a: dict[str, Any]) -> dict[str, Any]:
     cid = f"{ns}.{name}"
     base = f"https://api.smartthings.com/capabilities/{cid}/1"
     done = []
-
-    async def exists(url: str) -> Any:
-        try:
-            return await admin_st_raw("GET", url)
-        except RuntimeError as ex:
-            # SmartThings answers 403 (not 404) for a capability that does not exist yet, also in the own namespace;
-            # a real lack of rights then shows in the POST that follows
-            if "HTTP 404" in str(ex) or "HTTP 403" in str(ex):
-                return None
-            raise
-    cur = await exists(base)
+    cur = await _cap_get(base)
     body = {k: v for k, v in definition.items() if k not in ("id", "version", "status")}
     if cur is None:
-        made = await admin_st_raw("POST", f"https://api.smartthings.com/capabilities?namespace={ns}", body=body)
+        try:
+            made = await admin_st_raw("POST", f"https://api.smartthings.com/capabilities?namespace={ns}", body=body)
+        except RuntimeError as ex:
+            # just made: for some minutes SmartThings answers 403 to the GET and 422 "already exists" to the POST
+            if "HTTP 422" not in str(ex) or "already exists" not in str(ex):
+                raise
+            made = {"id": cid}
+            done.append("definition exists (still being published)")
+        else:
+            done.append("definition created")
         if (made or {}).get("id") != cid:
             raise RuntimeError(f"SmartThings made {made.get('id') if made else '?'} instead of {cid}: check the name "
                                f"in {name}.json")
-        done.append("definition created")
     elif _cap_norm(cur) != _cap_norm(body):
         await admin_st_raw("PUT", base, body=body)
         done.append("definition updated")
     else:
         done.append("definition unchanged")
-    if isinstance(pres, dict):
-        pres = {**pres, "id": cid, "version": 1}
-        if await exists(base + "/presentation") is None:
-            await admin_st_raw("POST", base + "/presentation", body=pres)
-            done.append("presentation created")
-        else:
-            await admin_st_raw("PUT", base + "/presentation", body=pres)
-            done.append("presentation updated")
-    for tag, loc in sorted(tags.items()):
-        loc = {**(loc or {}), "tag": tag}
-        if await exists(f"{base}/i18n/{tag}") is None:
-            await admin_st_raw("POST", base + "/i18n", body=loc)
-            done.append(f"{tag} created")
-        else:
-            await admin_st_raw("PUT", f"{base}/i18n/{tag}", body=loc)
-            done.append(f"{tag} updated")
+    pres = {**pres, "id": cid, "version": 1} if isinstance(pres, dict) else None
+    try:
+        done += await _cap_extras(base, pres, tags)
+    except CapNotReady:
+        # a new capability: SmartThings refuses its presentation and translations (403) until it is published,
+        # seen 2026-11-20: refused after 1, 2 and 4 minutes, accepted after about 15. Keep trying in the background.
+        _cap_later(cid, base, pres, tags)
+        done.append(f"presentation and translations: SmartThings does not accept them yet (new capability); the bridge "
+                    f"tries again every {CAP_RETRY_SECS // 60} minutes for {CAP_RETRY_SECS * CAP_RETRY_TRIES // 60} "
+                    f"minutes, see bridge_log '[admin] capability'")
     log.info("[admin] capability %s from %s@%s: %s", cid, repo, ref[:12], ", ".join(done))
     return {"capability": cid, "done": done,
             "note": "the app may need a few minutes (or a restart) before a changed presentation shows"}
+
+
+class CapNotReady(RuntimeError):
+    pass
+
+
+CAP_RETRY_SECS, CAP_RETRY_TRIES = 120, 15
+CAP_LATER: dict[str, asyncio.Task] = {}
+
+
+async def _cap_get(url: str) -> Any:
+    """GET, or None when absent. SmartThings answers 403 (not 404) for a capability, presentation or translation
+    that does not exist (yet), also in the own namespace; a real lack of rights shows in the write that follows."""
+    try:
+        return await admin_st_raw("GET", url)
+    except RuntimeError as ex:
+        if "HTTP 404" in str(ex) or "HTTP 403" in str(ex):
+            return None
+        raise
+
+
+async def _cap_write(method: str, url: str, body: Any) -> None:
+    try:
+        await admin_st_raw(method, url, body=body)
+    except RuntimeError as ex:
+        if "HTTP 403" in str(ex):
+            raise CapNotReady(str(ex)) from None
+        raise
+
+
+async def _cap_extras(base: str, pres: dict[str, Any] | None, tags: dict[str, Any]) -> list[str]:
+    done = []
+    if pres is not None:
+        if await _cap_get(base + "/presentation") is None:
+            await _cap_write("POST", base + "/presentation", pres)
+            done.append("presentation created")
+        else:
+            await _cap_write("PUT", base + "/presentation", pres)
+            done.append("presentation updated")
+    for tag, loc in sorted(tags.items()):
+        loc = {**(loc or {}), "tag": tag}
+        if await _cap_get(f"{base}/i18n/{tag}") is None:
+            try:
+                await _cap_write("POST", base + "/i18n", loc)
+                done.append(f"{tag} created")
+                continue
+            except RuntimeError as ex:
+                # SmartThings makes an "en" translation by itself with a new capability
+                if isinstance(ex, CapNotReady) or "already exists" not in str(ex):
+                    raise
+        await _cap_write("PUT", f"{base}/i18n/{tag}", loc)
+        done.append(f"{tag} updated")
+    return done
+
+
+def _cap_later(cid: str, base: str, pres: dict[str, Any] | None, tags: dict[str, Any]) -> None:
+    old = CAP_LATER.get(cid)
+    if old and not old.done():
+        old.cancel()
+
+    async def run() -> None:
+        for i in range(1, CAP_RETRY_TRIES + 1):
+            await asyncio.sleep(CAP_RETRY_SECS)
+            try:
+                done = await _cap_extras(base, pres, tags)
+            except CapNotReady:
+                continue
+            except Exception as ex:  # noqa: BLE001
+                log.warning("[admin] capability %s: presentation and translations failed: %s", cid, str(ex)[:300])
+                return
+            log.info("[admin] capability %s after %d min: %s", cid, i * CAP_RETRY_SECS // 60, ", ".join(done))
+            return
+        log.warning("[admin] capability %s: SmartThings still refuses the presentation after %d min; run "
+                    "capability_put again later", cid, CAP_RETRY_TRIES * CAP_RETRY_SECS // 60)
+    CAP_LATER[cid] = asyncio.get_running_loop().create_task(run())
 
 
 ST_GET_OK = re.compile(

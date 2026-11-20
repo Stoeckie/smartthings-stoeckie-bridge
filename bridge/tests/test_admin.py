@@ -287,3 +287,50 @@ def test_st_get_only_allowed_paths(monkeypatch):
     for p in ["/devices", "/devices/x/commands", "/installedapps", "/capabilities/a.b/1/../../x", "//evil"]:
         with pytest.raises(RuntimeError):
             asyncio.run(sb.admin_st_get({"path": p}))
+
+
+def test_capability_put_new_capability_not_ready(monkeypatch):
+    """A just made capability: GET 403, POST 422 already exists, presentation 403 for a while, en made by SmartThings."""
+    files = {
+        "capabilities/carBattery.json": b'{"name": "Car Battery", "attributes": {}, "commands": {}}',
+        "capabilities/carBattery-pres.json": b'{"dashboard": {"states": []}, "detailView": []}',
+        "capabilities/carBattery-en.json": b'{"tag": "en", "label": "Car battery"}',
+        "capabilities/carBattery-nl.json": b'{"tag": "nl", "label": "Accu auto"}',
+    }
+    refuse = {"n": 2}
+    calls = []
+
+    async def fake_tree(owner, repo, ref):
+        return files
+
+    async def fake_st(method, url, data=None, ctype=None, body=None):
+        u = url.replace("https://api.smartthings.com", "")
+        calls.append((method, u))
+        if u == "/capabilities/namespaces":
+            return [{"name": "silvervalley08660", "ownerType": "user"}]
+        if method == "GET":
+            raise RuntimeError(f"SmartThings GET {u}: HTTP 403 x")
+        if method == "POST" and u.startswith("/capabilities?namespace="):
+            raise RuntimeError("SmartThings POST /capabilities: HTTP 422 Capability already exists. Please choose")
+        if method == "POST" and u.endswith("/presentation"):
+            if refuse["n"]:
+                refuse["n"] -= 1
+                raise RuntimeError(f"SmartThings POST {u}: HTTP 403 FORBIDDEN_ERROR")
+            return {}
+        if method == "POST" and u.endswith("/i18n") and body["tag"] == "en":
+            raise RuntimeError("SmartThings POST i18n: HTTP 422 Localization already exists.")
+        return {}
+    monkeypatch.setattr(sb, "admin_fetch_tree", fake_tree)
+    monkeypatch.setattr(sb, "admin_st_raw", fake_st)
+    monkeypatch.setattr(sb, "CAP_RETRY_SECS", 0)
+
+    async def go():
+        r = await sb.admin_capability({"repo": "smartthings-stoeckie-bridge", "ref": "abcdef1", "name": "carBattery"})
+        await sb.CAP_LATER["silvervalley08660.carBattery"]
+        return r
+    r = asyncio.run(go())
+    assert r["done"][0].startswith("definition exists")
+    assert "tries again" in r["done"][1]
+    assert refuse["n"] == 0
+    assert ("PUT", "/capabilities/silvervalley08660.carBattery/1/i18n/en") in calls
+    assert ("POST", "/capabilities/silvervalley08660.carBattery/1/i18n") in calls
