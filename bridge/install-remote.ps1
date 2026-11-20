@@ -326,8 +326,10 @@ try {
             ForEach-Object { $_.Name }) | Where-Object { $_ -match '^[A-Za-z0-9 ._-]{1,64}$' }
         $netTask = "Stoeckie Bridge network private"
         if (@($netNames).Count) {
-            $list = ($netNames | ForEach-Object { "'" + $_ + "'" }) -join ","
-            $cmd = "`$ok=@($list); Get-NetConnectionProfile | Where-Object { `$_.NetworkCategory -eq 'Public' -and `$ok -contains `$_.Name } | ForEach-Object { Set-NetConnectionProfile -InterfaceIndex `$_.InterfaceIndex -NetworkCategory Private }"
+            # Windows makes "Stoeck-TV 2", "Stoeck-TV 3" when it thinks the network is new (seen 2026-11-20): those
+            # count too (name, or name + space + number)
+            $list = ($netNames | ForEach-Object { "'" + ($_ -replace ' \d+$', '') + "'" } | Select-Object -Unique) -join ","
+            $cmd = "`$ok=@($list); Get-NetConnectionProfile | Where-Object { `$_.NetworkCategory -eq 'Public' -and `$ok -contains (`$_.Name -replace ' \d+`$','') } | ForEach-Object { Set-NetConnectionProfile -InterfaceIndex `$_.InterfaceIndex -NetworkCategory Private }"
             $nAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command `"$cmd`""
             $nTriggers = @((New-ScheduledTaskTrigger -AtStartup),
                 (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)))
