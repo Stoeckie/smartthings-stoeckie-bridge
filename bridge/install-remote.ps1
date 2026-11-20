@@ -317,7 +317,8 @@ try {
             Set-NetFirewallRule -RemoteAddress $winrmFrom -ErrorAction SilentlyContinue
         # the Public variant of that rule is off by Windows default: on, with the same limit, so remote management
         # keeps working when Windows marks the network Public
-        Get-NetFirewallRule -Name "WINRM-HTTP-In-TCP-PUBLIC" -ErrorAction SilentlyContinue |
+        # (the name differs per Windows version: WINRM-HTTP-In-TCP or -PUBLIC, so pick it by profile)
+        Get-NetFirewallRule -Name "WINRM-HTTP-In-TCP*" -ErrorAction SilentlyContinue | Where-Object { "$($_.Profile)" -match "Public" } |
             Set-NetFirewallRule -Enabled True -RemoteAddress $winrmFrom -ErrorAction SilentlyContinue
         Get-NetConnectionProfile | Where-Object { $_.NetworkCategory -eq "Public" } |
             ForEach-Object { Set-NetConnectionProfile -InterfaceIndex $_.InterfaceIndex -NetworkCategory Private }

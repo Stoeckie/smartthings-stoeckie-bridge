@@ -27,8 +27,10 @@ try {
     }
 
     # PowerShell remoting: the Public variant gets the same address limit as the normal rule
-    $w = Get-NetFirewallRule -Name "WINRM-HTTP-In-TCP", "WINRM-HTTP-In-TCP-NoScope" -ErrorAction SilentlyContinue | Select-Object -First 1
-    $p = Get-NetFirewallRule -Name "WINRM-HTTP-In-TCP-PUBLIC" -ErrorAction SilentlyContinue
+    # (the names differ per Windows version: pick the rules by profile)
+    $wr = @(Get-NetFirewallRule -Name "WINRM-HTTP-In-TCP*" -ErrorAction SilentlyContinue)
+    $w = $wr | Where-Object { $_.Enabled -eq "True" -and "$($_.Profile)" -match "Private" } | Select-Object -First 1
+    $p = $wr | Where-Object { "$($_.Profile)" -match "Public" } | Select-Object -First 1
     if ($w -and $p) {
         $wAddr = @(($w | Get-NetFirewallAddressFilter).RemoteAddress)
         if ($wAddr -contains "Any") { Write-Host "WinRM Public niet aangezet: de gewone regel is open voor elk adres" }
