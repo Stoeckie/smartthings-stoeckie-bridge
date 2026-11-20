@@ -52,3 +52,22 @@ def test_once_warns_and_pushes_once(monkeypatch):
     out["raw"] = b'{"Name":"Stoeck-TV","NetworkCategory":1,"IPv4Connectivity":4}'
     asyncio.run(sb.netprofile_once())
     assert sb.NETPROFILE["public"] is False and sb.netprofile_summary()[0].startswith("Private")
+
+
+def test_guard_rules_and_task(monkeypatch):
+    res = {"rules": "rule|Stoeckie Bridge|Any\nrule|Stoeckie Bridge setup (https)|Any", "task": 0}
+
+    async def fake_run(args, timeout=30):
+        if args[0] == "schtasks":
+            return res["task"], "", ""
+        return 0, res["rules"], ""
+    monkeypatch.setattr(sb, "_run_cmd", fake_run)
+    sb.NETPROFILE.update(public=False, names=["Stoeck-TV"], guard=None)
+    asyncio.run(sb.netprofile_guard())
+    assert sb.NETPROFILE["guard"] == (True, True)
+    assert any(x.endswith(": yes") for x in sb.netprofile_summary()[1])
+    res["rules"] = "rule|Stoeckie Bridge|Private, Domain"
+    res["task"] = 1
+    asyncio.run(sb.netprofile_guard())
+    assert sb.NETPROFILE["guard"] == (False, False)
+    assert any("network-fix.cmd" in x for x in sb.netprofile_summary()[1])

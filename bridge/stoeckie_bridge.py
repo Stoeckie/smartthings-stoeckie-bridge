@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-20c"
+VERSION = "2026-11-20d"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -7714,11 +7714,37 @@ async def netprofile_loop() -> None:
         log.info("[bridge] Windows start time unknown: %s", (str(ex) or type(ex).__name__)[:120])
     while True:
         try:
+            await netprofile_guard()
+        except Exception as ex:  # noqa: BLE001
+            log.info("[net] firewall check failed: %s", (str(ex) or type(ex).__name__)[:120])
+        try:
             await netprofile_once()
         except Exception as ex:  # noqa: BLE001
             NETPROFILE["error"] = (str(ex) or type(ex).__name__)[:160]
             log.warning("[net] network profile check failed: %s", NETPROFILE["error"])
         await asyncio.sleep(300)
+
+
+async def netprofile_guard() -> None:
+    """Read only: do the bridge firewall rules hold on the Public profile too, and does the network-private task
+    exist (both made by install-remote or network-fix.cmd, which need admin once)."""
+    rc, out, _ = await _run_cmd([
+        "powershell", "-NoProfile", "-NonInteractive", "-Command",
+        "@(Get-NetFirewallRule -DisplayName 'Stoeckie Bridge*' -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.Enabled -eq 'True' } | ForEach-Object { 'rule|' + $_.DisplayName + '|' + $_.Profile }) -join [char]10"])
+    rules = {}
+    if rc == 0:
+        for line in out.splitlines():
+            parts = line.strip().split("|")
+            if len(parts) == 3 and parts[0] == "rule":
+                rules[parts[1]] = parts[2]
+    trc, _, _ = await _run_cmd(["schtasks", "/Query", "/TN", NET_FIX_TASK])
+    public_ok = bool(rules) and all(v == "Any" or "Public" in v for v in rules.values())
+    state = (public_ok, trc == 0)
+    if NETPROFILE.get("guard") != state:
+        log.info("[net] firewall rules also on Public: %s; task %s: %s", "yes" if public_ok else "no",
+                 NET_FIX_TASK, "present" if trc == 0 else "missing")
+    NETPROFILE["guard"] = state
 
 
 def netprofile_summary() -> tuple[str, list[str]]:
@@ -7727,8 +7753,12 @@ def netprofile_summary() -> tuple[str, list[str]]:
     if NETPROFILE["public"]:
         return (f"NOT private: {', '.join(NETPROFILE['names'])} is Public, the hub can not reach the bridge",
                 ["Windows Settings > Network and internet > the network > Network profile type: Private"])
-    return (f"Private ({', '.join(NETPROFILE['names'])})",
-            [f"Windows started {NETPROFILE['boot']}"] if NETPROFILE.get("boot") else [])
+    lines = [f"Windows started {NETPROFILE['boot']}"] if NETPROFILE.get("boot") else []
+    if NETPROFILE.get("guard"):
+        rules_ok, task_ok = NETPROFILE["guard"]
+        lines.append("Protected if Windows sets Public: " + ("yes" if rules_ok and task_ok else
+                     "no, run network-fix.cmd on this pc once (admin)"))
+    return f"Private ({', '.join(NETPROFILE['names'])})", lines
 
 
 async def serve(args) -> None:
