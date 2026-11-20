@@ -91,7 +91,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-20g"
+local BUILD = "2026-11-20h"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -1047,6 +1047,7 @@ sync_profile = function(device)
   device:set_field("profileAt", os.time())
   device:try_update_metadata({ profile = want })
   device:set_field("profile", want, { persist = true })
+  EMIT_CACHE[device.id] = nil  -- values sent before the switch may have been dropped for a capability that is new
   log.info("[stbridge] " .. device.label .. ": profile " .. want .. (missing and " (retry " .. (tries + 1) .. ")" or ""))
 end
 
