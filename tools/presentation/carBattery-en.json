@@ -1,0 +1,1 @@
+{"tag": "en", "label": "Car battery", "attributes": {"battery": {"label": "Battery", "displayTemplate": "{{device.label}} battery: {{value}}"}, "range": {"label": "Electric range", "displayTemplate": "{{device.label}} electric range: {{value}}"}}}

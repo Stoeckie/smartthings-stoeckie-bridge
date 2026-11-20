@@ -1,0 +1,1 @@
+{"tag": "nl", "label": "Accu auto", "attributes": {"battery": {"label": "Accu", "displayTemplate": "Accu {{device.label}}: {{value}}"}, "range": {"label": "Elektrisch bereik", "displayTemplate": "Elektrisch bereik {{device.label}}: {{value}}"}}}

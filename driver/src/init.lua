@@ -11,7 +11,7 @@
 --   sensor (VELUX climate sensor)     -> temperature, humidity, CO2
 --   aircon (Fujitsu via FGLair)       -> switch, airConditionerMode (plus minHeat on units that have it, like the
 --                                        FGLair app), setpoint, fan, swing, indoor/outdoor temp
---   car    (Škoda public API)         -> battery, charging switch + power, at home, plug, climate, doors
+--   car    (Škoda public API)         -> battery (own capability), range, charging switch + power, at home, plug, climate, doors
 --   velux_lock (VELUX departure mode) -> lock (locked = away: all windows and blinds blocked)
 --   rain   (VELUX gateway rain sensor) -> rainSensor (detected = raining)
 --   rainradar (Buienradar / Open-Meteo) -> rainSensor; detail: precipitationSensor + rainForecast (mm/h, minutes until
@@ -91,7 +91,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-20f"
+local BUILD = "2026-11-20g"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -131,7 +131,7 @@ local tOpState = capabilities.thermostatOperatingState
 local tOpSupported = (function() local ok, a = pcall(function() return tOpState.supportedThermostatOperatingStates end); return ok and a or nil end)()
 
 local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor = "stoeckie-climate",
-                  aircon = "stoeckie-aircon-v3", car = "stoeckie-car-v2",
+                  aircon = "stoeckie-aircon-v3", car = "stoeckie-car-v3",
                   velux_lock = "stoeckie-velux-lock", rain = "stoeckie-rain-v4",
                   rainradar = "stoeckie-rainradar-v3", dishwasher = "stoeckie-dishwasher-v3", oven = "stoeckie-oven-v3",
                   washer = "stoeckie-washer-v4", tv = "stoeckie-tv",
@@ -651,39 +651,26 @@ local function graph_mode(dev)
   return CAR_GRAPH[m or ""] and m or "off"
 end
 
--- Low car battery: SmartThings warns as soon as the battery capability is low, also for a wrong reading (Škoda
--- sometimes reports 0 % for a moment). Below CAR_LOW % the battery value only follows after it stayed low for
--- CAR_LOW_HOLD seconds; until then it keeps the last value at or above CAR_LOW (or CAR_LOW itself). The graph
--- option keeps the real value.
-local CAR_LOW, CAR_LOW_HOLD = 10, 12 * 3600
-
-local function car_shown_soc(dev, soc, now)
-  if soc >= CAR_LOW then
-    dev:set_field("car_low_since", nil, { persist = true })
-    dev:set_field("car_last_ok", soc, { persist = true })
-    return soc
-  end
-  local since = dev:get_field("car_low_since")
-  if not since then
-    since = now
-    dev:set_field("car_low_since", now, { persist = true })
-  end
-  if now - since >= CAR_LOW_HOLD then return soc end
-  return dev:get_field("car_last_ok") or CAR_LOW
-end
--- end car low
+-- Car battery as its own capability (not the standard battery): SmartThings sends its own low battery warning
+-- for the standard one, which can not be tuned. A routine on this capability decides when to warn.
+local carBattery = (function() local ok, c = pcall(function() return capabilities["silvervalley08660.carBattery"] end); return ok and c or nil end)()
 
 local function emit_car(dev, s)
   if tonumber(s.battery) then
     local soc = math.max(0, math.min(100, math.floor(tonumber(s.battery) + 0.5)))
-    local shown = car_shown_soc(dev, soc, os.time())
-    try_emit(dev, function() return capabilities.battery.battery(shown) end)
+    if carBattery then
+      try_emit(dev, function() return carBattery.battery({ value = soc, unit = "%" }) end)
+    end
     local mode = graph_mode(dev)
     if mode == "humidity" then
       try_emit(dev, function() return capabilities.relativeHumidityMeasurement.humidity(soc) end)
     elseif mode == "power" then
       comp_emit(dev, "graph", function() return capabilities.powerMeter.power({ value = soc, unit = "W" }) end)
     end
+  end
+  if carBattery and tonumber(s.electricRange) then
+    local km = math.max(0, math.min(2000, tonumber(s.electricRange)))
+    try_emit(dev, function() return carBattery.range({ value = km, unit = "km" }) end)
   end
   local charging = tostring(s.charging or ""):upper()
   if charging ~= "" then
