@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-20d"
+VERSION = "2026-11-20e"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -7064,7 +7064,9 @@ async def admin_capability(a: dict[str, Any]) -> dict[str, Any]:
         try:
             return await admin_st_raw("GET", url)
         except RuntimeError as ex:
-            if "HTTP 404" in str(ex):
+            # SmartThings answers 403 (not 404) for a capability that does not exist yet, also in the own namespace;
+            # a real lack of rights then shows in the POST that follows
+            if "HTTP 404" in str(ex) or "HTTP 403" in str(ex):
                 return None
             raise
     cur = await exists(base)
