@@ -91,7 +91,7 @@ local cosock = require "cosock"
 local api = require "bridge_api"
 local sha = require "sha512"
 
-local BUILD = "2026-11-20d"
+local BUILD = "2026-11-20e"
 local FAST_POLL_SECS = 2
 local FAST_POLL_FOR = 40
 local SCAN_CONCURRENCY = 16
@@ -134,7 +134,7 @@ local PROFILE = { dryer = "stoeckie-dryer", window = "stoeckie-window", sensor =
                   aircon = "stoeckie-aircon-v3", car = "stoeckie-car-v2",
                   velux_lock = "stoeckie-velux-lock", rain = "stoeckie-rain-v4",
                   rainradar = "stoeckie-rainradar-v3", dishwasher = "stoeckie-dishwasher-v3", oven = "stoeckie-oven-v3",
-                  washer = "stoeckie-washer-v3", tv = "stoeckie-tv",
+                  washer = "stoeckie-washer-v4", tv = "stoeckie-tv",
                   tuya_thermostat = "stoeckie-tuya-thermostat", tuya_heater = "stoeckie-tuya-heater",
                   echo = "stoeckie-echo", net_switch = "stoeckie-net-switch" }
 local MANUFACTURER = { dryer = "AEG", aircon = "Fujitsu", car = "Skoda", dishwasher = "Home Connect", oven = "Home Connect",
@@ -983,7 +983,8 @@ local function child_profile(key, device)
     if kind == "heater" then return PROFILE.tuya_heater .. (device:get_field("tuyaSetpoint") and "-t" or "") end
     return nil
   end
-  -- -v3: course list + Start (own capability washerProgram; -v2 used applianceProgram)
+  -- -v3: course list + Start (own capability washerProgram; -v2 used applianceProgram); -v4: same, the profile
+  -- switch makes app 1.8.54 load the device again (its tile did not open, 2026-11-20)
   -- the dryer keeps its first profile (tests 2026-11-19 with -v2 to -v4 did not make app 1.8.54 open the tile)
   if key:match("^aeg%-") or key == "demo-dryer" then return PROFILE.dryer end
   if key:match("^echo%-") or key == "demo-echo" then return PROFILE.echo end

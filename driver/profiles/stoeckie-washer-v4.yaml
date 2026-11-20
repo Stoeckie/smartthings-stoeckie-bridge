@@ -1,18 +1,19 @@
-name: stoeckie-dishwasher-v4
+name: stoeckie-washer-v4
 components:
   - id: main
     capabilities:
       - id: switch
         version: 1
-      - id: dishwasherOperatingState
-        version: 1
-      - id: contactSensor
+      - id: washerOperatingState
         version: 1
       - id: remoteControlStatus
         version: 1
-      - id: silvervalley08660.applianceProgram
+      - id: silvervalley08660.washerProgram
         version: 1
       - id: refresh
         version: 1
     categories:
-      - name: Dishwasher
+      - name: Washer
+metadata:
+  vid: 6a9cf782-75f1-3ec1-a85e-50f5db25f25b
+  mnmn: SmartThingsCommunity
