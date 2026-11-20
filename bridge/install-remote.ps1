@@ -316,6 +316,33 @@ try {
             Set-NetFirewallRule -RemoteAddress $winrmFrom -ErrorAction SilentlyContinue
         Get-NetConnectionProfile | Where-Object { $_.NetworkCategory -eq "Public" } |
             ForEach-Object { Set-NetConnectionProfile -InterfaceIndex $_.InterfaceIndex -NetworkCategory Private }
+
+        # Windows can put the network back on Public (seen 2026-11-20, after an update): the rules above are for
+        # Private only, so the hub loses the bridge. A small SYSTEM task puts the networks this pc is on now back on
+        # Private: every 5 minutes, at start, and when the bridge asks (schtasks /run). The command is fixed and
+        # inline (no script file the bridge could change), with the network names of today; the bridge (LOCAL
+        # SERVICE) may only start it.
+        $netNames = @(Get-NetConnectionProfile | Where-Object { $_.IPv4Connectivity -ne "Disconnected" } |
+            ForEach-Object { $_.Name }) | Where-Object { $_ -match '^[A-Za-z0-9 ._-]{1,64}$' }
+        $netTask = "Stoeckie Bridge network private"
+        if (@($netNames).Count) {
+            $list = ($netNames | ForEach-Object { "'" + $_ + "'" }) -join ","
+            $cmd = "`$ok=@($list); Get-NetConnectionProfile | Where-Object { `$_.NetworkCategory -eq 'Public' -and `$ok -contains `$_.Name } | ForEach-Object { Set-NetConnectionProfile -InterfaceIndex `$_.InterfaceIndex -NetworkCategory Private }"
+            $nAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command `"$cmd`""
+            $nTriggers = @((New-ScheduledTaskTrigger -AtStartup),
+                (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)))
+            $nPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+            $nSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -MultipleInstances IgnoreNew
+            Register-ScheduledTask -TaskName $netTask -Action $nAction -Trigger $nTriggers -Principal $nPrincipal `
+                -Settings $nSettings -Force | Out-Null
+            # LOCAL SERVICE (LS) may read and start this one task, nothing more
+            $svc = New-Object -ComObject Schedule.Service; $svc.Connect()
+            $t = $svc.GetFolder("\").GetTask($netTask)
+            $sd = $t.GetSecurityDescriptor(4)
+            if ($sd -notmatch ';;;LS\)') { $t.SetSecurityDescriptor($sd + "(A;;GRGX;;;LS)", 0) }
+            Write-Host "Taak '$netTask' gemaakt voor netwerk(en): $($netNames -join ', ')"
+        }
         if ($noSleep) { & powercfg /change standby-timeout-ac 0; & powercfg /change hibernate-timeout-ac 0 }
         $run = @("@echo off", "cd /d `"%~dp0`"")
         if ($allow) { $run += "set STBRIDGE_SETUP_ALLOW=$allow" }

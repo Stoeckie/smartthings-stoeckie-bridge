@@ -309,3 +309,7 @@ Tests run without real accounts: a fake Ayla cloud (FGLair), a fake Škoda API, 
 ## License
 
 Apache 2.0, see LICENSE. Not affiliated with AB Electrolux, AEG, Fujitsu General, Ayla Networks, Škoda Auto, iRobot, VELUX, Netatmo, BSH Hausgeräte (Home Connect, Bosch, Siemens, Neff), Tuya, Samsung, Buienradar, Open-Meteo, OpenStreetMap or Samsung SmartThings.
+
+### Windows network on Public
+
+The firewall rules of the bridge are for the Private (and Domain) network profile. When Windows puts the network on Public (seen after an update) the hub can no longer reach the bridge. The bridge checks the profile every 5 minutes, shows it on the setup page (Connections, "Windows network") and sends one notification to the Alexa app. `install-remote` also makes a small SYSTEM task, "Stoeckie Bridge network private", that puts the networks the pc was on at install time back on Private: every 5 minutes, at start, and when the bridge asks. Its command is fixed and inline; the bridge (LOCAL SERVICE) may only start it.

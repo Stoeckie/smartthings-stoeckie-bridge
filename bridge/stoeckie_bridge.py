@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-19o"
+VERSION = "2026-11-20a"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -1468,7 +1468,18 @@ class EchoCloud:
             raise PermissionError("Amazon login expired: log in again on the setup page")
         await self.login.finalize_login()
         echo_save_tokens(self.login)
+        global ECHO_NOW
+        ECHO_NOW = self
         log.info("[echo] logged in")
+
+    async def push_to_phone(self, title: str, message: str) -> bool:
+        """A notification in the Alexa app on the phone (not spoken). False when no Echo is known yet."""
+        from alexapy import AlexaAPI
+        d = next(iter(self.devs.values()), None)
+        if d is None or self.login is None:
+            return False
+        await AlexaAPI(EchoDevice(d), self.login).send_mobilepush(message, title=title, queue_delay=0)
+        return True
 
     async def _fetch(self) -> None:
         from alexapy import AlexaAPI
@@ -4859,7 +4870,7 @@ The VIN (17 characters) is shown in the app with the car and on the registration
 <p>These settings are also available with the car in the SmartThings app (Settings).</p>
 <p class="top"><a href="#top">Back to the overview</a></p></div>
 </body></html>"""
-SETUP_GROUPS = [("Connections", ["hub", "claude"]), ("Climate", ["fglair", "tuya"]), ("Home", ["velux", "rain"]),
+SETUP_GROUPS = [("Connections", ["hub", "winnet", "claude"]), ("Climate", ["fglair", "tuya"]), ("Home", ["velux", "rain"]),
                 ("Appliances", ["aeg", "homeconnect", "samsung", "irobot"]), ("Voice", ["echo"]),
                 ("Network", ["unifi"]), ("Car", ["skoda"])]
 SETUP_CSS = SETUP_HTML.split("<style>", 1)[1].split("</style>", 1)[0] + (
@@ -5159,6 +5170,9 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
             summary = "set up, fetching"
         out.append(("irobot", "iRobot favorites", summary, lines))
         out.append(("claude", "Claude on web and phone", claude_setup_summary(cfg)[0], []))
+        if os.name == "nt" or NETPROFILE["public"] is not None:
+            summary, lines = netprofile_summary()
+            out.append(("winnet", "Windows network", summary, lines))
         return out
 
     def status_html(sections) -> tuple[str, dict[str, str]]:
@@ -5167,7 +5181,7 @@ def make_app(bridge_id: str, on_setup=None, https_port: int | None = None) -> we
         blocks = {}
         for anchor, title, summary, lines in sections:
             bad = summary.startswith(("NOT", "error", "Bridge update waiting")) or summary == "error"
-            href = "/setup/claude" if anchor == "claude" else "#" + anchor
+            href = {"claude": "/setup/claude", "winnet": "#hub"}.get(anchor, "#" + anchor)
             items[anchor] = (f'<a class="item{" bad" if bad else ""}" href="{href}"><span class="t"><b>{html.escape(title)}</b>'
                              f'<span>{html.escape(summary[:1].upper() + summary[1:])}</span></span>'
                              '<span class="go" aria-hidden="true">&#x203A;</span></a>')
@@ -7609,6 +7623,93 @@ async def claude_start() -> None:
 
 
 
+ECHO_NOW: Any = None
+NETPROFILE: dict[str, Any] = {"public": None, "names": [], "checked": 0.0, "pushed": 0.0, "error": ""}
+NET_CATEGORY = {0: "Public", 1: "Private", 2: "Domain"}
+NET_FIX_TASK = "Stoeckie Bridge network private"
+NET_CONN = {0: "Disconnected", 1: "NoTraffic", 2: "Subnet", 3: "LocalNetwork", 4: "Internet"}
+
+
+def netprofile_parse(raw: str) -> list[dict[str, str]]:
+    """Get-NetConnectionProfile as JSON (Windows PowerShell 5 writes enums as numbers)."""
+    j = json.loads(raw or "[]")
+    if isinstance(j, dict):
+        j = [j]
+    out = []
+    for p in j or []:
+        cat, conn = p.get("NetworkCategory"), p.get("IPv4Connectivity")
+        out.append({"name": str(p.get("Name") or p.get("InterfaceAlias") or "?"),
+                    "category": NET_CATEGORY.get(cat, str(cat)) if isinstance(cat, int) else str(cat),
+                    "ipv4": NET_CONN.get(conn, str(conn)) if isinstance(conn, int) else str(conn)})
+    return out
+
+
+async def netprofile_once() -> None:
+    proc = await asyncio.create_subprocess_exec(
+        "powershell", "-NoProfile", "-NonInteractive", "-Command",
+        "Get-NetConnectionProfile | Select-Object Name,InterfaceAlias,NetworkCategory,IPv4Connectivity | "
+        "ConvertTo-Json -Compress", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    out, err = await asyncio.wait_for(proc.communicate(), 30)
+    profiles = netprofile_parse(out.decode("utf-8", "replace"))
+    public = [p["name"] for p in profiles if p["category"] == "Public" and p["ipv4"] != "Disconnected"]
+    was = NETPROFILE["public"]
+    NETPROFILE.update(public=bool(public), names=public or [p["name"] for p in profiles if p["ipv4"] != "Disconnected"],
+                      checked=time.time(), error="")
+    if public and was is not True:
+        log.warning("[net] Windows network %s is Public: the firewall blocks the hub and the setup page (ports 8787, "
+                    "8443). Set it to Private (Settings > Network > the network > Private).", ", ".join(public))
+    elif not public and was:
+        log.info("[net] Windows network is Private again")
+    if public and time.time() - NETPROFILE.get("fixed", 0.0) > 240:
+        # the SYSTEM task "Stoeckie Bridge network private" (install-remote) puts the known networks back on Private;
+        # the bridge may only start it, the command in it is fixed
+        NETPROFILE["fixed"] = time.time()
+        fix = await asyncio.create_subprocess_exec("schtasks", "/Run", "/TN", NET_FIX_TASK,
+                                                   stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        fo, fe = await asyncio.wait_for(fix.communicate(), 30)
+        if fix.returncode == 0:
+            log.info("[net] asked Windows to put the network back on Private (task %s)", NET_FIX_TASK)
+            await asyncio.sleep(15)
+            return await netprofile_once()
+        log.warning("[net] task %s could not start (%s); run install-remote once to make it", NET_FIX_TASK,
+                    (fe or fo).decode("utf-8", "replace").strip()[:160])
+    if public and time.time() - NETPROFILE["pushed"] > 6 * 3600 and ECHO_NOW is not None:
+        try:
+            if await ECHO_NOW.push_to_phone(
+                    "Stoeckie Bridge", f"Windows network {', '.join(public)} is set to Public on the bridge pc: "
+                    "SmartThings can not reach the bridge. Set the network to Private."):
+                NETPROFILE["pushed"] = time.time()
+                log.info("[net] warning sent to the Alexa app")
+        except Exception as ex:  # noqa: BLE001
+            log.warning("[net] Alexa app notification failed: %s", str(ex)[:160])
+    if not public:
+        NETPROFILE["pushed"] = 0.0
+
+
+async def netprofile_loop() -> None:
+    """Windows can put the network on Public (after an update, a new network); the firewall rules of the bridge are
+    for Private and Domain only, so the hub then loses the bridge. Check every 5 minutes and warn."""
+    if os.name != "nt":
+        return
+    await asyncio.sleep(20)
+    while True:
+        try:
+            await netprofile_once()
+        except Exception as ex:  # noqa: BLE001
+            NETPROFILE["error"] = str(ex)[:160]
+            log.warning("[net] network profile check failed: %s", NETPROFILE["error"])
+        await asyncio.sleep(300)
+
+
+def netprofile_summary() -> tuple[str, list[str]]:
+    if NETPROFILE["public"] is None:
+        return ("not checked yet" if not NETPROFILE["error"] else "check failed: " + NETPROFILE["error"]), []
+    if NETPROFILE["public"]:
+        return (f"NOT private: {', '.join(NETPROFILE['names'])} is Public, the hub can not reach the bridge",
+                ["Windows Settings > Network and internet > the network > Network profile type: Private"])
+    return f"Private ({', '.join(NETPROFILE['names'])})", []
+
+
 async def serve(args) -> None:
     cfg = load_config()
     seed_from_env(cfg)
@@ -7672,6 +7773,7 @@ async def serve(args) -> None:
                 log.info("[bridge] memory %.0f MB (highest %.0f MB), %d tasks", m[0], m[1], len(asyncio.all_tasks()))
 
     asyncio.create_task(memory_log())
+    asyncio.create_task(netprofile_loop())
     if not args.demo:
         asyncio.get_running_loop().call_later(60, admin_mark_update_ok)
         try:
