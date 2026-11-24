@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-20f"
+VERSION = "2026-11-24a"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -7189,6 +7189,123 @@ async def admin_st_get(a: dict[str, Any]) -> Any:
     return json.loads(txt) if len(txt) < 60000 else {"truncated": txt[:60000]}
 
 
+
+# ---------------------------------------------------------------- Proxmox (admin tools for Claude)
+# A Proxmox API token (user claude@pve, role ClaudeVM: VM audit, power, snapshot, guest agent; no host shell, no
+# users) is pasted on the Claude part of the setup page. The self-signed certificate of Proxmox is pinned when the
+# token is saved. Only the LAN address: Proxmox is never reached over the internet.
+PVE_POWER = ("start", "shutdown", "reboot", "stop")
+
+
+def pve_cfg(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    return (claude_cfg(cfg).get("admin") or {}).get("proxmox") or {}
+
+
+async def pve_call(method: str, path: str, data: dict[str, Any] | None = None, timeout: int = 60) -> Any:
+    p = pve_cfg()
+    if not (p.get("host") and p.get("token_id") and p.get("secret") and p.get("pin")):
+        raise RuntimeError("Proxmox is not set up (bridge setup page, Claude part, Proxmox)")
+    url = f"https://{p['host']}:{int(p.get('port') or 8006)}/api2/json{path}"
+    hdr = {"Authorization": f"PVEAPIToken={p['token_id']}={p['secret']}"}
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+            async with session.request(method, url, headers=hdr, data=data,
+                                       ssl=aiohttp.Fingerprint(bytes.fromhex(p["pin"]))) as r:
+                text = await r.text()
+                if r.status in (401, 403):
+                    raise PermissionError(f"Proxmox refused (HTTP {r.status}): token or rights. {text[:200]}")
+                if r.status >= 400:
+                    raise RuntimeError(f"Proxmox HTTP {r.status}: {text[:300]}")
+                return (json.loads(text) if text else {}).get("data")
+    except aiohttp.ServerFingerprintMismatch:
+        raise PermissionError("the Proxmox certificate changed: save the token again on the setup page") from None
+
+
+def pve_vmid(a: dict[str, Any]) -> int:
+    try:
+        v = int(a.get("vmid"))
+    except (TypeError, ValueError):
+        raise ValueError("vmid: the number of the VM, e.g. 101") from None
+    if not 100 <= v <= 999999999:
+        raise ValueError("vmid out of range")
+    return v
+
+
+def pve_node() -> str:
+    node = str(pve_cfg().get("node") or "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,62}", node):
+        raise RuntimeError("Proxmox node name not set")
+    return node
+
+
+async def admin_pve_vms(_a: dict[str, Any]) -> dict[str, Any]:
+    node = pve_node()
+    st = await pve_call("GET", f"/nodes/{node}/status")
+    vms = await pve_call("GET", f"/nodes/{node}/qemu")
+    out = []
+    for v in sorted(vms or [], key=lambda x: int(x.get("vmid", 0))):
+        out.append({"vmid": v.get("vmid"), "name": v.get("name"), "status": v.get("status"),
+                    "cpu": round(float(v.get("cpu") or 0), 3), "mem_mb": int((v.get("mem") or 0) / 1048576),
+                    "maxmem_mb": int((v.get("maxmem") or 0) / 1048576), "uptime_s": v.get("uptime")})
+    mem = (st or {}).get("memory") or {}
+    return {"node": node, "pve": (st or {}).get("pveversion"), "uptime_s": (st or {}).get("uptime"),
+            "cpu": round(float((st or {}).get("cpu") or 0), 3), "loadavg": (st or {}).get("loadavg"),
+            "mem_used_mb": int((mem.get("used") or 0) / 1048576), "mem_total_mb": int((mem.get("total") or 0) / 1048576),
+            "vms": out}
+
+
+async def admin_pve_exec(a: dict[str, Any]) -> dict[str, Any]:
+    vmid, node = pve_vmid(a), pve_node()
+    cmd = str(a.get("command") or "")
+    if not cmd.strip():
+        raise ValueError("command: the shell command (bash) to run inside the VM")
+    wait = max(5, min(600, int(float(a.get("timeout") or 120))))
+    r = await pve_call("POST", f"/nodes/{node}/qemu/{vmid}/agent/exec", {"command": "bash", "input-data": cmd})
+    pid = (r or {}).get("pid")
+    if pid is None:
+        raise RuntimeError(f"guest agent gave no pid: {r}")
+    log.info("[admin] pve_exec vm %s pid %s (%d chars)", vmid, pid, len(cmd))
+    end = time.monotonic() + wait
+    while time.monotonic() < end:
+        await asyncio.sleep(1)
+        s = await pve_call("GET", f"/nodes/{node}/qemu/{vmid}/agent/exec-status?pid={int(pid)}")
+        if s and s.get("exited"):
+            return {"vmid": vmid, "exitcode": s.get("exitcode"),
+                    "out": admin_mask(str(s.get("out-data") or ""))[-50000:],
+                    "err": admin_mask(str(s.get("err-data") or ""))[-20000:],
+                    "out_truncated": bool(s.get("out-truncated"))}
+    return {"vmid": vmid, "pid": pid, "still_running": True,
+            "note": f"not finished after {wait} s; it keeps running in the VM"}
+
+
+async def admin_pve_power(a: dict[str, Any]) -> dict[str, Any]:
+    vmid, node = pve_vmid(a), pve_node()
+    act = str(a.get("action") or "")
+    if act not in PVE_POWER:
+        raise ValueError("action: " + ", ".join(PVE_POWER))
+    task = await pve_call("POST", f"/nodes/{node}/qemu/{vmid}/status/{act}")
+    log.info("[admin] pve_power vm %s %s", vmid, act)
+    return {"vmid": vmid, "action": act, "task": task}
+
+
+async def admin_pve_snapshot(a: dict[str, Any]) -> dict[str, Any]:
+    vmid, node = pve_vmid(a), pve_node()
+    act = str(a.get("action") or "list")
+    if act == "list":
+        snaps = await pve_call("GET", f"/nodes/{node}/qemu/{vmid}/snapshot")
+        return {"vmid": vmid, "snapshots": [{"name": s.get("name"), "time": s.get("snaptime"),
+                                             "description": s.get("description")} for s in snaps or []]}
+    if act == "create":
+        name = str(a.get("name") or "")
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{1,39}", name):
+            raise ValueError("name: letters, digits, _ and -, starting with a letter, 2 to 40 characters")
+        task = await pve_call("POST", f"/nodes/{node}/qemu/{vmid}/snapshot",
+                              {"snapname": name, "description": str(a.get("description") or "")[:200]})
+        log.info("[admin] pve_snapshot vm %s create %s", vmid, name)
+        return {"vmid": vmid, "created": name, "task": task}
+    raise ValueError("action: list or create (rollback and delete only by the owner in Proxmox)")
+
+
 ADMIN_TOOLS = [
     {"name": "admin_hubs", "description": "Admin: the SmartThings hubs of this home (name, id, local IP, firmware) and "
      "the Edge drivers installed on each (name, packageKey, version, driverId).", "inputSchema": _OBJ},
@@ -7225,6 +7342,20 @@ ADMIN_TOOLS = [
      "/presentation?presentationId=..&manufacturerName=.., /presentation/deviceconfig?.., "
      "/capabilities/<namespace.name>/<version>[/presentation|/i18n/<tag>], /deviceprofiles/<id>.",
      "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
+    {"name": "pve_vms", "description": "Admin: Proxmox host Stoeck: node status and every VM (vmid, name, status, "
+     "cpu, memory, uptime).", "inputSchema": _OBJ},
+    {"name": "pve_exec", "description": "Admin: run a bash command inside a Proxmox VM through the QEMU guest agent "
+     "(as root in that VM; vmid, command, timeout seconds 5..600, default 120). Returns exit code and output. "
+     "Not on the Proxmox host itself.", "inputSchema": {"type": "object", "properties": {
+         "vmid": {"type": "number"}, "command": {"type": "string"}, "timeout": {"type": "number"}},
+         "required": ["vmid", "command"]}},
+    {"name": "pve_power", "description": "Admin: start, shutdown, reboot or stop (hard) a Proxmox VM (vmid, action).",
+     "inputSchema": {"type": "object", "properties": {"vmid": {"type": "number"}, "action": {"type": "string"}},
+                     "required": ["vmid", "action"]}},
+    {"name": "pve_snapshot", "description": "Admin: list the snapshots of a Proxmox VM, or create one before a "
+     "change (vmid, action list|create, name, description). Rollback and delete are left to the owner.",
+     "inputSchema": {"type": "object", "properties": {"vmid": {"type": "number"}, "action": {"type": "string"},
+                     "name": {"type": "string"}, "description": {"type": "string"}}, "required": ["vmid"]}},
 ]
 ADMIN_NAMES = {t["name"] for t in ADMIN_TOOLS}
 
@@ -7253,6 +7384,14 @@ async def admin_tool(name: str, a: dict) -> Any:
         return await admin_capability(a)
     if name == "st_get":
         return await admin_st_get(a)
+    if name == "pve_vms":
+        return await admin_pve_vms(a)
+    if name == "pve_exec":
+        return await admin_pve_exec(a)
+    if name == "pve_power":
+        return await admin_pve_power(a)
+    if name == "pve_snapshot":
+        return await admin_pve_snapshot(a)
     raise ValueError(name)
 
 
@@ -7555,6 +7694,8 @@ def claude_setup_html(cfg: dict[str, Any]) -> str:
         ("Claude sessions", f"{len(t.get('refresh', {}))} active"),
         ("Locks", html.escape(str(c.get("locks") or "full"))),
         ("Admin tools", "on" if admin_enabled(cfg) else "off"),
+        ("Proxmox", (html.escape(f"{pve_cfg(cfg).get('token_id')} on {pve_cfg(cfg).get('host')}")
+                     if pve_cfg(cfg).get("secret") else "not set")),
     ]
     kv = "".join(f'<div class="kv"><span>{k}</span><b>{v}</b></div>' for k, v in rows)
     st_up = staged_update()
@@ -7603,11 +7744,23 @@ placeholder="at least 12 characters">
 <form method="post"><input type="hidden" name="act" value="locks"><select name="locks">{lock_opts}</select>
 <button type="submit">Save</button></form></div>
 <div class="card"><h3>Admin tools</h3><p>Hub log, update Edge drivers, capabilities and this bridge from a GitHub
-commit of {html.escape(", ".join(ADMIN_OWNERS))}, bridge log. No free commands.</p>
+commit of {html.escape(", ".join(ADMIN_OWNERS))}, bridge log, and Proxmox VMs when a Proxmox token is saved below.</p>
 <form method="post"><input type="hidden" name="act" value="admin"><select name="admin">
 <option value="off"{" selected" if not admin_enabled(cfg) else ""}>off</option>
 <option value="on"{" selected" if admin_enabled(cfg) else ""}>on</option></select>
 <button type="submit">Save</button></form></div>
+<div class="card"><h3>Proxmox</h3><p>An API token of Proxmox (user claude@pve, role ClaudeVM) for the admin
+tools: VM status, start/stop, snapshots and commands inside a VM through the guest agent. Not the Proxmox host
+itself. The certificate is pinned when you save.</p>
+<form method="post"><input type="hidden" name="act" value="proxmox">
+<label>Address</label><input name="host" value="{html.escape(str(pve_cfg(cfg).get('host') or '192.168.2.10'))}">
+<label>Node</label><input name="node" value="{html.escape(str(pve_cfg(cfg).get('node') or 'Stoeck'))}">
+<label>Token ID</label><input name="token_id" value="{html.escape(str(pve_cfg(cfg).get('token_id') or 'claude@pve!connector'))}">
+<label>Secret</label><input type="password" name="secret" autocomplete="off" required
+placeholder="{'saved; paste again to replace' if pve_cfg(cfg).get('secret') else 'the secret Proxmox shows once'}">
+<button type="submit">Save Proxmox token</button></form>
+<form method="post"><input type="hidden" name="act" value="proxmox_off">
+<button class="sec" type="submit">Remove Proxmox token</button></form></div>
 <h2 class="g">Sign out</h2>
 <div class="card"><form method="post"><input type="hidden" name="act" value="revoke">
 <button type="submit">End all Claude sessions</button></form>
@@ -7646,6 +7799,30 @@ async def claude_setup_post(form, cfg: dict[str, Any]) -> str | None:
         c.setdefault("admin", {})["enabled"] = str(form.get("admin")) == "on"
         save_config(cfg)
         log.info("[setup] Claude admin tools %s", "on" if c["admin"]["enabled"] else "off")
+    elif act == "proxmox":
+        host = str(form.get("host", "")).strip()
+        node = str(form.get("node", "")).strip()
+        tid = str(form.get("token_id", "")).strip()
+        sec = str(form.get("secret", "")).strip()
+        ok = (re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}|[A-Za-z0-9.-]{1,253}", host)
+              and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,62}", node)
+              and re.fullmatch(r"[A-Za-z0-9._-]+@[A-Za-z0-9._-]+![A-Za-z0-9._-]+", tid)
+              and re.fullmatch(r"[0-9a-fA-F-]{36}", sec))
+        if ok:
+            try:
+                pin = await asyncio.get_running_loop().run_in_executor(None, unifi_fetch_pin, host, 8006)
+                c.setdefault("admin", {})["proxmox"] = {"host": host, "port": 8006, "node": node, "token_id": tid,
+                                                        "secret": sec, "pin": pin}
+                save_config(cfg)
+                log.info("[setup] Proxmox token %s on %s saved, certificate pinned", tid, host)
+            except Exception as ex:  # noqa: BLE001
+                log.warning("[setup] Proxmox token not saved: %s", safe_err(ex))
+        else:
+            log.warning("[setup] Proxmox token not saved: check address, node, token ID and secret")
+    elif act == "proxmox_off":
+        (c.setdefault("admin", {})).pop("proxmox", None)
+        save_config(cfg)
+        log.info("[setup] Proxmox token removed")
     elif act == "revoke":
         t = claude_tokens()
         t["access"], t["refresh"] = {}, {}
