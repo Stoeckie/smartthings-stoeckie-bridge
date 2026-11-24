@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-24a"
+VERSION = "2026-11-24b"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -7306,6 +7306,96 @@ async def admin_pve_snapshot(a: dict[str, Any]) -> dict[str, Any]:
     raise ValueError("action: list or create (rollback and delete only by the owner in Proxmox)")
 
 
+# pve_create only adds a new VM (never changes or removes one) from a cloud image in local:import, the way VM 100
+# and 101 were made: cloud-init, user david, vendor snippet that installs Docker and the guest agent.
+PVE_BRIDGES = ("vmbr0", "vmbr20")
+PVE_IMAGE_OK = re.compile(r"local:import/[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.(qcow2|raw|img)")
+PVE_SNIPPET_OK = re.compile(r"local:snippets/[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.ya?ml")
+PVE_NAME_OK = re.compile(r"[a-z][a-z0-9-]{1,30}")
+PVE_IP_OK = re.compile(r"192\.168\.(2|20)\.(\d{1,3})/24")
+
+
+def pve_num(a: dict[str, Any], key: str, lo: int, hi: int, default: int) -> int:
+    try:
+        v = int(a.get(key) if a.get(key) is not None else default)
+    except (TypeError, ValueError):
+        raise ValueError(f"{key}: a number {lo}..{hi}") from None
+    if not lo <= v <= hi:
+        raise ValueError(f"{key}: {lo}..{hi}")
+    return v
+
+
+def pve_create_params(a: dict[str, Any]) -> dict[str, Any]:
+    """Check the input and build the Proxmox create call. Raises ValueError on anything outside the allowed set."""
+    vmid = pve_vmid(a)
+    name = str(a.get("name") or "")
+    if not PVE_NAME_OK.fullmatch(name):
+        raise ValueError("name: lowercase letters, digits and -, 2 to 31 characters")
+    bridge = str(a.get("bridge") or "")
+    if bridge not in PVE_BRIDGES:
+        raise ValueError("bridge: " + " or ".join(PVE_BRIDGES))
+    ip = str(a.get("ip") or "")
+    m = PVE_IP_OK.fullmatch(ip)
+    if not m or not 2 <= int(m.group(2)) <= 254:
+        raise ValueError("ip: 192.168.2.x/24 (vmbr0) or 192.168.20.x/24 (vmbr20)")
+    if (m.group(1) == "20") != (bridge == "vmbr20"):
+        raise ValueError("ip does not match the bridge: vmbr0 = 192.168.2.x, vmbr20 = 192.168.20.x")
+    image = str(a.get("image") or "")
+    if not PVE_IMAGE_OK.fullmatch(image):
+        raise ValueError("image: a cloud image in local:import, e.g. local:import/debian-13-genericcloud-amd64.qcow2")
+    vendor = str(a.get("vendor") or "local:snippets/docker-vendor.yaml")
+    if not PVE_SNIPPET_OK.fullmatch(vendor):
+        raise ValueError("vendor: a snippet in local:snippets")
+    mem = pve_num(a, "memory_mb", 512, 8192, 1024)
+    cores = pve_num(a, "cores", 1, 4, 1)
+    disk = pve_num(a, "disk_gb", 4, 64, 10)
+    gw = f"192.168.{m.group(1)}.1"
+    return {"vmid": vmid, "disk_gb": disk, "data": {
+        "vmid": vmid, "name": name, "memory": mem, "cores": cores, "cpu": "host", "ostype": "l26",
+        "scsihw": "virtio-scsi-single", "scsi0": f"local-lvm:0,import-from={image},discard=on,iothread=1",
+        "ide2": "local-lvm:cloudinit", "boot": "order=scsi0", "serial0": "socket", "vga": "serial0",
+        "agent": "enabled=1", "net0": f"virtio,bridge={bridge},firewall=0", "ipconfig0": f"ip={ip},gw={gw}",
+        "nameserver": gw, "ciuser": "david", "cicustom": f"vendor={vendor}", "onboot": 1,
+        "description": str(a.get("description") or "")[:200]}}
+
+
+async def pve_task_wait(node: str, upid: str, wait: int = 300) -> str:
+    end = time.monotonic() + wait
+    while time.monotonic() < end:
+        await asyncio.sleep(2)
+        s = await pve_call("GET", f"/nodes/{node}/tasks/{upid}/status")
+        if (s or {}).get("status") == "stopped":
+            return str(s.get("exitstatus") or "")
+    return "still running"
+
+
+async def admin_pve_create(a: dict[str, Any]) -> dict[str, Any]:
+    node = pve_node()
+    if str(a.get("action") or "") == "options":
+        content = await pve_call("GET", f"/nodes/{node}/storage/local/content")
+        vms = await pve_call("GET", f"/nodes/{node}/qemu")
+        return {"images": sorted(c["volid"] for c in content or [] if c.get("content") == "import"),
+                "snippets": sorted(c["volid"] for c in content or [] if c.get("content") == "snippets"),
+                "vmids_in_use": sorted(int(v["vmid"]) for v in vms or []), "bridges": list(PVE_BRIDGES)}
+    p = pve_create_params(a)
+    vmid = p["vmid"]
+    vms = await pve_call("GET", f"/nodes/{node}/qemu")
+    if any(int(v.get("vmid", 0)) == vmid for v in vms or []):
+        raise ValueError(f"VM {vmid} already exists; pve_create only makes new VMs")
+    log.info("[admin] pve_create vm %s %s", vmid, p["data"]["name"])
+    upid = await pve_call("POST", f"/nodes/{node}/qemu", p["data"], timeout=120)
+    status = await pve_task_wait(node, str(upid))
+    if status != "OK":
+        return {"vmid": vmid, "created": False, "task": upid, "status": status}
+    await pve_call("PUT", f"/nodes/{node}/qemu/{vmid}/resize", {"disk": "scsi0", "size": f"{p['disk_gb']}G"})
+    started = None
+    if a.get("start", True):
+        started = await pve_call("POST", f"/nodes/{node}/qemu/{vmid}/status/start")
+    return {"vmid": vmid, "created": True, "name": p["data"]["name"], "ip": p["data"]["ipconfig0"],
+            "disk_gb": p["disk_gb"], "started": bool(started),
+            "note": "cloud-init installs Docker and the guest agent on first boot (a few minutes)"}
+
+
 ADMIN_TOOLS = [
     {"name": "admin_hubs", "description": "Admin: the SmartThings hubs of this home (name, id, local IP, firmware) and "
      "the Edge drivers installed on each (name, packageKey, version, driverId).", "inputSchema": _OBJ},
@@ -7356,6 +7446,16 @@ ADMIN_TOOLS = [
      "change (vmid, action list|create, name, description). Rollback and delete are left to the owner.",
      "inputSchema": {"type": "object", "properties": {"vmid": {"type": "number"}, "action": {"type": "string"},
                      "name": {"type": "string"}, "description": {"type": "string"}}, "required": ["vmid"]}},
+    {"name": "pve_create", "description": "Admin: make a NEW Proxmox VM from a cloud image in local:import "
+     "(cloud-init, user david, vendor snippet with Docker and guest agent, starts on boot). action options = list "
+     "images, snippets and VM ids in use. Otherwise: vmid (unused), name, bridge vmbr0 (IoT, ip 192.168.2.x/24) or "
+     "vmbr20 (DMZ, ip 192.168.20.x/24), ip, image, memory_mb 512..8192 (1024), cores 1..4 (1), disk_gb 4..64 (10), "
+     "optional vendor, description, start (true). Never changes or removes an existing VM.",
+     "inputSchema": {"type": "object", "properties": {
+         "action": {"type": "string"}, "vmid": {"type": "number"}, "name": {"type": "string"},
+         "bridge": {"type": "string"}, "ip": {"type": "string"}, "image": {"type": "string"},
+         "memory_mb": {"type": "number"}, "cores": {"type": "number"}, "disk_gb": {"type": "number"},
+         "vendor": {"type": "string"}, "description": {"type": "string"}, "start": {"type": "boolean"}}}},
 ]
 ADMIN_NAMES = {t["name"] for t in ADMIN_TOOLS}
 
@@ -7392,6 +7492,8 @@ async def admin_tool(name: str, a: dict) -> Any:
         return await admin_pve_power(a)
     if name == "pve_snapshot":
         return await admin_pve_snapshot(a)
+    if name == "pve_create":
+        return await admin_pve_create(a)
     raise ValueError(name)
 
 
