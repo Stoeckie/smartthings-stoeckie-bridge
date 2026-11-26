@@ -23,6 +23,10 @@ services:
       TZ: Europe/Amsterdam
       # Allow the setup page from another computer on your LAN (https://<host ip>:8443/setup), e.g.:
       # STBRIDGE_SETUP_ALLOW: "192.168.1.20/32"
+      # Claude connector behind a reverse proxy on another machine (e.g. Caddy in a DMZ): listen on the LAN and
+      # believe X-Forwarded-For only from that proxy:
+      # STBRIDGE_CLAUDE_BIND: "0.0.0.0"
+      # STBRIDGE_TRUSTED_PROXIES: "192.168.20.10"
       # Optional instead of the setup page, only read on the first start:
       # ELECTROLUX_API_KEY: ""
       # ELECTROLUX_ACCESS_TOKEN: ""

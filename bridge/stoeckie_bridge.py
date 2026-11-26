@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-24b"
+VERSION = "2026-11-26a"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -6009,12 +6009,26 @@ def claude_redirect_ok(uri: str) -> bool:
     return u.scheme == "https" and any(host == h or host.endswith("." + h) for h in CLAUDE_REDIRECT_HOSTS)
 
 
+def claude_trusted_proxies() -> list[Any]:
+    """Reverse proxies whose X-Forwarded-For is believed, besides loopback (Tailscale Funnel on this pc): e.g. the
+    Caddy in the DMZ, STBRIDGE_TRUSTED_PROXIES="192.168.20.10"."""
+    out = []
+    for n in os.environ.get("STBRIDGE_TRUSTED_PROXIES", "").split(","):
+        try:
+            if n.strip():
+                out.append(ipaddress.ip_network(n.strip(), strict=False))
+        except ValueError:
+            log.warning("[claude] STBRIDGE_TRUSTED_PROXIES: not an address: %s", n.strip())
+    return out
+
+
 def claude_client_ip(req) -> str:
-    """The address of the caller. Behind Tailscale Funnel the request comes from this pc (loopback) with the real
-    address in X-Forwarded-For."""
+    """The address of the caller. Behind Tailscale Funnel the request comes from this pc (loopback), behind a
+    reverse proxy in STBRIDGE_TRUSTED_PROXIES from that proxy; the real address is then in X-Forwarded-For."""
     remote = req.remote or ""
     try:
-        loop = ipaddress.ip_address(remote).is_loopback
+        rip = ipaddress.ip_address(remote)
+        loop = rip.is_loopback or any(rip in n for n in claude_trusted_proxies())
     except ValueError:
         loop = False
     if loop:
@@ -6433,6 +6447,12 @@ ADMIN_SECRET_RES = (
 )
 ADMIN_STATE: dict[str, Any] = {"hubs": None, "hubs_t": 0.0, "busy": False}
 RESTART_CODE = 75  # run.cmd starts the bridge again for this exit code (and applies stoeckie_bridge.next.py)
+# run.sh (Docker image) does the same on Linux and exports STBRIDGE_RUNNER=sh. There the Python packages belong to
+# the image: an update that needs other packages is refused (rebuild the image on the host), run-tail.cmd is ignored.
+
+
+def runner_sh() -> bool:
+    return os.environ.get("STBRIDGE_RUNNER") == "sh"
 
 
 def admin_enabled(cfg: dict[str, Any] | None = None) -> bool:
@@ -6858,7 +6878,9 @@ async def _pkg_changes(req_old: bytes, req_new: bytes) -> list[dict[str, Any]]:
 
 async def admin_bridge_update(a: dict[str, Any]) -> dict[str, Any]:
     ref = admin_ref(a.get("ref"))
-    if not (HERE / "run.cmd").exists() or b"stoeckie_bridge.next.py" not in (HERE / "run.cmd").read_bytes():
+    sh = runner_sh()
+    if not sh and (not (HERE / "run.cmd").exists()
+                   or b"stoeckie_bridge.next.py" not in (HERE / "run.cmd").read_bytes()):
         raise RuntimeError("this installation can not update itself yet (run install-remote once from a pc)")
     files = await admin_fetch_tree(ADMIN_OWNERS[0], ADMIN_BRIDGE_REPO, ref)
     new = files.get("bridge/stoeckie_bridge.py")
@@ -6871,8 +6893,11 @@ async def admin_bridge_update(a: dict[str, Any]) -> dict[str, Any]:
     req_new = files.get("bridge/requirements.txt")
     req_old = (HERE / "requirements.txt").read_bytes() if (HERE / "requirements.txt").exists() else b""
     req_changed = req_new is not None and req_new.replace(b"\r", b"") != req_old.replace(b"\r", b"")
-    tail_new = files.get(RUN_TAIL)
-    tail_old = run_tail_now()
+    if sh and req_changed:
+        raise RuntimeError("this version needs other Python packages: in Docker those come with the image, so "
+                           "update on the host instead (git pull, then docker compose up -d --build)")
+    tail_new = None if sh else files.get(RUN_TAIL)
+    tail_old = None if sh else run_tail_now()
     tail_changed = False
     if tail_new is not None:
         tail_new = run_tail_check(tail_new)
@@ -6912,8 +6937,8 @@ async def admin_bridge_update(a: dict[str, Any]) -> dict[str, Any]:
     nxt.unlink(missing_ok=True)
     _restart_into(new, version, ref)
     return {"from": VERSION, "to": version, "ref": ref,
-            "note": "the bridge restarts in a few seconds; if the new version does not start, run.cmd puts the old "
-                    "one back. Check with bridge_log after a minute."}
+            "note": "the bridge restarts in a few seconds; if the new version does not start, "
+                    + ("run.sh" if sh else "run.cmd") + " puts the old one back. Check with bridge_log after a minute."}
 
 
 async def apply_staged_update() -> None:
@@ -7952,8 +7977,11 @@ async def claude_start() -> None:
     port = int(c.get("port") or CLAUDE_DEFAULT_PORT)
     runner = web.AppRunner(make_claude_app(), access_log=None)
     await runner.setup()
-    await web.TCPSite(runner, "127.0.0.1", port).start()   # only this pc: the tunnel forwards to it
-    log.info("[claude] MCP server on 127.0.0.1:%d (%s)", port, "on" if c.get("enabled") else "off until a password is set")
+    # only this pc (the tunnel forwards to it); behind a reverse proxy on another machine STBRIDGE_CLAUDE_BIND sets the
+    # address (e.g. the LAN address of the VM); the address filter then needs that proxy in STBRIDGE_TRUSTED_PROXIES
+    bind = os.environ.get("STBRIDGE_CLAUDE_BIND", "127.0.0.1").strip() or "127.0.0.1"
+    await web.TCPSite(runner, bind, port).start()
+    log.info("[claude] MCP server on %s:%d (%s)", bind, port, "on" if c.get("enabled") else "off until a password is set")
 
     async def keep_st_login():
         # a SmartThings refresh token expires after 29 days without use: read the locations twice a day, which
