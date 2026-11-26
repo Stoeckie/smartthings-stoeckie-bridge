@@ -3,7 +3,7 @@ FROM ${BASE}
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --require-hashes -r requirements.txt
-COPY stoeckie_bridge.py config.example.json run.sh ./
+COPY stoeckie_bridge.py config.example.json run.sh move_data.py ./
 ENV STBRIDGE_DATA=/data PYTHONUNBUFFERED=1 STBRIDGE_IN_DOCKER=1
 VOLUME /data
 EXPOSE 8787 8443
