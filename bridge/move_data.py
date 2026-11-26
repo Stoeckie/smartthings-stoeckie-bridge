@@ -7,6 +7,9 @@ the public key goes to the old machine, the old machine encrypts, the file goes 
                                                                           prints the public key
   old machine:  python move_data.py export <public.pem> <data dir> <out.enc>
   new machine:  python move_data.py import <dir>/move-key.pem <in.enc> <data dir> [--force]
+  or receive:   python move_data.py receive <dir>/move-key.pem <data dir> <port> <allowed net> [--public-url URL]
+                (waits for one POST /move from the allowed network, imports it, exits 0; the old machine's
+                move-remote.bat sends it there, so nothing has to be copied by hand while the old bridge is off)
 
 AES-256-GCM with a random key, that key wrapped with RSA-OAEP (SHA-256, 3072 bit). Only names and a SHA-256 of the
 encrypted file are printed, never contents. Uses only the `cryptography` package the bridge already needs.
@@ -109,11 +112,72 @@ def import_(key_pem: Path, enc: Path, data: Path, force: bool) -> None:
     print(f"{len(names)} files in {data}")
 
 
+def set_public_url(data: Path, url: str) -> None:
+    """The address Claude reaches the bridge on (OAuth metadata): changes with the move from Funnel to own domain."""
+    import json
+    p = data / "config.json"
+    cfg = json.loads(p.read_text(encoding="utf-8"))
+    cfg.setdefault("claude", {})["public_url"] = url.rstrip("/")
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    os.replace(tmp, p)
+    print(f"claude.public_url = {url}")
+
+
+def receive(key_pem: Path, data: Path, port: int, allow: str, public_url: str | None) -> None:
+    import ipaddress
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    net = ipaddress.ip_network(allow, strict=False)
+    if (data / "config.json").exists():
+        raise SystemExit(f"{data}/config.json exists: this machine already has a bridge")
+    done: dict[str, str] = {}
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):  # noqa: D401, ANN001
+            print("  " + self.client_address[0] + " " + (fmt % args), flush=True)
+
+        def do_POST(self):  # noqa: N802
+            if ipaddress.ip_address(self.client_address[0]) not in net or self.path != "/move" or done:
+                self.send_error(403)
+                return
+            n = int(self.headers.get("Content-Length") or 0)
+            if not 0 < n <= 64 * 1024 * 1024:
+                self.send_error(413)
+                return
+            tmp = data / ".move.enc"
+            data.mkdir(parents=True, exist_ok=True)
+            tmp.write_bytes(self.rfile.read(n))
+            try:
+                import_(key_pem, tmp, data, force=False)
+                if public_url:
+                    set_public_url(data, public_url)
+            except (SystemExit, ValueError, OSError) as e:  # wrong file: keep waiting for the right one
+                self.send_error(400, str(e)[:200])
+                return
+            finally:
+                tmp.unlink(missing_ok=True)
+            done["ok"] = "1"
+            body = b"imported\n"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = HTTPServer(("0.0.0.0", port), H)
+    print(f"waiting for POST /move on port {port} from {net}", flush=True)
+    while not done:
+        srv.handle_request()
+    srv.server_close()
+
+
 def main(argv: list[str]) -> None:
     if len(argv) >= 2 and argv[0] == "keygen":
         keygen(Path(argv[1]))
     elif len(argv) == 4 and argv[0] == "export":
         export(Path(argv[1]), Path(argv[2]), Path(argv[3]))
+    elif len(argv) in (5, 7) and argv[0] == "receive":
+        url = argv[6] if len(argv) == 7 and argv[5] == "--public-url" else None
+        receive(Path(argv[1]), Path(argv[2]), int(argv[3]), argv[4], url)
     elif len(argv) in (4, 5) and argv[0] == "import":
         import_(Path(argv[1]), Path(argv[2]), Path(argv[3]), force=argv[4:] == ["--force"])
     else:

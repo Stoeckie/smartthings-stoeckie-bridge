@@ -3,11 +3,13 @@
 # remote-cred.xml next to this script). Needs move-pub.pem from the new machine here (python move_data.py keygen).
 #
 #   move-remote.bat          stop and switch off the bridge on the target, export its data encrypted to move.enc here
+#   move-remote.bat export http://<docker host>:8790/move
+#                            same, then send move.enc to the new machine (move_data.py receive waits for it there)
 #   move-remote.bat undo     switch the bridge on the target on again (only if the new machine does not run it)
 #
 # Never run both bridges with the same data: the Electrolux login rotates its refresh token.
 # Result in move-remote.txt; only file names and a hash are written, never contents.
-param([string]$Mode = "export")
+param([string]$Mode = "export", [string]$SendTo = "")
 $ErrorActionPreference = "Stop"
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $out = Join-Path $dir "move-remote.txt"
@@ -49,8 +51,14 @@ try {
         } -ArgumentList $remoteDir, $taskName
         Copy-Item "$remoteDir\move.enc" -Destination (Join-Path $dir "move.enc") -FromSession $s -Force
         Invoke-Command -Session $s { param($d) Remove-Item "$d\move.enc", "$d\move-pub.pem" -Force } -ArgumentList $remoteDir
-        ("OK export " + (Get-Date -Format s)), $r, ("move.enc here: " + (Get-Item (Join-Path $dir "move.enc")).Length + " bytes") |
-            Out-File -Encoding utf8 $out
+        $lines = @(("OK export " + (Get-Date -Format s)), $r, ("move.enc here: " + (Get-Item (Join-Path $dir "move.enc")).Length + " bytes"))
+        if ($SendTo) {
+            $resp = Invoke-WebRequest -UseBasicParsing -Method Post -Uri $SendTo -InFile (Join-Path $dir "move.enc") `
+                -ContentType "application/octet-stream" -TimeoutSec 120
+            $lines += "sent to ${SendTo}: $($resp.StatusCode) $($resp.Content.Trim())"
+            Remove-Item (Join-Path $dir "move.enc") -Force
+        }
+        $lines | Out-File -Encoding utf8 $out
     } finally { Remove-PSSession $s }
 } catch {
     ("FOUT " + (Get-Date -Format s) + " " + $_.Exception.Message) | Out-File -Encoding utf8 $out
