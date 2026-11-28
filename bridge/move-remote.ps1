@@ -55,7 +55,9 @@ try {
         if ($SendTo) {
             $resp = Invoke-WebRequest -UseBasicParsing -Method Post -Uri $SendTo -InFile (Join-Path $dir "move.enc") `
                 -ContentType "application/octet-stream" -TimeoutSec 120
-            $lines += "sent to ${SendTo}: $($resp.StatusCode) $($resp.Content.Trim())"
+            # Content is a byte array when the answer has no text content type (Windows PowerShell 5)
+            $body = if ($resp.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($resp.Content) } else { "$($resp.Content)" }
+            $lines += "sent to ${SendTo}: $($resp.StatusCode) $($body.Trim())"
             Remove-Item (Join-Path $dir "move.enc") -Force
         }
         $lines | Out-File -Encoding utf8 $out
