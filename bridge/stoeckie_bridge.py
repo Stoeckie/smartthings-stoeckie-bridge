@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-28b"
+VERSION = "2026-11-28c"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -7573,6 +7573,11 @@ ADMIN_TOOLS = [
          "vendor": {"type": "string"}, "description": {"type": "string"}, "start": {"type": "boolean"}}}},
 ]
 ADMIN_NAMES = {t["name"] for t in ADMIN_TOOLS}
+BRIDGE_TOOL = {"name": "bridge_tool", "description": "Any tool of this bridge by name, also one that a bridge "
+               "update added after this connector was connected (Claude keeps the tool list until you connect again). "
+               "tool = help (default) lists every tool with its arguments and the bridge version; otherwise tool = the "
+               "name and args = its arguments. Same rights and checks as calling the tool itself.",
+               "inputSchema": {"type": "object", "properties": {"tool": {"type": "string"}, "args": {"type": "object"}}}}
 
 
 async def admin_tool(name: str, a: dict) -> Any:
@@ -7630,14 +7635,23 @@ async def claude_rpc(m: dict) -> dict | None:
     if method == "tools/list":
         # the admin tools are always listed (Claude keeps the list until the connector is connected again); when
         # they are switched off on the setup page a call answers that they are off
-        return {"jsonrpc": "2.0", "id": mid, "result": {"tools": CLAUDE_TOOLS + ADMIN_TOOLS}}
+        return {"jsonrpc": "2.0", "id": mid, "result": {"tools": CLAUDE_TOOLS + ADMIN_TOOLS + [BRIDGE_TOOL]}}
     if method == "tools/call":
         name = params.get("name")
+        args = params.get("arguments") or {}
+        if name == BRIDGE_TOOL["name"]:
+            # one tool that never changes: Claude keeps the tool list of a connector until it is connected again, so
+            # a tool (or an argument) that a bridge update added is reached through this one
+            name = str(args.get("tool") or "help")
+            args = args.get("args") if isinstance(args.get("args"), dict) else {}
+            if name == "help":
+                txt = json.dumps({"version": VERSION, "tools": CLAUDE_TOOLS + ADMIN_TOOLS}, ensure_ascii=False)
+                return {"jsonrpc": "2.0", "id": mid, "result": {"content": [{"type": "text", "text": txt}]}}
         admin = name in ADMIN_NAMES
         if name not in {t["name"] for t in CLAUDE_TOOLS} and not admin:
             return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": f"unknown tool {name}"}}
         try:
-            r = await (admin_tool if admin else st_tool)(name, params.get("arguments") or {})
+            r = await (admin_tool if admin else st_tool)(name, args)
             return {"jsonrpc": "2.0", "id": mid, "result": {"content": [{"type": "text", "text": json.dumps(r, ensure_ascii=False)}]}}
         except Exception as ex:  # noqa: BLE001
             log.info("[claude] tool %s failed: %s", name, str(ex)[:160])

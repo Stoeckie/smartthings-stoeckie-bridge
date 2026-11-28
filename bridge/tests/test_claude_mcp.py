@@ -79,7 +79,7 @@ def test_oauth_and_filter():
         tok = await connect(c)
         h = {**ANTH, "Authorization": "Bearer " + tok["access_token"]}
         r = await c.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, headers=h)
-        assert r.status == 200 and len((await r.json())["result"]["tools"]) == 16 + len(sb.ADMIN_TOOLS)
+        assert r.status == 200 and len((await r.json())["result"]["tools"]) == 16 + len(sb.ADMIN_TOOLS) + 1
         r = await c.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
                          headers={**EVIL, "Authorization": h["Authorization"]})
         assert r.status == 403
@@ -154,3 +154,31 @@ def test_tools_with_fake_smartthings():
             pass
         assert [p for p, _ in sent] == ["/devices/d3/commands", "/devices/d1/commands"]
     run(main())
+
+
+def test_bridge_tool_reaches_any_tool(monkeypatch):
+    seen = []
+
+    async def st_tool(name, a):
+        seen.append(("st", name, a))
+        return {"ok": name}
+
+    async def admin_tool(name, a):
+        seen.append(("admin", name, a))
+        return {"ok": name}
+    monkeypatch.setattr(sb, "st_tool", st_tool)
+    monkeypatch.setattr(sb, "admin_tool", admin_tool)
+
+    def call(args):
+        return asyncio.run(sb.claude_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                          "params": {"name": "bridge_tool", "arguments": args}}))
+    lst = asyncio.run(sb.claude_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))["result"]["tools"]
+    assert lst[-1]["name"] == "bridge_tool"
+    h = json.loads(call({})["result"]["content"][0]["text"])
+    assert h["version"] == sb.VERSION and {"device_rename", "list_devices"} <= {t["name"] for t in h["tools"]}
+    assert "bridge_tool" not in {t["name"] for t in h["tools"]}
+    assert json.loads(call({"tool": "device_rename", "args": {"device": "x", "room": "Hall"}})["result"]["content"][0]["text"]) == {"ok": "device_rename"}
+    call({"tool": "list_rooms"})
+    assert seen == [("admin", "device_rename", {"device": "x", "room": "Hall"}), ("st", "list_rooms", {})]
+    assert call({"tool": "bridge_tool"})["error"]["code"] == -32602
+    assert call({"tool": "nope"})["error"]["code"] == -32602
