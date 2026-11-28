@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-26a"
+VERSION = "2026-11-28a"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -7215,6 +7215,26 @@ async def admin_st_get(a: dict[str, Any]) -> Any:
 
 
 
+async def admin_device_rename(a: dict[str, Any]) -> dict[str, Any]:
+    """Give one device another name (label). Nothing else of the device changes."""
+    c = await ST_CLOUD.load(True)
+    d = st_find_device(c, str(a.get("device") or ""))
+    label = " ".join(str(a.get("name") or "").split())
+    if not label:
+        raise ValueError("name is required")
+    if len(label) > 80 or any(ord(ch) < 32 for ch in label):
+        raise ValueError("name: at most 80 characters, no control characters")
+    old = _label(d)
+    clash = [x for x in c.get("devices") or [] if x is not d and _norm(_label(x)) == _norm(label)]
+    if clash:
+        raise ValueError(f"another device is already called {_label(clash[0])}")
+    await admin_st_raw("PUT", f"https://api.smartthings.com/devices/{d['deviceId']}", body={"label": label})
+    c = await ST_CLOUD.load(True)
+    n = st_find_device(c, d["deviceId"])
+    log.info("[admin] device %s is now called %s", old, _label(n))
+    return {"id": d["deviceId"], "was": old, "now": _label(n), "room": _room(c, n.get("roomId"))}
+
+
 # ---------------------------------------------------------------- Proxmox (admin tools for Claude)
 # A Proxmox API token (user claude@pve, role ClaudeVM: VM audit, power, snapshot, guest agent; no host shell, no
 # users) is pasted on the Claude part of the setup page. The self-signed certificate of Proxmox is pinned when the
@@ -7457,6 +7477,10 @@ ADMIN_TOOLS = [
      "/presentation?presentationId=..&manufacturerName=.., /presentation/deviceconfig?.., "
      "/capabilities/<namespace.name>/<version>[/presentation|/i18n/<tag>], /deviceprofiles/<id>.",
      "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
+    {"name": "device_rename", "description": "Admin: give a device another name in SmartThings (device = name or "
+     "id, name = the new name). Routines, room and the device itself stay as they are.",
+     "inputSchema": {"type": "object", "properties": {"device": {"type": "string"}, "name": {"type": "string"}},
+                     "required": ["device", "name"]}},
     {"name": "pve_vms", "description": "Admin: Proxmox host Stoeck: node status and every VM (vmid, name, status, "
      "cpu, memory, uptime).", "inputSchema": _OBJ},
     {"name": "pve_exec", "description": "Admin: run a bash command inside a Proxmox VM through the QEMU guest agent "
@@ -7509,6 +7533,8 @@ async def admin_tool(name: str, a: dict) -> Any:
         return await admin_capability(a)
     if name == "st_get":
         return await admin_st_get(a)
+    if name == "device_rename":
+        return await admin_device_rename(a)
     if name == "pve_vms":
         return await admin_pve_vms(a)
     if name == "pve_exec":

@@ -334,3 +334,29 @@ def test_capability_put_new_capability_not_ready(monkeypatch):
     assert refuse["n"] == 0
     assert ("PUT", "/capabilities/silvervalley08660.carBattery/1/i18n/en") in calls
     assert ("POST", "/capabilities/silvervalley08660.carBattery/1/i18n") in calls
+
+
+def test_device_rename(monkeypatch):
+    devs = [{"deviceId": "d1", "label": "Plug Kitchen Fridge", "roomId": "r1"},
+            {"deviceId": "d2", "label": "Light Hall", "roomId": "r1"}]
+    cache = {"loc": {"locationId": "L"}, "rooms": [{"roomId": "r1", "name": "Kitchen"}], "devices": devs}
+    calls = []
+
+    async def load(force=False):
+        return cache
+
+    async def fake(method, url, data=None, ctype=None, body=None):
+        calls.append((method, url, body))
+        devs[0]["label"] = body["label"]
+        return {}
+    monkeypatch.setattr(sb.ST_CLOUD, "load", load)
+    monkeypatch.setattr(sb, "admin_st_raw", fake)
+    r = asyncio.run(sb.admin_device_rename({"device": "Plug Kitchen Fridge", "name": "  Light  Kitchen Fridge "}))
+    assert r == {"id": "d1", "was": "Plug Kitchen Fridge", "now": "Light Kitchen Fridge", "room": "Kitchen"}
+    assert calls == [("PUT", "https://api.smartthings.com/devices/d1", {"label": "Light Kitchen Fridge"})]
+    for bad in [{"device": "d1", "name": ""}, {"device": "d1", "name": "x" * 81}, {"device": "d1", "name": "a\x01b"},
+                {"device": "d1", "name": "light hall"}, {"device": "", "name": "x"}]:
+        with pytest.raises(ValueError):
+            asyncio.run(sb.admin_device_rename(bad))
+    assert len(calls) == 1
+    assert "device_rename" in sb.ADMIN_NAMES
