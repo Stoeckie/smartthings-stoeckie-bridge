@@ -83,7 +83,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-VERSION = "2026-11-28a"
+VERSION = "2026-11-28b"
 HERE = Path(__file__).resolve().parent
 # Data folder: next to the script on Windows, /data in the Docker image (STBRIDGE_DATA)
 DATA = Path(os.environ.get("STBRIDGE_DATA") or HERE)
@@ -7216,23 +7216,88 @@ async def admin_st_get(a: dict[str, Any]) -> Any:
 
 
 async def admin_device_rename(a: dict[str, Any]) -> dict[str, Any]:
-    """Give one device another name (label). Nothing else of the device changes."""
+    """Give one device another name (label) and/or put it in another room. Nothing else of the device changes."""
     c = await ST_CLOUD.load(True)
     d = st_find_device(c, str(a.get("device") or ""))
     label = " ".join(str(a.get("name") or "").split())
-    if not label:
-        raise ValueError("name is required")
+    room = " ".join(str(a.get("room") or "").split())
+    if not label and not room:
+        raise ValueError("name or room is required")
     if len(label) > 80 or any(ord(ch) < 32 for ch in label):
         raise ValueError("name: at most 80 characters, no control characters")
-    old = _label(d)
-    clash = [x for x in c.get("devices") or [] if x is not d and _norm(_label(x)) == _norm(label)]
-    if clash:
-        raise ValueError(f"another device is already called {_label(clash[0])}")
-    await admin_st_raw("PUT", f"https://api.smartthings.com/devices/{d['deviceId']}", body={"label": label})
+    old = {"name": _label(d), "room": _room(c, d.get("roomId"))}
+    body: dict[str, Any] = {}
+    if label and label != _label(d):
+        clash = [x for x in c.get("devices") or [] if x is not d and _norm(_label(x)) == _norm(label)]
+        if clash:
+            raise ValueError(f"another device is already called {_label(clash[0])}")
+        body["label"] = label
+    if room:
+        hit = [r for r in c.get("rooms") or [] if r.get("roomId") == room or _norm(r.get("name")) == _norm(room)]
+        if len(hit) != 1:
+            raise ValueError("room: one of " + ", ".join(sorted(str(r.get("name")) for r in c.get("rooms") or [])))
+        if hit[0]["roomId"] != d.get("roomId"):
+            body["roomId"] = hit[0]["roomId"]
+    if body:
+        await admin_st_raw("PUT", f"https://api.smartthings.com/devices/{d['deviceId']}", body=body)
     c = await ST_CLOUD.load(True)
     n = st_find_device(c, d["deviceId"])
-    log.info("[admin] device %s is now called %s", old, _label(n))
-    return {"id": d["deviceId"], "was": old, "now": _label(n), "room": _room(c, n.get("roomId"))}
+    now = {"name": _label(n), "room": _room(c, n.get("roomId"))}
+    log.info("[admin] device %s (%s) is now %s (%s)", old["name"], old["room"], now["name"], now["room"])
+    return {"id": d["deviceId"], "was": old, "now": now}
+
+
+NEW_DEVICES_FILE = DATA / "known-devices.json"
+NEW_DEVICES_EVERY = 600
+
+
+def new_devices_diff(known: list[str] | None, devices: list[dict]) -> tuple[list[str], list[dict]]:
+    """(the ids to remember, the devices that are new). No list yet: everything is known, nothing is new."""
+    ids = [d["deviceId"] for d in devices if d.get("deviceId")]
+    if known is None:
+        return ids, []
+    seen = set(known)
+    return sorted(seen | set(ids)), [d for d in devices if d.get("deviceId") and d["deviceId"] not in seen]
+
+
+async def new_devices_once() -> list[dict]:
+    try:
+        known = json.loads(NEW_DEVICES_FILE.read_text(encoding="utf-8"))
+        known = known if isinstance(known, list) else None
+    except (OSError, ValueError):
+        known = None
+    c = await ST_CLOUD.load(True)
+    ids, new = new_devices_diff(known, c.get("devices") or [])
+    if known is None or new:
+        tmp = NEW_DEVICES_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(ids), encoding="utf-8")
+        os.replace(tmp, NEW_DEVICES_FILE)
+    if known is None:
+        log.info("[claude] new device watch: %d device(s) known from now on", len(ids))
+    for d in new:
+        log.info("[claude] new device in SmartThings: %s (%s, room %s)", _label(d), d.get("type"),
+                 _room(c, d.get("roomId")) or "none")
+    if new and ECHO_NOW is not None:
+        names = ", ".join(_label(d) for d in new[:5]) + (f" and {len(new) - 5} more" if len(new) > 5 else "")
+        try:
+            await ECHO_NOW.push_to_phone("SmartThings: new device" + ("s" if len(new) > 1 else ""),
+                                         f"New in SmartThings: {names}. Ask Claude to name it and put it in a room.")
+        except Exception as ex:  # noqa: BLE001
+            log.warning("[claude] new device notification failed: %s", str(ex)[:160])
+    return new
+
+
+async def new_devices_loop() -> None:
+    """claude.notify_new_devices: tell the owner (Alexa app notification, bridge log) when a device was added to the
+    home, so it can get its name and room without looking for it."""
+    await asyncio.sleep(90)
+    while True:
+        try:
+            if claude_cfg().get("notify_new_devices") and STCloud.configured():
+                await new_devices_once()
+        except Exception as ex:  # noqa: BLE001
+            log.warning("[claude] new device watch: %s", str(ex)[:160])
+        await asyncio.sleep(NEW_DEVICES_EVERY)
 
 
 # ---------------------------------------------------------------- Proxmox (admin tools for Claude)
@@ -7477,10 +7542,11 @@ ADMIN_TOOLS = [
      "/presentation?presentationId=..&manufacturerName=.., /presentation/deviceconfig?.., "
      "/capabilities/<namespace.name>/<version>[/presentation|/i18n/<tag>], /deviceprofiles/<id>.",
      "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
-    {"name": "device_rename", "description": "Admin: give a device another name in SmartThings (device = name or "
-     "id, name = the new name). Routines, room and the device itself stay as they are.",
-     "inputSchema": {"type": "object", "properties": {"device": {"type": "string"}, "name": {"type": "string"}},
-                     "required": ["device", "name"]}},
+    {"name": "device_rename", "description": "Admin: give a device another name in SmartThings and/or put it in "
+     "another room (device = name or id, name = the new name, room = name of an existing room; one of the two is "
+     "enough). Routines and the device itself stay as they are.",
+     "inputSchema": {"type": "object", "properties": {"device": {"type": "string"}, "name": {"type": "string"},
+                     "room": {"type": "string"}}, "required": ["device"]}},
     {"name": "pve_vms", "description": "Admin: Proxmox host Stoeck: node status and every VM (vmid, name, status, "
      "cpu, memory, uptime).", "inputSchema": _OBJ},
     {"name": "pve_exec", "description": "Admin: run a bash command inside a Proxmox VM through the QEMU guest agent "
@@ -8022,6 +8088,7 @@ async def claude_start() -> None:
             await asyncio.sleep(12 * 3600)
 
     asyncio.create_task(keep_st_login())
+    asyncio.create_task(new_devices_loop())
 
 
 

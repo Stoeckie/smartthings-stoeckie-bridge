@@ -339,7 +339,8 @@ def test_capability_put_new_capability_not_ready(monkeypatch):
 def test_device_rename(monkeypatch):
     devs = [{"deviceId": "d1", "label": "Plug Kitchen Fridge", "roomId": "r1"},
             {"deviceId": "d2", "label": "Light Hall", "roomId": "r1"}]
-    cache = {"loc": {"locationId": "L"}, "rooms": [{"roomId": "r1", "name": "Kitchen"}], "devices": devs}
+    cache = {"loc": {"locationId": "L"}, "rooms": [{"roomId": "r1", "name": "Kitchen"}, {"roomId": "r2", "name": "Hall"}],
+             "devices": devs}
     calls = []
 
     async def load(force=False):
@@ -347,16 +348,47 @@ def test_device_rename(monkeypatch):
 
     async def fake(method, url, data=None, ctype=None, body=None):
         calls.append((method, url, body))
-        devs[0]["label"] = body["label"]
+        devs[0].update(body)
         return {}
     monkeypatch.setattr(sb.ST_CLOUD, "load", load)
     monkeypatch.setattr(sb, "admin_st_raw", fake)
     r = asyncio.run(sb.admin_device_rename({"device": "Plug Kitchen Fridge", "name": "  Light  Kitchen Fridge "}))
-    assert r == {"id": "d1", "was": "Plug Kitchen Fridge", "now": "Light Kitchen Fridge", "room": "Kitchen"}
+    assert r == {"id": "d1", "was": {"name": "Plug Kitchen Fridge", "room": "Kitchen"},
+                 "now": {"name": "Light Kitchen Fridge", "room": "Kitchen"}}
     assert calls == [("PUT", "https://api.smartthings.com/devices/d1", {"label": "Light Kitchen Fridge"})]
-    for bad in [{"device": "d1", "name": ""}, {"device": "d1", "name": "x" * 81}, {"device": "d1", "name": "a\x01b"},
-                {"device": "d1", "name": "light hall"}, {"device": "", "name": "x"}]:
+    for bad in [{"device": "d1"}, {"device": "d1", "name": "x" * 81}, {"device": "d1", "name": "a\x01b"},
+                {"device": "d1", "name": "light hall"}, {"device": "", "name": "x"}, {"device": "d1", "room": "Attic"}]:
         with pytest.raises(ValueError):
             asyncio.run(sb.admin_device_rename(bad))
     assert len(calls) == 1
+    r = asyncio.run(sb.admin_device_rename({"device": "d1", "room": "hall"}))
+    assert r["now"] == {"name": "Light Kitchen Fridge", "room": "Hall"} and calls[-1][2] == {"roomId": "r2"}
+    asyncio.run(sb.admin_device_rename({"device": "d1", "room": "Hall", "name": "Light Kitchen Fridge"}))
+    assert len(calls) == 2   # nothing to change, nothing sent
     assert "device_rename" in sb.ADMIN_NAMES
+
+
+def test_new_devices(monkeypatch, tmp_path):
+    a, b, c = ({"deviceId": x, "label": x.upper()} for x in "abc")
+    assert sb.new_devices_diff(None, [a, b]) == (["a", "b"], [])
+    assert sb.new_devices_diff(["a", "b"], [a, b]) == (["a", "b"], [])
+    assert sb.new_devices_diff(["a", "b"], [a, c]) == (["a", "b", "c"], [c])   # a removed device stays known
+    devs = [a, b]
+    pushed = []
+
+    async def load(force=False):
+        return {"devices": devs, "rooms": []}
+
+    class Echo:
+        async def push_to_phone(self, title, message):
+            pushed.append((title, message))
+            return True
+    monkeypatch.setattr(sb.ST_CLOUD, "load", load)
+    monkeypatch.setattr(sb, "NEW_DEVICES_FILE", tmp_path / "known-devices.json")
+    monkeypatch.setattr(sb, "ECHO_NOW", Echo())
+    assert asyncio.run(sb.new_devices_once()) == [] and pushed == []      # first run: only remember
+    assert asyncio.run(sb.new_devices_once()) == []
+    devs.append(c)
+    assert asyncio.run(sb.new_devices_once()) == [c]
+    assert pushed == [("SmartThings: new device", "New in SmartThings: C. Ask Claude to name it and put it in a room.")]
+    assert asyncio.run(sb.new_devices_once()) == [] and len(pushed) == 1
